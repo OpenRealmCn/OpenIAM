@@ -22,16 +22,34 @@ type AuditRecorder interface {
 	RecordLogin(ctx context.Context, user *domain.User, success bool, ip, userAgent string)
 }
 
+// AuthUserRepository is the narrow slice of the identity repository that
+// authentication depends on. Declaring it here (consumer side) keeps the
+// service testable without a live MySQL connection.
+type AuthUserRepository interface {
+	FindByLogin(ctx context.Context, login string) (*domain.User, error)
+	FindByEmail(ctx context.Context, email string) (*domain.User, error)
+	FindByID(ctx context.Context, id uint64) (*domain.User, error)
+	Create(ctx context.Context, user *domain.User) error
+	RecordLoginFailure(ctx context.Context, id uint64, lockUntil *time.Time) error
+	RecordLoginSuccess(ctx context.Context, id uint64, at time.Time) error
+}
+
+// AuthSessionManager is the subset of the session manager used during login.
+type AuthSessionManager interface {
+	Create(ctx context.Context, userID uint64, publicID string) (*session.Data, error)
+	Revoke(ctx context.Context, sessionID string) error
+}
+
 type AuthService struct {
-	users    *repository.Repository
-	sessions *session.Manager
+	users    AuthUserRepository
+	sessions AuthSessionManager
 	security config.SecurityConfig
 	audit    AuditRecorder
 }
 
 func NewAuthService(
-	users *repository.Repository,
-	sessions *session.Manager,
+	users AuthUserRepository,
+	sessions AuthSessionManager,
 	security config.SecurityConfig,
 	audit AuditRecorder,
 ) *AuthService {

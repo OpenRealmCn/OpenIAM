@@ -9,6 +9,7 @@ import (
 	"github.com/openrealm/openiam/backend/internal/modules/identity/service"
 	"github.com/openrealm/openiam/backend/internal/modules/session"
 	"github.com/openrealm/openiam/backend/internal/platform/middleware"
+	"github.com/openrealm/openiam/backend/internal/platform/ratelimit"
 	"github.com/openrealm/openiam/backend/internal/platform/response"
 )
 
@@ -20,6 +21,7 @@ type AuthHandler struct {
 	auth       *service.AuthService
 	sessions   *session.Manager
 	perms      PermissionLister
+	limiter    *ratelimit.Limiter
 	cookieName string
 }
 
@@ -27,9 +29,16 @@ func NewAuthHandler(
 	auth *service.AuthService,
 	sessions *session.Manager,
 	perms PermissionLister,
+	limiter *ratelimit.Limiter,
 	cookieName string,
 ) *AuthHandler {
-	return &AuthHandler{auth: auth, sessions: sessions, perms: perms, cookieName: cookieName}
+	return &AuthHandler{
+		auth:       auth,
+		sessions:   sessions,
+		perms:      perms,
+		limiter:    limiter,
+		cookieName: cookieName,
+	}
 }
 
 func (h *AuthHandler) Login(c *gin.Context) {
@@ -37,6 +46,22 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.Error(c, http.StatusBadRequest, "VALIDATION_FAILED", "Login and password are required")
 		return
+	}
+
+	// Throttle before touching credentials so brute-force attempts are cheap to
+	// reject. Account lockout still applies per user; this adds an IP dimension
+	// so distributed attempts against many accounts are also bounded.
+	if h.limiter != nil {
+		ctx := c.Request.Context()
+		allowed, err := h.limiter.AllowLogin(ctx, c.ClientIP(), req.Login)
+		if err != nil {
+			response.Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to complete login")
+			return
+		}
+		if !allowed {
+			response.Error(c, http.StatusTooManyRequests, "RATE_LIMITED", "Too many login attempts, try again later")
+			return
+		}
 	}
 
 	sess, err := h.auth.Login(c.Request.Context(), req.Login, req.Password, c.ClientIP(), c.Request.UserAgent())

@@ -20,6 +20,7 @@ import (
 	"github.com/openrealm/openiam/backend/internal/platform/config"
 	"github.com/openrealm/openiam/backend/internal/platform/mailer"
 	"github.com/openrealm/openiam/backend/internal/platform/middleware"
+	"github.com/openrealm/openiam/backend/internal/platform/ratelimit"
 	"github.com/openrealm/openiam/backend/internal/platform/response"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
@@ -34,6 +35,7 @@ func New(router *gin.Engine, cfg config.Config, db *gorm.DB, cache *redis.Client
 	registerHealthRoutes(router, db, cache)
 
 	sessions := session.NewManager(cache, cfg.Session, cfg.Redis.KeyPrefix)
+	limiter := ratelimit.New(cache, cfg.Redis.KeyPrefix)
 
 	auditSvc := audit.NewService(db)
 
@@ -49,7 +51,7 @@ func New(router *gin.Engine, cfg config.Config, db *gorm.DB, cache *redis.Client
 	roleSvc := rbacservice.NewRoleService(rbacRepo)
 	grantSvc := rbacservice.NewGrantService(rbacRepo, checker)
 
-	authHandler := identityhttp.NewAuthHandler(authSvc, sessions, checker, cfg.Session.CookieName)
+	authHandler := identityhttp.NewAuthHandler(authSvc, sessions, checker, limiter, cfg.Session.CookieName)
 	userHandler := identityhttp.NewUserHandler(userSvc, checker)
 	rbacHandler := rbachttp.NewHandler(roleSvc, grantSvc, userRepo)
 	mailHandler := system.NewMailHandler(mail)

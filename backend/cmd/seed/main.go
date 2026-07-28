@@ -125,9 +125,15 @@ func seedAdmin(ctx context.Context, db *gorm.DB, cfg config.Config) error {
 	}
 
 	password := os.Getenv("OPENIAM_ADMIN_PASSWORD")
+	generated := false
 	if password == "" {
-		password = "ChangeMe!234"
-		log.Println("warn: OPENIAM_ADMIN_PASSWORD not set, using insecure default for the admin account")
+		if cfg.Environment == "production" {
+			return errors.New("OPENIAM_ADMIN_PASSWORD is required when OPENIAM_ENV=production")
+		}
+		// Outside production, generate a single-use random password rather than
+		// falling back to a well-known constant. It is printed once below.
+		password = crypto.Token(24)
+		generated = true
 	}
 	if len(password) < cfg.Security.PasswordMinLength {
 		return errors.New("OPENIAM_ADMIN_PASSWORD does not meet the password policy")
@@ -162,6 +168,9 @@ func seedAdmin(ctx context.Context, db *gorm.DB, cfg config.Config) error {
 			}
 		} else {
 			log.Printf("admin user seeded: %s", username)
+			if generated {
+				log.Printf("generated admin password (shown once, store it now): %s", password)
+			}
 		}
 	}
 

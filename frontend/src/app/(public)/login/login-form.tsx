@@ -7,6 +7,7 @@ import { ArrowLeft } from "lucide-react";
 
 import { BrandMark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
+import { safeReturnURL } from "@/lib/utils";
 
 const isDev = process.env.NODE_ENV === "development";
 const apiBaseUrl =
@@ -50,10 +51,7 @@ export function LoginForm({
   const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
 
-  const target =
-    returnTo && returnTo.startsWith("/") && !returnTo.startsWith("//")
-      ? returnTo
-      : "/dashboard";
+  const target = safeReturnURL(returnTo, "/dashboard");
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
