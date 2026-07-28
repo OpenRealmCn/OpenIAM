@@ -2,7 +2,7 @@
 
 OpenIAM is OpenRealm's private identity and access management platform. The repository contains a modular Go control plane and a separate Next.js management interface, with MySQL for durable identity data and Redis for ephemeral security state.
 
-The current milestone is a verified project foundation. It intentionally does not accept credentials yet; authentication, RBAC enforcement, and OAuth/OIDC protocol endpoints will be implemented on top of the established module boundaries.
+The backend implements real authentication (Argon2id credentials with account lockout), opaque Redis sessions with CSRF protection, RBAC enforcement middleware, and administrative APIs for users, roles, permissions, and grants. OAuth 2.1 / OpenID Connect protocol endpoints are the next milestone and build on the existing schema and module boundaries.
 
 ## Stack
 
@@ -49,6 +49,20 @@ Start MySQL and Redis:
 docker compose up -d mysql redis
 ```
 
+Apply the schema and seed the initial administrator, permission catalog, and roles:
+
+```bash
+cd backend
+go run ./cmd/migrate
+go run ./cmd/seed
+```
+
+The seed creates an `admin` account. Set its password explicitly (default is an insecure placeholder):
+
+```bash
+OPENIAM_ADMIN_PASSWORD='your-strong-password' go run ./cmd/seed
+```
+
 Start the backend in a second terminal:
 
 ```bash
@@ -90,22 +104,21 @@ npm audit --omit=dev
 
 ## Security Baseline
 
-- Browser authentication will use an opaque `HttpOnly` session cookie.
+- Browser authentication uses an opaque `HttpOnly` session cookie stored in Redis.
+- Passwords are hashed with Argon2id; repeated failures trigger timed account lockout.
+- State-changing requests require a CSRF token bound to the session.
 - OAuth applications will use Authorization Code with PKCE S256.
 - OpenID Connect will provide login and SSO semantics.
 - The Go API is the final enforcement point for every RBAC decision.
 - Client secrets, tokens, passwords, and signing keys are never stored in plaintext.
-- Login controls remain disabled until the credential and session services are complete.
 
-See [`docs/architecture/overview.md`](docs/architecture/overview.md), [`docs/architecture/authentication-flow.md`](docs/architecture/authentication-flow.md), and [`docs/database/redis-keys.md`](docs/database/redis-keys.md) for the detailed decisions.
+See [`docs/architecture/overview.md`](docs/architecture/overview.md), [`docs/architecture/authentication-flow.md`](docs/architecture/authentication-flow.md), [`docs/api/management.md`](docs/api/management.md), and [`docs/database/redis-keys.md`](docs/database/redis-keys.md) for the detailed decisions.
 
 ## Next Milestone
 
-1. Add migration execution and seed the initial administrator and permission catalog.
-2. Implement Argon2id credential verification and account lockout.
-3. Implement opaque Redis sessions, CSRF protection, and logout.
-4. Add RBAC repositories, permission middleware, and administrative APIs.
-5. Implement OAuth 2.1 Authorization Code with PKCE and OIDC discovery/JWKS.
+1. Implement OAuth 2.1 Authorization Code with PKCE and OIDC discovery/JWKS.
+2. Wire the Next.js console to the real backend APIs (replacing the dev-only session preview).
+3. Add audit log querying API and refresh-token rotation for OAuth clients.
 
 ## License
 

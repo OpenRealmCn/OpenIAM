@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+@theme {
+  --font-mono:
+    "Geist Mono", ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas,
+    monospace;
+}
+
 :root {
   /* Vercel monochrome palette */
   --background: #000000;
@@ -15,6 +21,10 @@
   --accent-foreground: #0a0a0a;
   --ring: #737373;
   --radius: 0.75rem;
+
+  /* Hot-swappable UI accent (driven by settings) */
+  --accent-ui: #ffffff;
+  --accent-ui-dim: rgba(255, 255, 255, 0.22);
 }
 
 * {
@@ -37,7 +47,7 @@ body {
 }
 
 ::selection {
-  background: #ffffff;
+  background: var(--accent-ui);
   color: #000000;
 }
 
@@ -62,4 +72,155 @@ body {
       rgba(255, 255, 255, 0.1),
       transparent 70%
     );
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes grow-bar {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+@keyframes ping-dot {
+  0% {
+    box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.45);
+  }
+  100% {
+    box-shadow: 0 0 0 6px rgba(63, 185, 80, 0);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes dialog-pop {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes row-flash {
+  0% {
+    background-color: var(--accent-ui-dim);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.animate-rise {
+  animation: rise 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.animate-bar {
+  transform-origin: bottom;
+  animation: grow-bar 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.pulse-dot {
+  animation: ping-dot 1.8s ease-out infinite;
+}
+
+.dialog-overlay {
+  animation: fade-in 0.2s ease-out both;
+}
+
+.dialog-panel {
+  animation: dialog-pop 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.toast-in {
+  animation: toast-in 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.row-flash {
+  animation: row-flash 1.6s ease-out both;
+}
+
+/* Range slider */
+.slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 9999px;
+  outline: none;
+  cursor: pointer;
+}
+
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: var(--accent-ui);
+  border: 2px solid #000000;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.2);
+  transition: transform 0.15s ease;
+}
+
+.slider::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+
+.slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: var(--accent-ui);
+  border: 2px solid #000000;
+  transition: transform 0.15s ease;
+}
+
+.slider::-moz-range-thumb:hover {
+  transform: scale(1.2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-rise,
+  .animate-bar,
+  .dialog-overlay,
+  .dialog-panel,
+  .toast-in,
+  .row-flash {
+    animation: none;
+  }
+  .pulse-dot {
+    animation: none;
+  }
 }
