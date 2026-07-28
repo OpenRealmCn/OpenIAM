@@ -21,6 +21,9 @@ type Session interface {
 
 type SessionStore interface {
 	Load(ctx context.Context, sessionID string) (Session, error)
+	// Touch resets the TTL of an active session so users are not logged out
+	// while they are actively using the application.
+	Touch(ctx context.Context, sessionID string) error
 }
 
 func Authenticate(store SessionStore, cookieName string) gin.HandlerFunc {
@@ -36,6 +39,11 @@ func Authenticate(store SessionStore, cookieName string) gin.HandlerFunc {
 			response.Error(c, http.StatusUnauthorized, "AUTH_UNAUTHENTICATED", "Authentication is required")
 			return
 		}
+
+		// Extend the session TTL on every authenticated request so active users
+		// don't get logged out. Ignore errors; if renewal fails, the session will
+		// expire naturally at its original TTL, which is safe.
+		_ = store.Touch(c.Request.Context(), sessionID)
 
 		c.Set(sessionContextKey, sess)
 		c.Set(userIDContextKey, sess.UserID())

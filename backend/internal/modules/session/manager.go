@@ -81,6 +81,23 @@ func (m *Manager) Load(ctx context.Context, sessionID string) (middleware.Sessio
 	), nil
 }
 
+// Touch resets the expiration of an active session back to the configured TTL.
+// This implements a sliding session window: users remain logged in as long as
+// they continue to make authenticated requests within the TTL period.
+func (m *Manager) Touch(ctx context.Context, sessionID string) error {
+	key := m.key(sessionID)
+	// Only refresh TTL if the key exists. If it doesn't, the session is already
+	// expired and we shouldn't resurrect it.
+	exists, err := m.rdb.Expire(ctx, key, m.cfg.TTL).Result()
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (m *Manager) Revoke(ctx context.Context, sessionID string) error {
 	return m.rdb.Del(ctx, m.key(sessionID)).Err()
 }

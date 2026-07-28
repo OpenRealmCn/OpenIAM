@@ -148,3 +148,15 @@ func (r *Repository) RoleIDsByCodes(ctx context.Context, codes []string) (map[st
 	}
 	return ids, nil
 }
+
+// UserIDsWithRole returns all user IDs currently assigned the given role.
+// Expired grants are excluded.
+func (r *Repository) UserIDsWithRole(ctx context.Context, roleID uint64) ([]uint64, error) {
+	var userIDs []uint64
+	err := r.db.WithContext(ctx).
+		Table("user_roles").
+		Select("DISTINCT user_id").
+		Where("role_id = ? AND (expires_at IS NULL OR expires_at > ?)", roleID, time.Now().UTC()).
+		Pluck("user_id", &userIDs).Error
+	return userIDs, err
+}

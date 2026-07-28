@@ -67,3 +67,36 @@ func (s *Service) RecordLogin(ctx context.Context, user *domain.User, success bo
 
 	s.Record(ctx, entry)
 }
+
+// RecordRoleCreated logs the creation of a new role.
+func (s *Service) RecordRoleCreated(ctx context.Context, actorUserID uint64, roleCode string) {
+	s.Record(ctx, Log{
+		ActorUserID:  &actorUserID,
+		Action:       "role:create",
+		ResourceType: "roles",
+		ResourceID:   &roleCode,
+		Result:       ResultSuccess,
+	})
+}
+
+// RecordRolePermissionsChanged logs changes to a role's permissions.
+func (s *Service) RecordRolePermissionsChanged(ctx context.Context, actorUserID uint64, roleCode string) {
+	s.Record(ctx, Log{
+		ActorUserID:  &actorUserID,
+		Action:       "role:update-permissions",
+		ResourceType: "roles",
+		ResourceID:   &roleCode,
+		Result:       ResultSuccess,
+	})
+}
+
+// RecordUserRolesChanged logs changes to a user's role assignments.
+func (s *Service) RecordUserRolesChanged(ctx context.Context, actorUserID, targetUserID uint64, targetPublicID string) {
+	s.Record(ctx, Log{
+		ActorUserID:  &actorUserID,
+		Action:       "user:update-roles",
+		ResourceType: "users",
+		ResourceID:   &targetPublicID,
+		Result:       ResultSuccess,
+	})
+}

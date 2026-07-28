@@ -20,12 +20,18 @@ func (f fakeSession) PublicID() string  { return "public-id" }
 func (f fakeSession) CSRFToken() string { return f.csrf }
 
 type fakeStore struct {
-	sess Session
-	err  error
+	sess        Session
+	err         error
+	touchCalled bool
 }
 
-func (f fakeStore) Load(_ context.Context, _ string) (Session, error) {
+func (f *fakeStore) Load(_ context.Context, _ string) (Session, error) {
 	return f.sess, f.err
+}
+
+func (f *fakeStore) Touch(_ context.Context, _ string) error {
+	f.touchCalled = true
+	return nil
 }
 
 type fakeChecker struct {
@@ -46,7 +52,7 @@ func okHandler(c *gin.Context) { c.Status(http.StatusOK) }
 
 func TestAuthenticateRejectsMissingCookie(t *testing.T) {
 	router := newTestRouter()
-	router.GET("/x", Authenticate(fakeStore{}, "openiam_session"), okHandler)
+	router.GET("/x", Authenticate(&fakeStore{}, "openiam_session"), okHandler)
 
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
@@ -58,7 +64,7 @@ func TestAuthenticateRejectsMissingCookie(t *testing.T) {
 
 func TestAuthenticateRejectsUnknownSession(t *testing.T) {
 	router := newTestRouter()
-	router.GET("/x", Authenticate(fakeStore{err: errors.New("gone")}, "openiam_session"), okHandler)
+	router.GET("/x", Authenticate(&fakeStore{err: errors.New("gone")}, "openiam_session"), okHandler)
 
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)
 	req.AddCookie(&http.Cookie{Name: "openiam_session", Value: "abc"})
@@ -72,8 +78,9 @@ func TestAuthenticateRejectsUnknownSession(t *testing.T) {
 
 func TestAuthenticateAcceptsValidSession(t *testing.T) {
 	router := newTestRouter()
+	store := &fakeStore{sess: fakeSession{userID: 42}}
 	var seen uint64
-	router.GET("/x", Authenticate(fakeStore{sess: fakeSession{userID: 42}}, "openiam_session"), func(c *gin.Context) {
+	router.GET("/x", Authenticate(store, "openiam_session"), func(c *gin.Context) {
 		if id, ok := UserIDFrom(c); ok {
 			seen = id
 		}
@@ -91,13 +98,16 @@ func TestAuthenticateAcceptsValidSession(t *testing.T) {
 	if seen != 42 {
 		t.Fatalf("expected user id 42 in context, got %d", seen)
 	}
+	if !store.touchCalled {
+		t.Error("expected Touch to be called on successful authentication")
+	}
 }
 
 func TestRequireCSRF(t *testing.T) {
 	build := func() *gin.Engine {
 		router := newTestRouter()
 		router.POST("/x",
-			Authenticate(fakeStore{sess: fakeSession{userID: 1, csrf: "token-123"}}, "openiam_session"),
+			Authenticate(&fakeStore{sess: fakeSession{userID: 1, csrf: "token-123"}}, "openiam_session"),
 			RequireCSRF(),
 			okHandler,
 		)
@@ -134,7 +144,7 @@ func TestRequirePermission(t *testing.T) {
 	build := func(checker PermissionChecker) *gin.Engine {
 		router := newTestRouter()
 		router.GET("/x",
-			Authenticate(fakeStore{sess: fakeSession{userID: 1}}, "openiam_session"),
+			Authenticate(&fakeStore{sess: fakeSession{userID: 1}}, "openiam_session"),
 			RequirePermission(checker, nil, "users:read"),
 			okHandler,
 		)

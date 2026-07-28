@@ -48,8 +48,8 @@ func New(router *gin.Engine, cfg config.Config, db *gorm.DB, cache *redis.Client
 
 	rbacRepo := rbacrepo.New(db)
 	checker := rbacservice.NewChecker(rbacRepo, cache, cfg.Redis.KeyPrefix)
-	roleSvc := rbacservice.NewRoleService(rbacRepo)
-	grantSvc := rbacservice.NewGrantService(rbacRepo, checker)
+	roleSvc := rbacservice.NewRoleService(rbacRepo, checker, auditSvc)
+	grantSvc := rbacservice.NewGrantService(rbacRepo, checker, auditSvc)
 
 	authHandler := identityhttp.NewAuthHandler(authSvc, sessions, checker, limiter, cfg.Session.CookieName)
 	userHandler := identityhttp.NewUserHandler(userSvc, checker)

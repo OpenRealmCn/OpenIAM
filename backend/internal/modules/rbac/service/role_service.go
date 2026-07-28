@@ -15,12 +15,20 @@ var (
 	ErrUnknownCodes = errors.New("one or more codes do not exist")
 )
 
-type RoleService struct {
-	repo *repository.Repository
+type RBACRecorder interface {
+	RecordRoleCreated(ctx context.Context, actorUserID uint64, roleCode string)
+	RecordRolePermissionsChanged(ctx context.Context, actorUserID uint64, roleCode string)
+	RecordUserRolesChanged(ctx context.Context, actorUserID, targetUserID uint64, targetPublicID string)
 }
 
-func NewRoleService(repo *repository.Repository) *RoleService {
-	return &RoleService{repo: repo}
+type RoleService struct {
+	repo    *repository.Repository
+	checker *Checker
+	audit   RBACRecorder
+}
+
+func NewRoleService(repo *repository.Repository, checker *Checker, audit RBACRecorder) *RoleService {
+	return &RoleService{repo: repo, checker: checker, audit: audit}
 }
 
 func (s *RoleService) ListRoles(ctx context.Context) ([]domain.Role, error) {
@@ -37,7 +45,7 @@ type CreateRoleInput struct {
 	Description string
 }
 
-func (s *RoleService) CreateRole(ctx context.Context, in CreateRoleInput) (*domain.Role, error) {
+func (s *RoleService) CreateRole(ctx context.Context, actorUserID uint64, in CreateRoleInput) (*domain.Role, error) {
 	in.Code = strings.TrimSpace(in.Code)
 	in.Name = strings.TrimSpace(in.Name)
 	if in.Code == "" || in.Name == "" {
@@ -59,6 +67,11 @@ func (s *RoleService) CreateRole(ctx context.Context, in CreateRoleInput) (*doma
 		}
 		return nil, err
 	}
+
+	if s.audit != nil {
+		s.audit.RecordRoleCreated(ctx, actorUserID, role.Code)
+	}
+
 	return role, nil
 }
 
@@ -70,7 +83,7 @@ func (s *RoleService) RolePermissions(ctx context.Context, code string) ([]strin
 	return s.repo.RolePermissionCodes(ctx, role.ID)
 }
 
-func (s *RoleService) ReplaceRolePermissions(ctx context.Context, code string, permissionCodes []string) error {
+func (s *RoleService) ReplaceRolePermissions(ctx context.Context, actorUserID uint64, code string, permissionCodes []string) error {
 	role, err := s.repo.GetRoleByCode(ctx, code)
 	if err != nil {
 		return err
@@ -90,23 +103,46 @@ func (s *RoleService) ReplaceRolePermissions(ctx context.Context, code string, p
 		permissionIDs = append(permissionIDs, id)
 	}
 
-	return s.repo.ReplaceRolePermissions(ctx, role.ID, permissionIDs)
+	if err := s.repo.ReplaceRolePermissions(ctx, role.ID, permissionIDs); err != nil {
+		return err
+	}
+
+	// Invalidate permission cache for all users holding this role, since their
+	// effective permissions have changed. Without this, users retain old permissions
+	// until the cache TTL expires (10 minutes).
+	if s.checker != nil {
+		userIDs, err := s.repo.UserIDsWithRole(ctx, role.ID)
+		if err != nil {
+			// Log but don't fail the operation; cache will expire naturally
+			return nil
+		}
+		for _, userID := range userIDs {
+			s.checker.Invalidate(ctx, userID)
+		}
+	}
+
+	if s.audit != nil {
+		s.audit.RecordRolePermissionsChanged(ctx, actorUserID, code)
+	}
+
+	return nil
 }
 
 type GrantService struct {
 	repo    *repository.Repository
 	checker *Checker
+	audit   RBACRecorder
 }
 
-func NewGrantService(repo *repository.Repository, checker *Checker) *GrantService {
-	return &GrantService{repo: repo, checker: checker}
+func NewGrantService(repo *repository.Repository, checker *Checker, audit RBACRecorder) *GrantService {
+	return &GrantService{repo: repo, checker: checker, audit: audit}
 }
 
 func (s *GrantService) UserRoles(ctx context.Context, userID uint64) ([]string, error) {
 	return s.repo.UserRoleCodes(ctx, userID)
 }
 
-func (s *GrantService) ReplaceUserRoles(ctx context.Context, userID uint64, roleCodes []string, grantedBy *uint64) error {
+func (s *GrantService) ReplaceUserRoles(ctx context.Context, userID uint64, userPublicID string, roleCodes []string, grantedBy *uint64) error {
 	ids, err := s.repo.RoleIDsByCodes(ctx, roleCodes)
 	if err != nil {
 		return err
@@ -126,5 +162,10 @@ func (s *GrantService) ReplaceUserRoles(ctx context.Context, userID uint64, role
 	}
 
 	s.checker.Invalidate(ctx, userID)
+
+	if s.audit != nil && grantedBy != nil {
+		s.audit.RecordUserRolesChanged(ctx, *grantedBy, userID, userPublicID)
+	}
+
 	return nil
 }

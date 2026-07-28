@@ -42,7 +42,13 @@ func (h *Handler) CreateRole(c *gin.Context) {
 		return
 	}
 
-	role, err := h.roles.CreateRole(c.Request.Context(), service.CreateRoleInput{
+	actorUserID, ok := middleware.UserIDFrom(c)
+	if !ok {
+		response.Error(c, http.StatusUnauthorized, "AUTH_REQUIRED", "Authentication required")
+		return
+	}
+
+	role, err := h.roles.CreateRole(c.Request.Context(), actorUserID, service.CreateRoleInput{
 		Code:        req.Code,
 		Name:        req.Name,
 		Description: req.Description,
@@ -95,7 +101,13 @@ func (h *Handler) ReplaceRolePermissions(c *gin.Context) {
 		return
 	}
 
-	err := h.roles.ReplaceRolePermissions(c.Request.Context(), c.Param("code"), req.Permissions)
+	actorUserID, ok := middleware.UserIDFrom(c)
+	if !ok {
+		response.Error(c, http.StatusUnauthorized, "AUTH_REQUIRED", "Authentication required")
+		return
+	}
+
+	err := h.roles.ReplaceRolePermissions(c.Request.Context(), actorUserID, c.Param("code"), req.Permissions)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrRoleNotFound):
@@ -163,7 +175,7 @@ func (h *Handler) ReplaceUserRoles(c *gin.Context) {
 		grantedBy = &actorID
 	}
 
-	if err := h.grants.ReplaceUserRoles(c.Request.Context(), user.ID, req.Roles, grantedBy); err != nil {
+	if err := h.grants.ReplaceUserRoles(c.Request.Context(), user.ID, user.PublicID, req.Roles, grantedBy); err != nil {
 		if errors.Is(err, service.ErrUnknownCodes) {
 			response.Error(c, http.StatusBadRequest, "UNKNOWN_ROLE", "One or more roles do not exist")
 			return
