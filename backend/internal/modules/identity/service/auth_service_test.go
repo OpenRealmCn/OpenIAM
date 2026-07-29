@@ -138,9 +138,9 @@ func TestAuthService_Login_Success(t *testing.T) {
 	sessionMgr := &mockSessionManager{}
 	audit := &mockAuditRecorder{}
 	cfg := config.SecurityConfig{
-		PasswordMinLength:  12,
-		LoginAttemptLimit:  5,
-		LoginLockDuration:  15 * time.Minute,
+		PasswordMinLength: 12,
+		LoginAttemptLimit: 5,
+		LoginLockDuration: 15 * time.Minute,
 	}
 
 	svc := NewAuthService(userRepo, sessionMgr, cfg, audit)
@@ -197,9 +197,9 @@ func TestAuthService_Login_WrongPassword(t *testing.T) {
 	sessionMgr := &mockSessionManager{}
 	audit := &mockAuditRecorder{}
 	cfg := config.SecurityConfig{
-		PasswordMinLength:  12,
-		LoginAttemptLimit:  5,
-		LoginLockDuration:  15 * time.Minute,
+		PasswordMinLength: 12,
+		LoginAttemptLimit: 5,
+		LoginLockDuration: 15 * time.Minute,
 	}
 
 	svc := NewAuthService(userRepo, sessionMgr, cfg, audit)
@@ -234,9 +234,9 @@ func TestAuthService_Login_UserNotFound_TimingAttackMitigation(t *testing.T) {
 	sessionMgr := &mockSessionManager{}
 	audit := &mockAuditRecorder{}
 	cfg := config.SecurityConfig{
-		PasswordMinLength:  12,
-		LoginAttemptLimit:  5,
-		LoginLockDuration:  15 * time.Minute,
+		PasswordMinLength: 12,
+		LoginAttemptLimit: 5,
+		LoginLockDuration: 15 * time.Minute,
 	}
 
 	svc := NewAuthService(userRepo, sessionMgr, cfg, audit)
@@ -295,9 +295,9 @@ func TestAuthService_Login_AccountLockout(t *testing.T) {
 	sessionMgr := &mockSessionManager{}
 	audit := &mockAuditRecorder{}
 	cfg := config.SecurityConfig{
-		PasswordMinLength:  12,
-		LoginAttemptLimit:  5,
-		LoginLockDuration:  15 * time.Minute,
+		PasswordMinLength: 12,
+		LoginAttemptLimit: 5,
+		LoginLockDuration: 15 * time.Minute,
 	}
 
 	svc := NewAuthService(userRepo, sessionMgr, cfg, audit)
@@ -342,9 +342,9 @@ func TestAuthService_Login_AlreadyLocked(t *testing.T) {
 	sessionMgr := &mockSessionManager{}
 	audit := &mockAuditRecorder{}
 	cfg := config.SecurityConfig{
-		PasswordMinLength:  12,
-		LoginAttemptLimit:  5,
-		LoginLockDuration:  15 * time.Minute,
+		PasswordMinLength: 12,
+		LoginAttemptLimit: 5,
+		LoginLockDuration: 15 * time.Minute,
 	}
 
 	svc := NewAuthService(userRepo, sessionMgr, cfg, audit)
@@ -387,9 +387,9 @@ func TestAuthService_Login_DisabledAccount(t *testing.T) {
 	sessionMgr := &mockSessionManager{}
 	audit := &mockAuditRecorder{}
 	cfg := config.SecurityConfig{
-		PasswordMinLength:  12,
-		LoginAttemptLimit:  5,
-		LoginLockDuration:  15 * time.Minute,
+		PasswordMinLength: 12,
+		LoginAttemptLimit: 5,
+		LoginLockDuration: 15 * time.Minute,
 	}
 
 	svc := NewAuthService(userRepo, sessionMgr, cfg, audit)
