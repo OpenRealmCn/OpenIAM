@@ -33,9 +33,9 @@ const icons: Record<ToastKind, typeof CheckCircle2> = {
 };
 
 const iconColor: Record<ToastKind, string> = {
-  success: "text-[#3fb950]",
-  info: "text-[#a1a1a1]",
-  error: "text-[#f85149]",
+  success: "text-emerald-500",
+  info: "text-[var(--muted)]",
+  error: "text-red-500",
 };
 
 export function ToastProvider({ children }: { children: ReactNode }) {
@@ -66,17 +66,19 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             <div
               key={item.id}
               role="status"
-              className="toast-in pointer-events-auto flex items-start gap-3 rounded-xl border border-[#2a2a2a] bg-[#111111] px-4 py-3 shadow-[0_12px_40px_rgba(0,0,0,0.55)]"
+              className="toast-in pointer-events-auto flex items-start gap-3 rounded-xl border border-[var(--border-strong)] bg-[var(--surface-2)] px-4 py-3 shadow-[0_12px_40px_rgba(0,0,0,0.4)]"
             >
-              <Icon className={cn("mt-0.5 size-4 shrink-0", iconColor[item.kind])} />
-              <p className="flex-1 text-sm leading-5 text-[#ededed]">
+              <Icon
+                className={cn("mt-0.5 size-4 shrink-0", iconColor[item.kind])}
+              />
+              <p className="flex-1 text-sm leading-5 text-[var(--fg)]">
                 {item.message}
               </p>
               <button
                 type="button"
                 onClick={() => dismiss(item.id)}
                 aria-label="关闭通知"
-                className="text-[#666666] transition-colors hover:text-white"
+                className="text-[var(--faint)] transition-colors hover:text-[var(--fg)]"
               >
                 <X className="size-3.5" />
               </button>

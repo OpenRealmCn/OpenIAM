@@ -7,14 +7,14 @@ import { ArrowLeft } from "lucide-react";
 
 import { BrandMark } from "@/components/brand-mark";
 import { Button } from "@/components/ui/button";
-import { safeReturnURL } from "@/lib/utils";
+import { readFeishuEnabled } from "@/lib/store";
 
 const isDev = process.env.NODE_ENV === "development";
 const apiBaseUrl =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
 
 const inputClass =
-  "mt-2 h-11 w-full rounded-lg border border-[#2e2e2e] bg-[#111111] px-4 text-sm text-white outline-none transition-colors duration-150 placeholder:text-[#525252] focus:border-[#6b6b6b] disabled:cursor-not-allowed disabled:opacity-60";
+  "mt-2 h-11 w-full rounded-lg border border-[var(--border-strong)] bg-[var(--surface-2)] px-4 text-sm text-[var(--fg)] outline-none transition-colors duration-150 placeholder:text-[var(--faint)] focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60";
 
 const errorMessages: Record<string, string> = {
   missing_params: "飞书登录缺少必要参数，请重试。",
@@ -50,8 +50,12 @@ export function LoginForm({
 }) {
   const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
+  const [feishuEnabled] = useState(() => readFeishuEnabled());
 
-  const target = safeReturnURL(returnTo, "/dashboard");
+  const target =
+    returnTo && returnTo.startsWith("/") && !returnTo.startsWith("//")
+      ? returnTo
+      : "/dashboard";
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -70,11 +74,11 @@ export function LoginForm({
     <main className="relative flex min-h-screen flex-col">
       <div className="vercel-glow pointer-events-none absolute inset-0" />
 
-      <header className="relative z-10 flex h-16 items-center justify-between border-b border-[#1f1f1f] px-6">
+      <header className="relative z-10 flex h-16 items-center justify-between border-b border-[var(--border)] px-6">
         <BrandMark />
         <Link
           href="/"
-          className="inline-flex items-center gap-1.5 text-sm text-[#a1a1a1] transition-colors duration-150 hover:text-white"
+          className="inline-flex items-center gap-1.5 text-sm text-[var(--muted)] transition-colors duration-150 hover:text-[var(--fg)]"
         >
           <ArrowLeft className="size-4" />
           返回首页
@@ -86,16 +90,16 @@ export function LoginForm({
           onSubmit={handleSubmit}
           className="animate-rise w-full max-w-[400px]"
         >
-          <div className="rounded-2xl border border-[#242424] bg-[#0d0d0d] p-8 shadow-[0_16px_60px_rgba(0,0,0,0.6)]">
-            <h1 className="text-2xl font-semibold tracking-[-0.02em] text-white">
+          <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-8 shadow-[0_16px_60px_rgba(0,0,0,0.4)]">
+            <h1 className="text-2xl font-semibold tracking-[-0.02em] text-[var(--fg-strong)]">
               登录 OpenIAM
             </h1>
-            <p className="mt-2 text-sm text-[#8a8a8a]">
+            <p className="mt-2 text-sm text-[var(--muted)]">
               使用你的 OpenRealm 企业身份继续。
             </p>
 
             <div className="mt-8 space-y-4">
-              <label className="block text-sm font-medium text-[#d4d4d4]">
+              <label className="block text-sm font-medium text-[var(--fg)]">
                 用户名或邮箱
                 <input
                   disabled={!isDev || submitting}
@@ -104,7 +108,7 @@ export function LoginForm({
                   autoComplete="username"
                 />
               </label>
-              <label className="block text-sm font-medium text-[#d4d4d4]">
+              <label className="block text-sm font-medium text-[var(--fg)]">
                 密码
                 <input
                   disabled={!isDev || submitting}
@@ -124,43 +128,47 @@ export function LoginForm({
               </Button>
             </div>
 
-            <div className="my-6 flex items-center gap-3">
-              <span className="h-px flex-1 bg-[#242424]" />
-              <span className="text-[11px] uppercase tracking-[0.18em] text-[#525252]">
-                或
-              </span>
-              <span className="h-px flex-1 bg-[#242424]" />
-            </div>
+            {feishuEnabled && (
+              <>
+                <div className="my-6 flex items-center gap-3">
+                  <span className="h-px flex-1 bg-[var(--border)]" />
+                  <span className="text-[11px] uppercase tracking-[0.18em] text-[var(--faint)]">
+                    或
+                  </span>
+                  <span className="h-px flex-1 bg-[var(--border)]" />
+                </div>
 
-            <a
-              href={`${apiBaseUrl}/api/v1/auth/feishu`}
-              className="flex h-12 w-full items-center justify-center gap-2.5 rounded-full border border-[#333333] bg-transparent text-sm font-medium text-[#ededed] transition-all duration-150 hover:border-[#525252] hover:bg-white/5 active:scale-[0.98]"
-            >
-              <FeishuIcon />
-              使用飞书登录
-            </a>
+                <a
+                  href={`${apiBaseUrl}/api/v1/auth/feishu`}
+                  className="flex h-12 w-full items-center justify-center gap-2.5 rounded-full border border-[var(--border-strong)] bg-transparent text-sm font-medium text-[var(--fg)] transition-all duration-150 hover:border-[var(--faint)] hover:bg-[var(--surface-3)] active:scale-[0.98]"
+                >
+                  <FeishuIcon />
+                  使用飞书登录
+                </a>
+              </>
+            )}
           </div>
 
           {error && errorMessages[error] && (
-            <p className="mt-6 rounded-xl border border-[#3a1b1b] bg-[#140b0b] px-4 py-3 text-center text-xs leading-5 text-[#ffa198]">
+            <p className="mt-6 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-center text-xs leading-5 text-red-400">
               {errorMessages[error]}
             </p>
           )}
 
           {isDev ? (
-            <p className="mt-6 rounded-xl border border-[#2e2e2e] bg-[#111111] px-4 py-3 text-center text-xs leading-5 text-[#8a8a8a]">
+            <p className="mt-6 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-3 text-center text-xs leading-5 text-[var(--muted)]">
               开发模式：任意凭据均可进入预览，会话仅写入本地浏览器 Cookie，
               生产构建中此入口不可用。
             </p>
           ) : (
-            <p className="mt-6 rounded-xl border border-[#2e2e2e] bg-[#111111] px-4 py-3 text-center text-xs leading-5 text-[#8a8a8a]">
+            <p className="mt-6 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-3 text-center text-xs leading-5 text-[var(--muted)]">
               登录 API 尚未启用。当前版本仅初始化安全边界，不接受或传输凭据。
             </p>
           )}
         </form>
       </section>
 
-      <footer className="relative z-10 border-t border-[#1f1f1f] py-5 text-center text-xs text-[#666666]">
+      <footer className="relative z-10 border-t border-[var(--border)] py-5 text-center text-xs text-[var(--faint)]">
         OpenRealm Private Infrastructure
       </footer>
     </main>

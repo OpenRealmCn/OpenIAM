@@ -28,7 +28,7 @@ export function Slider({
       step={step}
       onChange={(e) => onChange(Number(e.target.value))}
       style={{
-        background: `linear-gradient(to right, var(--accent-ui) ${percent}%, #2a2a2a ${percent}%)`,
+        background: `linear-gradient(to right, var(--accent) ${percent}%, #2a2a2a ${percent}%)`,
       }}
     />
   );

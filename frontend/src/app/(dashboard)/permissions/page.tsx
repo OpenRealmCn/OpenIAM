@@ -20,14 +20,14 @@ export default function PermissionsPage() {
           return (
             <section
               key={resource}
-              className="animate-rise rounded-xl border border-[#222222] bg-[#0d0d0d] p-6"
+              className="animate-rise rounded-xl border border-[var(--border)] bg-[var(--surface)] p-6"
               style={{ animationDelay: `${i * 60}ms` }}
             >
               <div className="flex items-baseline justify-between">
-                <h2 className="font-mono text-sm text-[#ededed]">
+                <h2 className="font-mono text-sm text-[var(--fg-strong)]">
                   {resource}
                 </h2>
-                <span className="font-mono text-[11px] text-[#666666]">
+                <span className="font-mono text-[11px] text-[var(--faint)]">
                   {items.length} 项
                 </span>
               </div>
@@ -35,16 +35,16 @@ export default function PermissionsPage() {
                 {items.map((p) => (
                   <li
                     key={p.code}
-                    className="flex items-center gap-3 rounded-lg border border-[#1f1f1f] bg-[#0a0a0a] px-3.5 py-2.5 transition-colors duration-150 hover:border-[#3d3d3d]"
+                    className="flex items-center gap-3 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3.5 py-2.5 transition-colors duration-150 hover:border-[var(--border-strong)]"
                   >
-                    <span className="rounded-md border border-[#2a2a2a] bg-[#111111] px-2 py-0.5 font-mono text-[11px] text-[#7ee2a8]">
+                    <span className="rounded-md border border-[var(--border-strong)] bg-[var(--surface)] px-2 py-0.5 font-mono text-[11px] text-emerald-500">
                       {p.action}
                     </span>
                     <div className="min-w-0">
-                      <p className="truncate font-mono text-xs text-[#d4d4d4]">
+                      <p className="truncate font-mono text-xs text-[var(--fg)]">
                         {p.code}
                       </p>
-                      <p className="truncate text-xs text-[#666666]">
+                      <p className="truncate text-xs text-[var(--faint)]">
                         {p.description}
                       </p>
                     </div>

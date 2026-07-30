@@ -106,14 +106,14 @@ export function CreateRoleDialog({
             </span>
           </div>
 
-          <div className="mt-2.5 max-h-64 space-y-3 overflow-y-auto rounded-lg border border-[#242424] bg-[#0a0a0a] p-3.5">
+          <div className="mt-2.5 max-h-64 space-y-3 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-3.5">
             {resources.map((resource) => {
               const items = previewPermissions.filter(
                 (p) => p.resource === resource,
               );
               return (
                 <div key={resource}>
-                  <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[#525252]">
+                  <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--faint)]">
                     {resource}
                   </p>
                   <div className="mt-1.5 flex flex-wrap gap-1.5">
@@ -128,8 +128,8 @@ export function CreateRoleDialog({
                           className={cn(
                             "rounded-md border px-2 py-1 font-mono text-[11px] transition-all duration-150 active:scale-95",
                             active
-                              ? "border-[var(--accent-ui)] bg-[var(--accent-ui-dim)] text-white"
-                              : "border-[#2a2a2a] bg-[#111111] text-[#8a8a8a] hover:border-[#4a4a4a] hover:text-white",
+                              ? "border-[var(--accent)] bg-[var(--accent-dim)] text-[var(--fg-strong)]"
+                              : "border-[var(--border-strong)] bg-[var(--surface-2)] text-[var(--muted)] hover:border-[var(--faint)] hover:text-[var(--fg)]",
                           )}
                         >
                           {p.action}

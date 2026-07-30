@@ -44,12 +44,12 @@ export default function UsersPage() {
       >
         <div className="flex items-center gap-3">
           <label className="relative block">
-            <Search className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-[#666666]" />
+            <Search className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-[var(--faint)]" />
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="搜索用户…"
-              className="h-10 w-64 rounded-full border border-[#2e2e2e] bg-[#111111] pl-10 pr-4 text-sm text-white outline-none transition-colors duration-150 placeholder:text-[#525252] focus:border-[var(--accent-ui)]"
+              className="h-10 w-64 rounded-full border border-[var(--border-strong)] bg-[var(--surface-2)] pl-10 pr-4 text-sm text-[var(--fg)] outline-none transition-colors duration-150 placeholder:text-[var(--faint)] focus:border-[var(--accent)]"
             />
           </label>
           <Button onClick={() => setCreateOpen(true)}>
@@ -60,7 +60,7 @@ export default function UsersPage() {
       </PageHeader>
 
       <p
-        className="animate-rise mb-4 font-mono text-[11px] text-[#666666]"
+        className="animate-rise mb-4 font-mono text-[11px] text-[var(--faint)]"
         style={{ animationDelay: "60ms" }}
       >
         共 {state.users.length} 位用户
@@ -68,12 +68,12 @@ export default function UsersPage() {
       </p>
 
       <div
-        className="animate-rise overflow-x-auto rounded-xl border border-[#222222] bg-[#0d0d0d]"
+        className="animate-rise overflow-x-auto rounded-xl border border-[var(--border)] bg-[var(--surface)]"
         style={{ animationDelay: "100ms" }}
       >
         <table className="w-full min-w-[760px] text-sm">
           <thead>
-            <tr className="border-b border-[#1f1f1f] text-left font-mono text-[11px] uppercase tracking-[0.16em] text-[#666666]">
+            <tr className="border-b border-[var(--border)] text-left font-mono text-[11px] uppercase tracking-[0.16em] text-[var(--faint)]">
               <th className="px-5 py-3.5 font-medium">用户</th>
               <th className="px-5 py-3.5 font-medium">部门</th>
               <th className="px-5 py-3.5 font-medium">角色</th>
@@ -88,26 +88,26 @@ export default function UsersPage() {
                 <tr
                   key={u.id}
                   className={cn(
-                    "border-b border-[#161616] transition-colors duration-150 last:border-b-0 hover:bg-white/[0.025]",
+                    "border-b border-[var(--border)] transition-colors duration-150 last:border-b-0 hover:bg-[var(--surface-2)]",
                     flashId === u.id && "row-flash",
                   )}
                 >
                   <td className={cellPad}>
                     <div className="flex items-center gap-3">
-                      <span className="grid size-8 shrink-0 place-items-center rounded-full bg-gradient-to-b from-[#3a3a3a] to-[#1c1c1c] text-xs font-medium text-[#d4d4d4]">
+                      <span className="grid size-8 shrink-0 place-items-center rounded-full bg-[var(--surface-3)] text-xs font-medium text-[var(--fg)]">
                         {u.name[0]}
                       </span>
                       <div className="min-w-0">
-                        <p className="truncate font-medium text-[#ededed]">
+                        <p className="truncate font-medium text-[var(--fg-strong)]">
                           {u.name}
                         </p>
-                        <p className="truncate font-mono text-xs text-[#666666]">
+                        <p className="truncate font-mono text-xs text-[var(--faint)]">
                           {u.email}
                         </p>
                       </div>
                     </div>
                   </td>
-                  <td className={cn(cellPad, "text-[#a1a1a1]")}>
+                  <td className={cn(cellPad, "text-[var(--muted)]")}>
                     {u.department}
                   </td>
                   <td className={cellPad}>
@@ -116,14 +116,14 @@ export default function UsersPage() {
                         {u.roles.map((r) => (
                           <span
                             key={r}
-                            className="rounded-full border border-[#2a2a2a] bg-[#161616] px-2 py-0.5 font-mono text-[11px] text-[#a1a1a1]"
+                            className="rounded-full border border-[var(--border-strong)] bg-[var(--surface-2)] px-2 py-0.5 font-mono text-[11px] text-[var(--muted)]"
                           >
                             {r}
                           </span>
                         ))}
                       </div>
                     ) : (
-                      <span className="text-xs text-[#525252]">未分配</span>
+                      <span className="text-xs text-[var(--faint)]">未分配</span>
                     )}
                   </td>
                   <td className={cellPad}>
@@ -134,7 +134,7 @@ export default function UsersPage() {
                     />
                   </td>
                   <td
-                    className={cn(cellPad, "font-mono text-xs text-[#8a8a8a]")}
+                    className={cn(cellPad, "font-mono text-xs text-[var(--muted)]")}
                   >
                     {u.lastLogin}
                   </td>
@@ -145,7 +145,7 @@ export default function UsersPage() {
               <tr>
                 <td
                   colSpan={5}
-                  className="px-5 py-12 text-center text-sm text-[#666666]"
+                  className="px-5 py-12 text-center text-sm text-[var(--faint)]"
                 >
                   没有匹配 “{query}” 的用户
                 </td>

@@ -79,6 +79,11 @@ func New(router *gin.Engine, cfg config.Config, db *gorm.DB, cache *redis.Client
 	authGroup.POST("/login", authHandler.Login)
 	authGroup.GET("/feishu", federationHandler.FeishuLogin)
 	authGroup.GET("/feishu/callback", federationHandler.FeishuCallback)
+	authGroup.GET("/providers", func(c *gin.Context) {
+		response.Data(c, http.StatusOK, gin.H{
+			"feishu": cfg.Feishu.Enabled(),
+		})
+	})
 
 	protected := api.Group("", middleware.Authenticate(sessions, cfg.Session.CookieName))
 	protected.GET("/auth/me", authHandler.Me)
@@ -95,6 +100,7 @@ func New(router *gin.Engine, cfg config.Config, db *gorm.DB, cache *redis.Client
 	protected.POST("/roles", middleware.RequireCSRF(), middleware.RequirePermission(checker, log, "roles:create"), rbacHandler.CreateRole)
 	protected.GET("/roles/:code", middleware.RequirePermission(checker, log, "roles:read"), rbacHandler.GetRole)
 	protected.PUT("/roles/:code/permissions", middleware.RequireCSRF(), middleware.RequirePermission(checker, log, "roles:update"), rbacHandler.ReplaceRolePermissions)
+	protected.DELETE("/roles/:code", middleware.RequireCSRF(), middleware.RequirePermission(checker, log, "roles:delete"), rbacHandler.DeleteRole)
 
 	protected.GET("/permissions", middleware.RequirePermission(checker, log, "permissions:read"), rbacHandler.ListPermissions)
 

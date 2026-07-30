@@ -11,6 +11,7 @@ const protectedPrefixes = [
   "/oauth-clients",
   "/audit-logs",
   "/settings",
+  "/profile",
 ];
 
 export function proxy(request: NextRequest) {
@@ -43,6 +44,7 @@ export const config = {
     "/oauth-clients/:path*",
     "/audit-logs/:path*",
     "/settings/:path*",
+    "/profile/:path*",
     "/login",
   ],
 };

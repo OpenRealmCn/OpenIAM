@@ -13,6 +13,7 @@ var (
 	ErrRoleExists   = errors.New("role already exists")
 	ErrRoleNotFound = repository.ErrRoleNotFound
 	ErrUnknownCodes = errors.New("one or more codes do not exist")
+	ErrSystemRole   = errors.New("system roles cannot be modified or deleted")
 )
 
 type RBACRecorder interface {
@@ -81,6 +82,34 @@ func (s *RoleService) RolePermissions(ctx context.Context, code string) ([]strin
 		return nil, err
 	}
 	return s.repo.RolePermissionCodes(ctx, role.ID)
+}
+
+func (s *RoleService) DeleteRole(ctx context.Context, code string) error {
+	role, err := s.repo.GetRoleByCode(ctx, code)
+	if err != nil {
+		return err
+	}
+	if role.IsSystem {
+		return ErrSystemRole
+	}
+
+	var userIDs []uint64
+	if s.checker != nil {
+		if ids, err := s.repo.UserIDsWithRole(ctx, role.ID); err == nil {
+			userIDs = ids
+		}
+	}
+
+	if err := s.repo.DeleteRole(ctx, role.ID); err != nil {
+		return err
+	}
+
+	if s.checker != nil {
+		for _, userID := range userIDs {
+			s.checker.Invalidate(ctx, userID)
+		}
+	}
+	return nil
 }
 
 func (s *RoleService) ReplaceRolePermissions(ctx context.Context, actorUserID uint64, code string, permissionCodes []string) error {

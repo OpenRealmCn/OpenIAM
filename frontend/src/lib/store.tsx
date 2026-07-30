@@ -16,6 +16,13 @@ import {
   type PreviewRole,
   type PreviewUser,
 } from "@/lib/preview-data";
+import {
+  applyTokens,
+  CUSTOM_THEME_ID,
+  resolveTokens,
+  type ThemeMode,
+  type ThemeTokens,
+} from "@/lib/themes";
 
 export type Density = "comfortable" | "compact";
 
@@ -31,12 +38,26 @@ export interface FeatureFlags {
   mfaPreview: boolean;
 }
 
+export interface FeishuSettings {
+  enabled: boolean;
+  appId: string;
+  redirectUri: string;
+}
+
+export interface CustomTheme {
+  light: Partial<ThemeTokens>;
+  dark: Partial<ThemeTokens>;
+}
+
 export interface ConsoleSettings {
-  accent: string;
+  themeMode: ThemeMode;
+  themeId: string;
+  customTheme: CustomTheme;
   density: Density;
   security: SecuritySettings;
   sessionTtlHours: number;
   flags: FeatureFlags;
+  feishu: FeishuSettings;
 }
 
 export interface ConsoleState {
@@ -60,10 +81,12 @@ export interface NewRoleInput {
   permissions: string[];
 }
 
-const STORAGE_KEY = "openiam-console-v1";
+const STORAGE_KEY = "openiam-console-v2";
 
 export const defaultSettings: ConsoleSettings = {
-  accent: "#ffffff",
+  themeMode: "dark",
+  themeId: "vercel",
+  customTheme: { light: {}, dark: {} },
   density: "comfortable",
   security: {
     passwordMinLength: 12,
@@ -75,6 +98,11 @@ export const defaultSettings: ConsoleSettings = {
     enforcePkce: true,
     auditLogin: true,
     mfaPreview: false,
+  },
+  feishu: {
+    enabled: false,
+    appId: "",
+    redirectUri: "http://localhost:8080/api/v1/auth/feishu/callback",
   },
 };
 
@@ -93,6 +121,7 @@ function loadState(): ConsoleState {
     if (!raw) return seedState();
     const parsed = JSON.parse(raw) as Partial<ConsoleState>;
     const seed = seedState();
+    const s: Partial<ConsoleSettings> = parsed.settings ?? {};
     return {
       users:
         Array.isArray(parsed.users) && parsed.users.length > 0
@@ -104,15 +133,14 @@ function loadState(): ConsoleState {
           : seed.roles,
       settings: {
         ...seed.settings,
-        ...(parsed.settings ?? {}),
-        security: {
-          ...seed.settings.security,
-          ...(parsed.settings?.security ?? {}),
+        ...s,
+        customTheme: {
+          light: { ...(s.customTheme?.light ?? {}) },
+          dark: { ...(s.customTheme?.dark ?? {}) },
         },
-        flags: {
-          ...seed.settings.flags,
-          ...(parsed.settings?.flags ?? {}),
-        },
+        security: { ...seed.settings.security, ...(s.security ?? {}) },
+        flags: { ...seed.settings.flags, ...(s.flags ?? {}) },
+        feishu: { ...seed.settings.feishu, ...(s.feishu ?? {}) },
       },
     };
   } catch {
@@ -120,31 +148,23 @@ function loadState(): ConsoleState {
   }
 }
 
-function hexToRgba(hex: string, alpha: number): string {
-  const raw = hex.replace("#", "");
-  const full =
-    raw.length === 3
-      ? raw
-          .split("")
-          .map((c) => c + c)
-          .join("")
-      : raw;
-  const value = parseInt(full, 16);
-  const r = (value >> 16) & 255;
-  const g = (value >> 8) & 255;
-  const b = value & 255;
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
-
 interface ConsoleContextValue {
   state: ConsoleState;
   addUser: (input: NewUserInput) => PreviewUser;
   addRole: (input: NewRoleInput) => PreviewRole;
-  setAccent: (accent: string) => void;
+  updateRole: (code: string, patch: Partial<PreviewRole>) => void;
+  deleteRole: (code: string) => void;
+  setThemeMode: (mode: ThemeMode) => void;
+  setThemeId: (id: string) => void;
+  setCustomTokens: (
+    mode: "light" | "dark",
+    patch: Partial<ThemeTokens>,
+  ) => void;
   setDensity: (density: Density) => void;
   setSecurity: (patch: Partial<SecuritySettings>) => void;
   setFlag: (key: keyof FeatureFlags, value: boolean) => void;
   setSessionTtlHours: (hours: number) => void;
+  setFeishu: (patch: Partial<FeishuSettings>) => void;
   resetPreview: () => void;
 }
 
@@ -152,15 +172,31 @@ const ConsoleContext = createContext<ConsoleContextValue | null>(null);
 
 export function ConsoleProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<ConsoleState>(loadState);
+  const [systemDark, setSystemDark] = useState(
+    () =>
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-color-scheme: dark)").matches,
+  );
 
   useEffect(() => {
-    const root = document.documentElement;
-    root.style.setProperty("--accent-ui", state.settings.accent);
-    root.style.setProperty(
-      "--accent-ui-dim",
-      hexToRgba(state.settings.accent, 0.22),
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = (e: MediaQueryListEvent) => setSystemDark(e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
+  useEffect(() => {
+    const { themeMode, themeId, customTheme } = state.settings;
+    const { tokens, effective } = resolveTokens(
+      themeId,
+      themeMode,
+      systemDark,
+      customTheme,
     );
-  }, [state.settings.accent]);
+    applyTokens(tokens, effective);
+  }, [state.settings, systemDark]);
 
   useEffect(() => {
     try {
@@ -197,9 +233,51 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
     return role;
   }, []);
 
-  const setAccent = useCallback((accent: string) => {
-    setState((s) => ({ ...s, settings: { ...s.settings, accent } }));
+  const updateRole = useCallback(
+    (code: string, patch: Partial<PreviewRole>) => {
+      setState((s) => ({
+        ...s,
+        roles: s.roles.map((r) => (r.code === code ? { ...r, ...patch } : r)),
+      }));
+    },
+    [],
+  );
+
+  const deleteRole = useCallback((code: string) => {
+    setState((s) => ({
+      ...s,
+      roles: s.roles.filter((r) => r.code !== code),
+      users: s.users.map((u) => ({
+        ...u,
+        roles: u.roles.filter((rc) => rc !== code),
+      })),
+    }));
   }, []);
+
+  const setThemeMode = useCallback((mode: ThemeMode) => {
+    setState((s) => ({ ...s, settings: { ...s.settings, themeMode: mode } }));
+  }, []);
+
+  const setThemeId = useCallback((id: string) => {
+    setState((s) => ({ ...s, settings: { ...s.settings, themeId: id } }));
+  }, []);
+
+  const setCustomTokens = useCallback(
+    (mode: "light" | "dark", patch: Partial<ThemeTokens>) => {
+      setState((s) => ({
+        ...s,
+        settings: {
+          ...s.settings,
+          themeId: CUSTOM_THEME_ID,
+          customTheme: {
+            ...s.settings.customTheme,
+            [mode]: { ...s.settings.customTheme[mode], ...patch },
+          },
+        },
+      }));
+    },
+    [],
+  );
 
   const setDensity = useCallback((density: Density) => {
     setState((s) => ({ ...s, settings: { ...s.settings, density } }));
@@ -232,6 +310,16 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
     }));
   }, []);
 
+  const setFeishu = useCallback((patch: Partial<FeishuSettings>) => {
+    setState((s) => ({
+      ...s,
+      settings: {
+        ...s.settings,
+        feishu: { ...s.settings.feishu, ...patch },
+      },
+    }));
+  }, []);
+
   const resetPreview = useCallback(() => {
     try {
       window.localStorage.removeItem(STORAGE_KEY);
@@ -246,22 +334,32 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
       state,
       addUser,
       addRole,
-      setAccent,
+      updateRole,
+      deleteRole,
+      setThemeMode,
+      setThemeId,
+      setCustomTokens,
       setDensity,
       setSecurity,
       setFlag,
       setSessionTtlHours,
+      setFeishu,
       resetPreview,
     }),
     [
       state,
       addUser,
       addRole,
-      setAccent,
+      updateRole,
+      deleteRole,
+      setThemeMode,
+      setThemeId,
+      setCustomTokens,
       setDensity,
       setSecurity,
       setFlag,
       setSessionTtlHours,
+      setFeishu,
       resetPreview,
     ],
   );
@@ -277,4 +375,16 @@ export function useConsole(): ConsoleContextValue {
     throw new Error("useConsole must be used within a ConsoleProvider");
   }
   return ctx;
+}
+
+export function readFeishuEnabled(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw) as Partial<ConsoleState>;
+    return parsed.settings?.feishu?.enabled ?? false;
+  } catch {
+    return false;
+  }
 }

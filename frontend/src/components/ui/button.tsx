@@ -5,17 +5,19 @@ import type { ButtonHTMLAttributes } from "react";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 rounded-full text-sm font-medium transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-black disabled:pointer-events-none disabled:opacity-50",
+  "inline-flex items-center justify-center gap-2 rounded-full text-sm font-medium transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg)] active:scale-[0.98] disabled:pointer-events-none disabled:opacity-50",
   {
     variants: {
       variant: {
         default:
-          "bg-white text-black shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)] hover:bg-[#dcdcdc] active:bg-[#c8c8c8]",
+          "bg-[var(--accent)] text-[var(--accent-fg)] hover:opacity-90",
         secondary:
-          "bg-[#1a1a1a] text-[#ededed] hover:bg-[#262626] active:bg-[#333333]",
+          "bg-[var(--surface-3)] text-[var(--fg)] hover:bg-[var(--border)]",
         outline:
-          "border border-[#333333] bg-transparent text-[#ededed] hover:border-[#525252] hover:bg-white/5",
-        ghost: "text-[#a1a1a1] hover:bg-white/5 hover:text-[#ededed]",
+          "border border-[var(--border-strong)] bg-transparent text-[var(--fg)] hover:border-[var(--faint)] hover:bg-[var(--surface-3)]",
+        ghost: "text-[var(--muted)] hover:bg-[var(--surface-3)] hover:text-[var(--fg)]",
+        danger:
+          "border border-red-500/40 text-red-400 hover:bg-red-500/10",
       },
       size: {
         default: "h-10 px-5",

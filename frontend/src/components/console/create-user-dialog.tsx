@@ -139,8 +139,8 @@ export function CreateUserDialog({
                     className={cn(
                       "h-1 flex-1 rounded-full transition-colors duration-300",
                       i < strength
-                        ? "bg-[var(--accent-ui)]"
-                        : "bg-[#2a2a2a]",
+                        ? "bg-[var(--accent)]"
+                        : "bg-[var(--border-strong)]",
                     )}
                   />
                 ))}
@@ -165,8 +165,8 @@ export function CreateUserDialog({
                   className={cn(
                     "rounded-full border px-3 py-1.5 font-mono text-xs transition-all duration-150 active:scale-95",
                     active
-                      ? "border-[var(--accent-ui)] bg-[var(--accent-ui-dim)] text-white"
-                      : "border-[#2a2a2a] bg-[#111111] text-[#8a8a8a] hover:border-[#4a4a4a] hover:text-white",
+                      ? "border-[var(--accent)] bg-[var(--accent-dim)] text-[var(--fg-strong)]"
+                      : "border-[var(--border-strong)] bg-[var(--surface-2)] text-[var(--muted)] hover:border-[var(--faint)] hover:text-[var(--fg)]",
                   )}
                 >
                   {role.code}

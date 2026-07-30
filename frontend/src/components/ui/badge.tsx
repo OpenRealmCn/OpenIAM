@@ -12,7 +12,7 @@ export function Badge({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-full border border-[#2a2a2a] bg-[#161616] px-2.5 py-0.5 text-[11px] font-medium text-[#a1a1a1]",
+        "inline-flex items-center gap-1 rounded-full border border-[var(--border-strong)] bg-[var(--surface-2)] px-2.5 py-0.5 text-[11px] font-medium text-[var(--muted)]",
         className,
       )}
     >
@@ -22,5 +22,5 @@ export function Badge({
 }
 
 export function Separator({ className }: { className?: string }) {
-  return <div className={cn("h-px w-full bg-[#1f1f1f]", className)} />;
+  return <div className={cn("h-px w-full bg-[var(--border)]", className)} />;
 }

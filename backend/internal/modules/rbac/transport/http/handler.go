@@ -65,6 +65,23 @@ func (h *Handler) CreateRole(c *gin.Context) {
 	response.Data(c, http.StatusCreated, ToRoleResponse(role))
 }
 
+func (h *Handler) DeleteRole(c *gin.Context) {
+	code := c.Param("code")
+	err := h.roles.DeleteRole(c.Request.Context(), code)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrRoleNotFound):
+			response.Error(c, http.StatusNotFound, "ROLE_NOT_FOUND", "Role not found")
+		case errors.Is(err, service.ErrSystemRole):
+			response.Error(c, http.StatusForbidden, "SYSTEM_ROLE_PROTECTED", "System roles cannot be deleted")
+		default:
+			response.Error(c, http.StatusInternalServerError, "INTERNAL_ERROR", "Unable to delete role")
+		}
+		return
+	}
+	response.Data(c, http.StatusOK, gin.H{"deleted": code})
+}
+
 func (h *Handler) GetRole(c *gin.Context) {
 	code := c.Param("code")
 	permissions, err := h.roles.RolePermissions(c.Request.Context(), code)

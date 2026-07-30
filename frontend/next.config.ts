@@ -6,9 +6,16 @@ const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
 // Build a strict Content Security Policy.
 // Next.js requires 'unsafe-inline' for its runtime scripts and Tailwind
 // injects inline styles, so those two exceptions are unavoidable.
+// React additionally requires eval() in development for debugging features
+// (callstack reconstruction). It never uses eval() in production, so
+// 'unsafe-eval' is added only in dev to keep the production policy strict.
+const scriptSrc = isProd
+  ? "script-src 'self' 'unsafe-inline'"
+  : "script-src 'self' 'unsafe-inline' 'unsafe-eval'";
+
 const csp = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline'",
+  scriptSrc,
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self'",

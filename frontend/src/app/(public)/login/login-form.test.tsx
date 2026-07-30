@@ -39,13 +39,11 @@ beforeEach(() => {
 
 // ── helpers ────────────────────────────────────────────────────────────────
 function okSessionResponse() {
-  return Promise.resolve(
-    new Response(JSON.stringify({ ok: true }), { status: 200 }),
-  );
+  return new Response(JSON.stringify({ ok: true }), { status: 200 });
 }
 
 function failSessionResponse() {
-  return Promise.resolve(new Response(null, { status: 500 }));
+  return new Response(null, { status: 500 });
 }
 
 // ── tests ──────────────────────────────────────────────────────────────────
@@ -67,12 +65,17 @@ describe("LoginForm rendering", () => {
   });
 
   it("renders Feishu login link pointing to backend", () => {
+    window.localStorage.setItem(
+      "openiam-console-v2",
+      JSON.stringify({ settings: { feishu: { enabled: true } } }),
+    );
     render(<LoginForm />);
     const feishuLink = screen.getByRole("link", { name: /使用飞书登录/i });
     expect(feishuLink).toHaveAttribute(
       "href",
       expect.stringContaining("/api/v1/auth/feishu"),
     );
+    window.localStorage.removeItem("openiam-console-v2");
   });
 
   it("renders back-to-home link", () => {

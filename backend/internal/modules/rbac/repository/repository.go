@@ -57,6 +57,18 @@ func (r *Repository) CreateRole(ctx context.Context, role *domain.Role) error {
 	return r.db.WithContext(ctx).Create(role).Error
 }
 
+func (r *Repository) DeleteRole(ctx context.Context, roleID uint64) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("role_id = ?", roleID).Delete(&domain.RolePermission{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("role_id = ?", roleID).Delete(&domain.UserRole{}).Error; err != nil {
+			return err
+		}
+		return tx.Unscoped().Delete(&domain.Role{}, roleID).Error
+	})
+}
+
 func (r *Repository) ListPermissions(ctx context.Context) ([]domain.Permission, error) {
 	var permissions []domain.Permission
 	err := r.db.WithContext(ctx).Order("resource ASC, action ASC").Find(&permissions).Error

@@ -2,17 +2,17 @@ import type { StatusTone } from "@/lib/preview-data";
 import { cn } from "@/lib/utils";
 
 const toneClasses: Record<StatusTone, string> = {
-  green: "border-[#1b3a26] bg-[#0d1f14] text-[#7ee2a8]",
-  amber: "border-[#3a2f1b] bg-[#1f1a0d] text-[#e3b341]",
-  red: "border-[#3a1b1b] bg-[#1f0d0d] text-[#ffa198]",
-  gray: "border-[#2a2a2a] bg-[#161616] text-[#8b949e]",
+  green: "border-emerald-500/30 bg-emerald-500/10 text-emerald-500",
+  amber: "border-amber-500/30 bg-amber-500/10 text-amber-500",
+  red: "border-red-500/30 bg-red-500/10 text-red-500",
+  gray: "border-[var(--border-strong)] bg-[var(--surface-3)] text-[var(--muted)]",
 };
 
 const dotClasses: Record<StatusTone, string> = {
-  green: "bg-[#3fb950]",
-  amber: "bg-[#d29922]",
-  red: "bg-[#f85149]",
-  gray: "bg-[#6e7681]",
+  green: "bg-emerald-500",
+  amber: "bg-amber-500",
+  red: "bg-red-500",
+  gray: "bg-[var(--faint)]",
 };
 
 export function StatusPill({
@@ -32,7 +32,11 @@ export function StatusPill({
       )}
     >
       <span
-        className={cn("size-1.5 rounded-full", dotClasses[tone], pulse && "pulse-dot")}
+        className={cn(
+          "size-1.5 rounded-full",
+          dotClasses[tone],
+          pulse && "pulse-dot",
+        )}
       />
       {label}
     </span>
