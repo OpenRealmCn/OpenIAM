@@ -1,7 +1,10 @@
 package handlers
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -174,6 +177,77 @@ func requireRoleMutation(c *gin.Context, enforcer *rbac.Enforcer, role models.Ro
 	}
 	if role.IsSystem && !isSuperAdmin(enforcer, CurrentUserID(c)) {
 		Fail(c, http.StatusForbidden, "仅超级管理员可修改内置系统角色")
+		return false
+	}
+	return true
+}
+
+// ---------------------------------------------------------------------------
+// 对象归属判定（安全修复第一批 · 模块 B）
+//
+// 约定：
+//   * 归属一律以服务端数据为准（Casbin 分组策略 user -> role -> domain）；
+//   * 请求头 X-OpenIAM-Domain 只用来确定"操作者本次在哪个域办事"，不作为目标对象归属的依据；
+//   * 越界目标统一用"用户不存在"（404）回应，与真正不存在的响应完全一致，避免跨域探测。
+// ---------------------------------------------------------------------------
+
+// userBindings 返回目标用户在全部域中的角色绑定（服务端权威查询）。
+func userBindings(enforcer *rbac.Enforcer, userID uint64) (map[string][]string, error) {
+	return enforcer.GetAllUserRoles(userID)
+}
+
+// bindingsOutsideDomain 返回目标用户在 domain 之外仍有角色绑定的域名（已排序，便于响应与审计）。
+func bindingsOutsideDomain(bindings map[string][]string, domain string) []string {
+	out := make([]string, 0, len(bindings))
+	for d, roles := range bindings {
+		if d == domain || len(roles) == 0 {
+			continue
+		}
+		out = append(out, d)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// denyTargetUserNotFound 以"用户不存在"回应越界用户。
+func denyTargetUserNotFound(c *gin.Context) {
+	Fail(c, http.StatusNotFound, "用户不存在")
+}
+
+// requireTargetUserInDomain 判定目标用户是否落在操作者本次办理的域内。
+// 超级管理员不受域归属限制；非超管遇到越界目标时已写出 404 并返回 false。
+func requireTargetUserInDomain(c *gin.Context, enforcer *rbac.Enforcer, targetID uint64, domain string) (map[string][]string, bool) {
+	bindings, err := userBindings(enforcer, targetID)
+	if err != nil {
+		Fail(c, http.StatusInternalServerError, "查询用户归属失败")
+		return nil, false
+	}
+	if isSuperAdmin(enforcer, CurrentUserID(c)) {
+		return bindings, true
+	}
+	// 先确认操作者本人在该域确实有角色（请求头只能声明"在哪个域办事"，不能凭空赋予域身份）。
+	if len(enforcer.GetRolesForUserInDomain(CurrentUserID(c), domain)) == 0 {
+		Fail(c, http.StatusForbidden, "无权在该域操作")
+		return bindings, false
+	}
+	if len(bindings[domain]) == 0 {
+		denyTargetUserNotFound(c)
+		return bindings, false
+	}
+	return bindings, true
+}
+
+// decodeStrictJSON 严格解析请求体：出现未声明字段（domain_code、role_codes、username、
+// is_super_admin 等身份边界字段）直接拒绝，杜绝通过 body 夹带域迁移或提权参数。
+func decodeStrictJSON(c *gin.Context, dst interface{}) bool {
+	dec := json.NewDecoder(c.Request.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		if err == io.EOF {
+			Fail(c, http.StatusBadRequest, "请求体不能为空")
+			return false
+		}
+		Fail(c, http.StatusBadRequest, "参数错误: 请求包含不允许提交的字段")
 		return false
 	}
 	return true

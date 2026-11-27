@@ -297,3 +297,32 @@ func (e *Enforcer) GetPolicies(domain, roleCode string) ([]PolicyRule, error) {
 	}
 	return rules, nil
 }
+
+// GetGroupingsForDomain 返回某域内的全部角色绑定分组规则 g(user, role, domain)。
+func (e *Enforcer) GetGroupingsForDomain(domain string) ([][]string, error) {
+	return e.enforcer.GetFilteredGroupingPolicy(2, domain)
+}
+
+// CountPoliciesForDomain 统计某域内的 p 策略条数（服务端判定，不依赖请求头）。
+func (e *Enforcer) CountPoliciesForDomain(domain string) (int64, error) {
+	rules, err := e.enforcer.GetFilteredPolicy(1, domain)
+	if err != nil {
+		return 0, err
+	}
+	return int64(len(rules)), nil
+}
+
+// RemovePoliciesForDomain 删除某域内的全部 p 策略；适配器写入失败时内存不会被改动。
+func (e *Enforcer) RemovePoliciesForDomain(domain string) (bool, error) {
+	return e.enforcer.RemoveFilteredPolicy(1, domain)
+}
+
+// RemoveGroupingForDomain 删除某域内的全部角色绑定 g 规则。
+func (e *Enforcer) RemoveGroupingForDomain(domain string) (bool, error) {
+	return e.enforcer.RemoveFilteredGroupingPolicy(2, domain)
+}
+
+// ReloadPolicy 从存储重新加载全部策略，用于确认内存判定与持久化一致（无残留）。
+func (e *Enforcer) ReloadPolicy() error {
+	return e.enforcer.LoadPolicy()
+}
