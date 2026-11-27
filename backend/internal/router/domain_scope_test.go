@@ -95,7 +95,7 @@ func TestDomainAdminCannotTouchUsersOutsideOwnDomain(t *testing.T) {
 
 	foreignToken, _ := loginAs(t, env.engine, "ua_alpha", "UaAlpha@123456")
 	var foreignBefore models.User
-	require.NoError(t, env.db.First(&foreignBefore, foreign.ID))
+	require.NoError(t, env.db.First(&foreignBefore, foreign.ID).Error)
 
 	daToken, _ := loginAs(t, env.engine, "da_beta", "DaBeta@123456")
 
@@ -127,7 +127,7 @@ func TestDomainAdminCannotTouchUsersOutsideOwnDomain(t *testing.T) {
 	assert.Equal(t, http.StatusOK, meW.Code, meW.Body.String())
 
 	var foreignAfter models.User
-	require.NoError(t, env.db.First(&foreignAfter, foreign.ID))
+	require.NoError(t, env.db.First(&foreignAfter, foreign.ID).Error)
 	assert.Equal(t, foreignBefore.PasswordHash, foreignAfter.PasswordHash)
 	assert.Equal(t, foreignBefore.Email, foreignAfter.Email)
 	assert.Equal(t, foreignBefore.DisplayName, foreignAfter.DisplayName)
@@ -139,7 +139,7 @@ func TestDomainAdminCannotTouchUsersOutsideOwnDomain(t *testing.T) {
 		map[string]string{"display_name": "By Beta DA"}, daToken, escDomainHeader("beta"))
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	var localAfter models.User
-	require.NoError(t, env.db.First(&localAfter, local.ID))
+	require.NoError(t, env.db.First(&localAfter, local.ID).Error)
 	assert.Equal(t, "By Beta DA", localAfter.DisplayName)
 
 	// 7) 本域普通用户：允许重置密码
@@ -172,7 +172,7 @@ func TestDomainAdminCannotTouchUsersOutsideOwnDomain(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 	}
 	var localFinal models.User
-	require.NoError(t, env.db.First(&localFinal, local.ID))
+	require.NoError(t, env.db.First(&localFinal, local.ID).Error)
 	assert.Equal(t, "active", localFinal.Status)
 	assert.Equal(t, "ub_beta", localFinal.Username)
 
@@ -210,7 +210,7 @@ func TestDomainMutationsAreSuperAdminOnly(t *testing.T) {
 		map[string]string{"name": "renamed-by-da"}, daToken, escDomainHeader("beta"))
 	assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
 	var after models.Domain
-	require.NoError(t, env.db.First(&after, delta.ID))
+	require.NoError(t, env.db.First(&after, delta.ID).Error)
 	assert.Equal(t, "delta", after.Name)
 
 	// 也不能删域
@@ -224,7 +224,7 @@ func TestDomainMutationsAreSuperAdminOnly(t *testing.T) {
 		map[string]string{"name": "delta-2"}, adminToken)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	var renamed models.Domain
-	require.NoError(t, env.db.First(&renamed, delta.ID))
+	require.NoError(t, env.db.First(&renamed, delta.ID).Error)
 	assert.Equal(t, "delta-2", renamed.Name)
 
 	w = doJSON(t, env.engine, http.MethodDelete, fmt.Sprintf("/api/v1/domains/%d", delta.ID), nil, adminToken)
@@ -360,7 +360,7 @@ func TestManagementPathIsProtected(t *testing.T) {
 		map[string]string{"status": "disabled"}, adminToken)
 	assert.Equal(t, http.StatusConflict, w.Code, w.Body.String())
 	var stillActive models.User
-	require.NoError(t, env.db.First(&stillActive, admin.ID))
+	require.NoError(t, env.db.First(&stillActive, admin.ID).Error)
 	assert.Equal(t, "active", stillActive.Status)
 
 	// 替换 openiam 域角色摘掉 super_admin → 409
