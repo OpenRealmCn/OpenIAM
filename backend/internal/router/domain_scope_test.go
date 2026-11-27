@@ -66,7 +66,7 @@ func countRows(t *testing.T, env *testEnv, model interface{}, query string, args
 // 验收 1~4：域管理员不得跨域改 / 删 / 重置用户，也不能靠篡改请求头或请求体越权。
 func TestDomainAdminCannotTouchUsersOutsideOwnDomain(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 
 	createDomainAs(t, env, adminToken, "alpha")
 	createDomainAs(t, env, adminToken, "beta")
@@ -190,7 +190,7 @@ func TestDomainAdminCannotTouchUsersOutsideOwnDomain(t *testing.T) {
 // 验收 5：域改 / 删为超管专属，域级 domains:write 不足以授权。
 func TestDomainMutationsAreSuperAdminOnly(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 
 	createDomainAs(t, env, adminToken, "beta")
 	delta := createDomainAs(t, env, adminToken, "delta")
@@ -241,7 +241,7 @@ func TestDomainMutationsAreSuperAdminOnly(t *testing.T) {
 // 验收 6：有依赖的域删除返回 409，不产生部分删除。
 func TestDomainDeleteBlocksOnDependencies(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 
 	// 角色依赖
 	gamma := createDomainAs(t, env, adminToken, "gamma")
@@ -288,7 +288,7 @@ func TestDomainDeleteBlocksOnDependencies(t *testing.T) {
 // 验收 6+8：可清理的域删除后 Casbin 无残留（存储、运行时、重启后判定一致），重建同名域不继承旧权限。
 func TestDomainDeleteCleansCasbinAndDoesNotResurrect(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 
 	ghost := createDomainAs(t, env, adminToken, "ghost")
 	addPolicyAs(t, env, adminToken, "phantom", "ghost", "users", "read")
@@ -323,7 +323,7 @@ func TestDomainDeleteCleansCasbinAndDoesNotResurrect(t *testing.T) {
 // 验收 7：注入策略清理失败 → 不报成功，域不能被删掉（不存在"域已删、授权仍生效"）。
 func TestDomainDeleteFailsClosedWhenPolicyCleanupFails(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 
 	kappa := createDomainAs(t, env, adminToken, "kappa")
 	addPolicyAs(t, env, adminToken, "phantom", "kappa", "users", "read")
@@ -351,7 +351,7 @@ func TestDomainDeleteFailsClosedWhenPolicyCleanupFails(t *testing.T) {
 // 验收 6（管理路径）：不能把最后一个可用超管停用、降权或删除；主域 openiam 不可停用/删除。
 func TestManagementPathIsProtected(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 
 	var admin models.User
 	require.NoError(t, env.db.Where("username = ?", "admin").First(&admin).Error)

@@ -99,7 +99,7 @@ func settingsValues(t *testing.T, env *testEnv) map[string]string {
 // 验收 1：域管理员新建含 settings:write / domains:write / 全局身份源管理权限的角色 → 403。
 func TestDomainAdminCannotGrantPlatformPermissions(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 	_, daToken := newDomainAdmin(t, env, adminToken, "p0a_da")
 
 	role := createRoleAs(t, env, daToken, rbac.DefaultDomain, "escalate_role")
@@ -152,7 +152,7 @@ func TestDomainAdminCannotGrantPlatformPermissions(t *testing.T) {
 // 验收 2：先建空角色→授自己→再往里加高权、改已授权角色加高权、引用 B 域角色、授已有高权角色，全部失败。
 func TestDomainAdminCannotEscalateThroughRoleWorkflow(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 	daID, daToken := newDomainAdmin(t, env, adminToken, "p0a_da2")
 
 	// 先建空角色并授给自己
@@ -231,7 +231,7 @@ func TestDomainAdminCannotEscalateThroughRoleWorkflow(t *testing.T) {
 // 验收 3：域管理员给本域用户委派允许的业务权限 → 成功。
 func TestDomainAdminCanDelegateBusinessPermissions(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 	_, daToken := newDomainAdmin(t, env, adminToken, "p0a_da4")
 
 	role := createRoleAs(t, env, daToken, rbac.DefaultDomain, "ops_role")
@@ -265,7 +265,7 @@ func TestDomainAdminCanDelegateBusinessPermissions(t *testing.T) {
 // 委派上限还要求「不超过调用者自身权限」。
 func TestDelegationCannotExceedCallerOwnPermissions(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 	_, daToken := newDomainAdmin(t, env, adminToken, "p0a_da5")
 
 	role := createRoleAs(t, env, daToken, rbac.DefaultDomain, "ops_role_limit")
@@ -286,7 +286,7 @@ func TestDelegationCannotExceedCallerOwnPermissions(t *testing.T) {
 // 验收 4：预置历史越权角色后，运行中与重启后都拿不到平台能力；含通配符的历史策略对非超管一律失效。
 func TestPresetEscalatedPoliciesStayIneffective(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 
 	// 直接往 Casbin 塞历史越权策略（等价于升级前遗留的脏数据）
 	require.NoError(t, env.db.Create(&models.Role{
@@ -359,7 +359,7 @@ func TestPresetEscalatedPoliciesStayIneffective(t *testing.T) {
 // 验收 5：普通权限变更造不出超管。
 func TestPermissionChangesCannotCreateSuperAdmin(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 	daID, daToken := newDomainAdmin(t, env, adminToken, "p0a_da6")
 
 	// 不能建同名超管角色
@@ -412,7 +412,7 @@ func TestPermissionChangesCannotCreateSuperAdmin(t *testing.T) {
 // 且数据库配置与运行中的 CORS / 注册开关 / 限流 / TTL 都没变。
 func TestGlobalSettingsOnlyForSuperAdmin(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 	_, daToken := newDomainAdmin(t, env, adminToken, "p0a_da7")
 
 	beforeSnapshot := env.settingsSvc.Snapshot()
