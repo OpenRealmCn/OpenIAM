@@ -491,3 +491,75 @@ func TestSystemSettingsDatabasePersistenceAndHotReload(t *testing.T) {
 	assert.NotNil(t, auditRow.BeforeState)
 	assert.NotNil(t, auditRow.AfterState)
 }
+
+func TestOrdinaryUserSelfServiceOAuthClientAndAuthCode(t *testing.T) {
+	env := setupTestEnv(t, "")
+
+	// 1. 注册并登录普通用户（默认拥有 viewer 角色 -> oauth_clients:create_own & oauth_clients:authorize）
+	regW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "devuser",
+		"email":    "devuser@openrealm.local",
+		"password": "DevUser@123",
+	}, "")
+	require.Equal(t, http.StatusCreated, regW.Code)
+	userToken, _ := loginAs(t, env.engine, "devuser", "DevUser@123")
+
+	// 2. 普通用户创建自己的 OAuth 应用
+	createW := doJSON(t, env.engine, http.MethodPost, "/api/v1/my/oauth-clients", map[string]interface{}{
+		"name":            "My Personal App",
+		"domain_code":     "openiam",
+		"redirect_uris":   []string{"https://myapp.example.com/callback"},
+		"grant_types":     []string{"authorization_code", "refresh_token"},
+		"scopes":          []string{"openid", "profile", "email"},
+		"require_pkce":    false,
+		"is_confidential": true,
+	}, userToken)
+	require.Equal(t, http.StatusCreated, createW.Code, createW.Body.String())
+
+	var createResp struct {
+		Data struct {
+			Client       models.OAuthClient `json:"client"`
+			ClientSecret string             `json:"client_secret"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(createW.Body.Bytes(), &createResp))
+	require.NotEmpty(t, createResp.Data.Client.ClientID)
+	require.NotEmpty(t, createResp.Data.ClientSecret)
+
+	// 3. 普通用户查看自己的应用列表
+	listW := doJSON(t, env.engine, http.MethodGet, "/api/v1/my/oauth-clients", nil, userToken)
+	require.Equal(t, http.StatusOK, listW.Code)
+	assert.Contains(t, listW.Body.String(), createResp.Data.Client.ClientID)
+
+	// 4. 普通用户为该应用生成一次性授权码 (Code)
+	codeW := doJSON(t, env.engine, http.MethodPost, "/api/v1/oauth2/codes", map[string]interface{}{
+		"client_id":    createResp.Data.Client.ClientID,
+		"redirect_uri": "https://myapp.example.com/callback",
+		"scopes":       []string{"openid", "profile", "email"},
+	}, userToken)
+	require.Equal(t, http.StatusCreated, codeW.Code, codeW.Body.String())
+
+	var codeResp struct {
+		Data struct {
+			Code string `json:"code"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(codeW.Body.Bytes(), &codeResp))
+	require.NotEmpty(t, codeResp.Data.Code)
+
+	// 5. 使用该授权码调用标准 /oauth2/token 换取 Access Token 和 ID Token
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("code", codeResp.Data.Code)
+	form.Set("redirect_uri", "https://myapp.example.com/callback")
+	form.Set("client_id", createResp.Data.Client.ClientID)
+	form.Set("client_secret", createResp.Data.ClientSecret)
+
+	tokReq := httptest.NewRequest(http.MethodPost, "/oauth2/token", strings.NewReader(form.Encode()))
+	tokReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokW := httptest.NewRecorder()
+	env.engine.ServeHTTP(tokW, tokReq)
+	require.Equal(t, http.StatusOK, tokW.Code, tokW.Body.String())
+	assert.Contains(t, tokW.Body.String(), `"access_token"`)
+	assert.Contains(t, tokW.Body.String(), `"id_token"`)
+}

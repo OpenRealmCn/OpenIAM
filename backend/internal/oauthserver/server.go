@@ -437,6 +437,99 @@ func (s *Server) SubmitConsentDecision(c *gin.Context) {
 	})
 }
 
+type createAuthCodeReq struct {
+	ClientID            string   `json:"client_id" binding:"required"`
+	RedirectURI         string   `json:"redirect_uri"`
+	Scopes              []string `json:"scopes"`
+	State               string   `json:"state"`
+	CodeChallenge       string   `json:"code_challenge"`
+	CodeChallengeMethod string   `json:"code_challenge_method"`
+}
+
+// CreateAuthorizationCode 允许已登录且具备 oauth_clients:authorize 权限的用户为指定 OAuth 应用生成一次性授权码 (Code)。
+func (s *Server) CreateAuthorizationCode(c *gin.Context) {
+	var req createAuthCodeReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "参数错误: " + err.Error()})
+		return
+	}
+
+	var client models.OAuthClient
+	if err := s.db.Where("client_id = ? AND status = ?", req.ClientID, "active").First(&client).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "OAuth 应用不存在或未启用"})
+		return
+	}
+
+	redirectURI := strings.TrimSpace(req.RedirectURI)
+	if redirectURI == "" && len(client.RedirectURIs) > 0 {
+		redirectURI = client.RedirectURIs[0]
+	}
+	rec := &ClientRecord{Model: client}
+	if !rec.AllowsRedirectURI(redirectURI) {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "回调地址不在该应用白名单中"})
+		return
+	}
+
+	scopes := req.Scopes
+	if len(scopes) == 0 {
+		scopes = client.Scopes
+	}
+	if len(scopes) == 0 {
+		scopes = []string{"openid", "profile", "email"}
+	}
+
+	userIDVal, _ := c.Get("user_id")
+	userID, _ := userIDVal.(uint64)
+	usernameVal, _ := c.Get("username")
+	username, _ := usernameVal.(string)
+
+	authReq := &server.AuthorizeRequest{
+		ResponseType:        oauth2.Code,
+		ClientID:            client.ClientID,
+		Scope:               strings.Join(scopes, " "),
+		RedirectURI:         redirectURI,
+		State:               req.State,
+		UserID:              fmt.Sprintf("%d", userID),
+		CodeChallenge:       req.CodeChallenge,
+		CodeChallengeMethod: oauth2.CodeChallengeMethod(req.CodeChallengeMethod),
+	}
+
+	ti, err := s.oauthSrv.GetAuthorizeToken(c.Request.Context(), authReq)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "生成授权码失败: " + err.Error()})
+		return
+	}
+
+	data := s.oauthSrv.GetAuthorizeData(oauth2.Code, ti)
+	finalRedirect, _ := s.oauthSrv.GetRedirectURI(authReq, data)
+
+	s.auditSvc.RecordFromContext(c, audit.Entry{
+		ActorID:       userID,
+		ActorUsername: username,
+		DomainCode:    client.DomainCode,
+		Action:        "oauth2.code.create",
+		ResourceType:  "oauth_client",
+		ResourceID:    client.ClientID,
+		After: map[string]interface{}{
+			"redirect_uri": redirectURI,
+			"scopes":       scopes,
+		},
+		Status: "success",
+	})
+
+	c.JSON(http.StatusCreated, gin.H{
+		"code":    0,
+		"message": "created",
+		"data": gin.H{
+			"code":         ti.GetCode(),
+			"client_id":    client.ClientID,
+			"redirect_uri": finalRedirect,
+			"scopes":       scopes,
+			"expires_in":   int64(ti.GetCodeExpiresIn().Seconds()),
+		},
+	})
+}
+
 // Token 处理 POST /oauth2/token。
 func (s *Server) Token(c *gin.Context) {
 	if err := s.oauthSrv.HandleTokenRequest(c.Writer, c.Request); err != nil {

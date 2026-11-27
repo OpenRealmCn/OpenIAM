@@ -44,9 +44,10 @@ import {
   VerifiedUser as ShieldIcon,
   SystemUpdateAlt as VersionIcon,
 } from '@mui/icons-material';
+import { AnimatePresence, motion } from 'framer-motion';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { useThemeStore } from '../store/themeStore';
+import { MOTION_SPEED_SCALE, useThemeStore } from '../store/themeStore';
 import { PageTransition } from './PageTransition';
 import { ThemeDrawer } from './ThemeDrawer';
 
@@ -93,7 +94,10 @@ const navSections: { title: string; items: NavItem[] }[] = [
 export const AppLayout: React.FC = () => {
   const theme = useTheme();
   const toggleColorMode = useThemeStore((s) => s.toggleColorMode);
+  const motionSpeed = useThemeStore((s) => s.motionSpeed);
+  const motionScale = MOTION_SPEED_SCALE[motionSpeed] ?? 1;
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [searchFocused, setSearchFocused] = useState(false);
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const [themeDrawerOpen, setThemeDrawerOpen] = useState(false);
   const { user, domains, currentDomain, switchDomain, logout } = useAuth();
@@ -250,43 +254,56 @@ export const AppLayout: React.FC = () => {
             <MenuIcon />
           </IconButton>
 
-          {/* 全局快捷搜索 */}
-          <Autocomplete
-            size="small"
-            options={allNavItems}
-            getOptionLabel={(o) => o.label}
-            filterOptions={(options, state) => {
-              const q = state.inputValue.trim().toLowerCase();
-              if (!q) return options;
-              return options.filter(
-                (o) => o.label.toLowerCase().includes(q) || o.keywords.toLowerCase().includes(q),
-              );
-            }}
-            onChange={(_, val) => {
-              if (val) navigate(val.path);
-            }}
-            sx={{ width: { xs: 165, sm: 245, lg: 300 } }}
-            renderInput={(params) => (
-              <TextField
-                {...params}
-                placeholder="搜索页面..."
-                InputProps={{
-                  ...params.InputProps,
-                  startAdornment: (
-                    <InputAdornment position="start">
-                      <SearchIcon fontSize="small" color="action" />
-                    </InputAdornment>
-                  ),
-                }}
-                sx={{
-                  '& .MuiOutlinedInput-root': {
-                    bgcolor: 'background.paper',
-                    height: 36,
-                  },
-                }}
-              />
-            )}
-          />
+          {/* 全局快捷搜索（聚焦平滑展开动画） */}
+          <motion.div
+            animate={{ width: searchFocused ? 310 : 220 }}
+            transition={
+              motionScale === 0
+                ? { duration: 0 }
+                : { type: 'spring', stiffness: 360 / motionScale, damping: 30 }
+            }
+            style={{ maxWidth: '48vw' }}
+          >
+            <Autocomplete
+              size="small"
+              options={allNavItems}
+              getOptionLabel={(o) => o.label}
+              filterOptions={(options, state) => {
+                const q = state.inputValue.trim().toLowerCase();
+                if (!q) return options;
+                return options.filter(
+                  (o) => o.label.toLowerCase().includes(q) || o.keywords.toLowerCase().includes(q),
+                );
+              }}
+              onChange={(_, val) => {
+                if (val) navigate(val.path);
+              }}
+              fullWidth
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  placeholder="搜索页面..."
+                  onFocus={() => setSearchFocused(true)}
+                  onBlur={() => setSearchFocused(false)}
+                  InputProps={{
+                    ...params.InputProps,
+                    startAdornment: (
+                      <InputAdornment position="start">
+                        <SearchIcon fontSize="small" color={searchFocused ? 'primary' : 'action'} />
+                      </InputAdornment>
+                    ),
+                  }}
+                  sx={{
+                    '& .MuiOutlinedInput-root': {
+                      bgcolor: 'background.paper',
+                      height: 36,
+                      boxShadow: searchFocused ? `0 0 0 3px ${alpha(theme.palette.primary.main, 0.14)}` : 'none',
+                    },
+                  }}
+                />
+              )}
+            />
+          </motion.div>
 
           {/* 业务域选择器 */}
           <FormControl size="small" sx={{ minWidth: { xs: 110, sm: 170 } }}>
@@ -404,9 +421,11 @@ export const AppLayout: React.FC = () => {
           maxWidth: '100%',
         }}
       >
-        <PageTransition key={location.pathname}>
-          <Outlet />
-        </PageTransition>
+        <AnimatePresence mode="wait">
+          <PageTransition key={location.pathname}>
+            <Outlet />
+          </PageTransition>
+        </AnimatePresence>
       </Box>
 
       <ThemeDrawer open={themeDrawerOpen} onClose={() => setThemeDrawerOpen(false)} />

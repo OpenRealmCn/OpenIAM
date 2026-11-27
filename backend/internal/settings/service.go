@@ -76,8 +76,8 @@ var defaultSpecs = []settingSpec{
 		Category:    "security",
 		DefaultVal:  "5",
 		ValueType:   "int",
-		Label:       "最大连续登录失败次数",
-		Description: "连续密码错误达到该次数后将触发账号临时锁定（正整数）。",
+		Label:       "登录失败锁定阈值",
+		Description: "连续密码错误达到此次数后，将临时锁定账号。",
 	},
 	{
 		Key:         KeySecurityLockoutMinutes,
@@ -85,119 +85,119 @@ var defaultSpecs = []settingSpec{
 		DefaultVal:  "15",
 		ValueType:   "int",
 		Label:       "账号锁定时长（分钟）",
-		Description: "触发登录失败保护后的锁定持续分钟数。",
+		Description: "触发登录保护后的锁定持续时间。",
 	},
 	{
 		Key:         KeySecurityAllowPublicRegister,
 		Category:    "security",
 		DefaultVal:  "true",
 		ValueType:   "bool",
-		Label:       "允许公开自助注册",
-		Description: "关闭后将禁止通过注册接口与登录页自助注册新账号，仅管理员可创建用户。",
+		Label:       "开放用户自主注册",
+		Description: "关闭后仅允许管理员在控制台创建账号。",
 	},
 	{
 		Key:         KeyJWTIssuer,
 		Category:    "jwt",
 		DefaultVal:  "http://localhost:5173",
 		ValueType:   "string",
-		Label:       "JWT 签发者 (iss)",
-		Description: "平台颁发的 RS256 Access Token 中的 iss 声明（建议填写对外访问的前端主入口域名）。",
+		Label:       "令牌签发者（Issuer）",
+		Description: "访问令牌的签发方标识，建议填写平台对外访问地址。",
 	},
 	{
 		Key:         KeyJWTAccessTokenTTLMin,
 		Category:    "jwt",
 		DefaultVal:  "30",
 		ValueType:   "int",
-		Label:       "Access Token 有效期（分钟）",
-		Description: "平台登录态 JWT 访问令牌的过期时间（分钟）。",
+		Label:       "访问令牌有效期（分钟）",
+		Description: "单次签发的访问令牌有效时长。",
 	},
 	{
 		Key:         KeyJWTRefreshTokenTTLHours,
 		Category:    "jwt",
 		DefaultVal:  "168",
 		ValueType:   "int",
-		Label:       "Refresh Token 有效期（小时）",
-		Description: "Redis 刷新令牌会话保留时长（默认 168 小时即 7 天）。",
+		Label:       "刷新令牌有效期（小时）",
+		Description: "登录会话最长免密续期时长，默认 168 小时（7 天）。",
 	},
 	{
 		Key:         KeyRateLimitEnabled,
 		Category:    "ratelimit",
 		DefaultVal:  "true",
 		ValueType:   "bool",
-		Label:       "启用 IP 速率限制",
-		Description: "开启后将基于客户端 IP 执行认证端点与通用 API 频率保护。",
+		Label:       "启用请求频率限制",
+		Description: "按客户端来源 IP 限制高频请求，防止暴力尝试与接口滥用。",
 	},
 	{
 		Key:         KeyRateLimitGeneralRate,
 		Category:    "ratelimit",
 		DefaultVal:  "120-M",
 		ValueType:   "string",
-		Label:       "通用 API 限流阈值",
-		Description: "格式如 120-M（每分钟120次）、20-S（每秒20次）、1000-H（每小时1000次）。",
+		Label:       "常规接口限流规则",
+		Description: "支持按秒/分/小时配置，如 120-M、20-S、1000-H。",
 	},
 	{
 		Key:         KeyRateLimitAuthRate,
 		Category:    "ratelimit",
 		DefaultVal:  "15-M",
 		ValueType:   "string",
-		Label:       "认证接口限流阈值",
-		Description: "登录/注册/联合登录/Token 端点防暴力破解限流阈值，格式如 15-M。",
+		Label:       "认证接口限流规则",
+		Description: "应用于登录、注册与令牌签发接口，建议设置更严格的阈值。",
 	},
 	{
 		Key:         KeyOAuthServerIssuer,
 		Category:    "oauth_server",
 		DefaultVal:  "http://localhost:5173",
 		ValueType:   "string",
-		Label:       "OIDC Discovery Issuer",
-		Description: "OpenIAM 作为 OAuth2/OIDC 服务端对外暴露的根地址（统一走前端主入口，用于生成 Discovery 与 ID Token）。",
+		Label:       "OIDC 服务标识（Issuer）",
+		Description: "对外暴露的 OIDC 服务根地址，用于自动发现与身份令牌签发。",
 	},
 	{
 		Key:         KeyOAuthServerFrontendConsentURL,
 		Category:    "oauth_server",
 		DefaultVal:  "http://localhost:5173/oauth2/consent",
 		ValueType:   "string",
-		Label:       "前端授权同意页 URL",
-		Description: "第三方应用发起 /oauth2/authorize 后跳转的用户确认授权页面地址。",
+		Label:       "授权确认页地址",
+		Description: "外部应用发起 OAuth 授权时跳转的用户确认页面地址。",
 	},
 	{
 		Key:         KeyOAuthServerAuthCodeTTLMin,
 		Category:    "oauth_server",
 		DefaultVal:  "10",
 		ValueType:   "int",
-		Label:       "OAuth2 授权码有效期（分钟）",
-		Description: "授权码（Authorization Code）在 Redis 中的有效时长。",
+		Label:       "授权码有效期（分钟）",
+		Description: "OAuth 2.0 一次性授权码（Code）的有效时长。",
 	},
 	{
 		Key:         KeyOAuthServerAccessTokenTTLMin,
 		Category:    "oauth_server",
 		DefaultVal:  "60",
 		ValueType:   "int",
-		Label:       "OAuth2 应用 Access Token 有效期（分钟）",
-		Description: "接入 OpenIAM 的外部应用获得的访问令牌有效期。",
+		Label:       "应用访问令牌有效期（分钟）",
+		Description: "第三方接入应用获取的访问令牌有效时长。",
 	},
 	{
 		Key:         KeyOAuthServerRefreshTokenTTLHours,
 		Category:    "oauth_server",
 		DefaultVal:  "720",
 		ValueType:   "int",
-		Label:       "OAuth2 应用 Refresh Token 有效期（小时）",
-		Description: "接入 OpenIAM 的外部应用刷新令牌有效期（默认 720 小时即 30 天）。",
+		Label:       "应用刷新令牌有效期（小时）",
+		Description: "第三方接入应用刷新令牌的有效时长，默认 720 小时（30 天）。",
 	},
 	{
 		Key:         KeyOAuthPluginCallbackBaseURL,
 		Category:    "oauth_plugin",
 		DefaultVal:  "http://localhost:5173/oauth/callback",
 		ValueType:   "string",
-		Label:       "联合登录默认回调基地址",
-		Description: "外部身份源回调 OpenIAM 前端的基础路径（后面会自动拼接 /<provider>）。",
+		Label:       "第三方登录回调前缀",
+		Description: "外部身份源完成认证后的统一回调地址前缀。",
 	},
 	{
 		Key:         KeyServerCORSAllowOrigins,
 		Category:    "server",
 		DefaultVal:  "http://localhost:5173,http://127.0.0.1:5173",
 		ValueType:   "string_list",
-		Label:       "CORS 允许跨域来源",
-		Description: "多个 Origin 请用英文逗号分隔，或填写 * 允许全部来源。",
+		Label:       "允许跨域来源（CORS）",
+		Description: "允许访问平台接口的前端域名列表，多个地址以英文逗号分隔。",
 	},
 }
 
@@ -229,7 +229,7 @@ func (s *Service) RegisterOnChange(fn func(RuntimeSettings)) {
 	fn(snap)
 }
 
-// EnsureDefaults 幂等初始化默认系统设置并加载快照。
+// EnsureDefaults 幂等初始化默认系统设置并同步最新中文元数据说明（不覆盖已保存的值）。
 func (s *Service) EnsureDefaults() error {
 	for _, spec := range defaultSpecs {
 		var existing models.SystemSetting
@@ -245,6 +245,11 @@ func (s *Service) EnsureDefaults() error {
 			if createErr := s.db.Create(&row).Error; createErr != nil {
 				return fmt.Errorf("seed setting %s: %w", spec.Key, createErr)
 			}
+		} else if existing.Label != spec.Label || existing.Description != spec.Description {
+			_ = s.db.Model(&existing).Updates(map[string]interface{}{
+				"label":       spec.Label,
+				"description": spec.Description,
+			}).Error
 		}
 	}
 	return s.Reload()

@@ -8,7 +8,6 @@ import {
   IconButton,
   Slider,
   Stack,
-  TextField,
   ToggleButton,
   ToggleButtonGroup,
   Tooltip,
@@ -23,6 +22,7 @@ import {
   RestartAlt as ResetIcon,
   SettingsBrightness as SystemIcon,
 } from '@mui/icons-material';
+import { MuiColorInput } from 'mui-color-input';
 import {
   ColorModeSetting,
   MotionSpeed,
@@ -58,7 +58,7 @@ export const ThemeDrawer: React.FC<ThemeDrawerProps> = ({ open, onClose }) => {
       onClose={onClose}
       PaperProps={{
         sx: {
-          width: { xs: 310, sm: 340 },
+          width: { xs: 316, sm: 348 },
           p: 2.5,
           borderLeft: 1,
           borderColor: 'divider',
@@ -106,7 +106,7 @@ export const ThemeDrawer: React.FC<ThemeDrawerProps> = ({ open, onClose }) => {
           <Typography variant="subtitle2" mb={1.2}>
             主题色
           </Typography>
-          <Stack direction="row" spacing={1.2} flexWrap="wrap" useFlexGap mb={1.8}>
+          <Stack direction="row" spacing={1.2} flexWrap="wrap" useFlexGap mb={2}>
             {THEME_PRESETS.map((p) => {
               const active = preset === p.key;
               const swatch = theme.palette.mode === 'dark' ? p.darkMain : p.lightMain;
@@ -132,31 +132,18 @@ export const ThemeDrawer: React.FC<ThemeDrawerProps> = ({ open, onClose }) => {
             })}
           </Stack>
 
-          <Stack direction="row" spacing={1.2} alignItems="center">
-            <Box
-              component="input"
-              type="color"
-              value={customColor}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setCustomColor(e.target.value)}
-              sx={{
-                width: 38,
-                height: 36,
-                p: 0.3,
-                border: 1,
-                borderColor: 'divider',
-                borderRadius: 1,
-                bgcolor: 'transparent',
-                cursor: 'pointer',
-              }}
-            />
-            <TextField
-              size="small"
-              label="自定义色值"
-              value={customColor}
-              onChange={(e) => setCustomColor(e.target.value)}
-              fullWidth
-            />
-          </Stack>
+          <MuiColorInput
+            size="small"
+            fullWidth
+            format="hex"
+            label="自定义主题色"
+            value={customColor}
+            onChange={(val) => {
+              if (/^#[0-9a-fA-F]{6}$/.test(val)) {
+                setCustomColor(val);
+              }
+            }}
+          />
         </Box>
 
         {/* 圆角调节 */}
@@ -174,8 +161,8 @@ export const ThemeDrawer: React.FC<ThemeDrawerProps> = ({ open, onClose }) => {
             step={1}
             marks={[
               { value: 0, label: '0' },
-              { value: 7, label: '默认' },
-              { value: 14, label: '14' },
+              { value: 7, label: '7' },
+              { value: 14, label: '默认' },
               { value: 20, label: '20' },
             ]}
             onChange={(_, v) => setBorderRadius(v as number)}

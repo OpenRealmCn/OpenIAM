@@ -29,8 +29,8 @@ export const MOTION_SPEED_SCALE: Record<MotionSpeed, number> = {
   slow: 1.6,
 };
 
-// 默认圆角较原 12px 减少 5px，为 7px
-export const DEFAULT_BORDER_RADIUS = 7;
+// 默认基准圆角为 14px
+export const DEFAULT_BORDER_RADIUS = 14;
 
 export interface ThemePreferences {
   colorMode: ColorModeSetting;
@@ -72,7 +72,7 @@ export const useThemeStore = create<ThemeStoreState>()(
       resetDefaults: () => set({ ...defaultPreferences }),
     }),
     {
-      name: 'openiam_theme_preferences_v1',
+      name: 'openiam_theme_preferences_v2',
     },
   ),
 );

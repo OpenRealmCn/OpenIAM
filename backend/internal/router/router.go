@@ -137,9 +137,17 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 			protected.GET("/auth/me", authH.Me)
 			protected.POST("/auth/change-password", authH.ChangePassword)
 
-			// OAuth2 授权同意页审批接口
-			protected.GET("/oauth2/consent/:id", deps.OAuthSrv.GetConsentRequest)
-			protected.POST("/oauth2/consent/:id", deps.OAuthSrv.SubmitConsentDecision)
+			// OAuth2 授权同意页审批与一次性授权码生成（普通用户默认具备 oauth_clients:authorize 权限）
+			protected.GET("/oauth2/consent/:id", middleware.RequirePermission(deps.Enforcer, "oauth_clients", "authorize"), deps.OAuthSrv.GetConsentRequest)
+			protected.POST("/oauth2/consent/:id", middleware.RequirePermission(deps.Enforcer, "oauth_clients", "authorize"), deps.OAuthSrv.SubmitConsentDecision)
+			protected.POST("/oauth2/codes", middleware.RequirePermission(deps.Enforcer, "oauth_clients", "authorize"), deps.OAuthSrv.CreateAuthorizationCode)
+
+			// 个人 OAuth 应用自助管理（普通用户默认具备 oauth_clients:create_own 权限）
+			protected.GET("/my/oauth-clients", middleware.RequirePermission(deps.Enforcer, "oauth_clients", "create_own"), oauthClientH.ListMine)
+			protected.POST("/my/oauth-clients", middleware.RequirePermission(deps.Enforcer, "oauth_clients", "create_own"), oauthClientH.CreateMine)
+			protected.PUT("/my/oauth-clients/:id", middleware.RequirePermission(deps.Enforcer, "oauth_clients", "create_own"), oauthClientH.UpdateMine)
+			protected.POST("/my/oauth-clients/:id/rotate-secret", middleware.RequirePermission(deps.Enforcer, "oauth_clients", "create_own"), oauthClientH.RotateSecretMine)
+			protected.DELETE("/my/oauth-clients/:id", middleware.RequirePermission(deps.Enforcer, "oauth_clients", "create_own"), oauthClientH.DeleteMine)
 
 			// 系统、版本与动态设置管理
 			protected.GET("/system/version", middleware.RequirePermission(deps.Enforcer, "system", "read"), systemH.VersionInfo)

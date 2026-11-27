@@ -267,3 +267,64 @@ func (h *OAuthClientHandler) Delete(c *gin.Context) {
 	})
 	OK(c, gin.H{"deleted": true})
 }
+
+// ListMine 返回当前登录用户自己创建的 OAuth 应用列表。
+func (h *OAuthClientHandler) ListMine(c *gin.Context) {
+	uid := CurrentUserID(c)
+	var clients []models.OAuthClient
+	if err := h.db.Where("created_by = ?", uid).Order("id DESC").Find(&clients).Error; err != nil {
+		Fail(c, http.StatusInternalServerError, "查询个人 OAuth 应用失败")
+		return
+	}
+	OK(c, clients)
+}
+
+// CreateMine 允许拥有 oauth_clients:create_own 权限的普通用户创建自己的 OAuth 应用。
+func (h *OAuthClientHandler) CreateMine(c *gin.Context) {
+	h.Create(c)
+}
+
+// UpdateMine 允许用户更新自己创建的 OAuth 应用。
+func (h *OAuthClientHandler) UpdateMine(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		Fail(c, http.StatusBadRequest, "无效的应用 ID")
+		return
+	}
+	var client models.OAuthClient
+	if err := h.db.Where("id = ? AND created_by = ?", id, CurrentUserID(c)).First(&client).Error; err != nil {
+		Fail(c, http.StatusNotFound, "应用不存在或无权操作")
+		return
+	}
+	h.Update(c)
+}
+
+// RotateSecretMine 允许用户轮换自己创建的 OAuth 应用密钥。
+func (h *OAuthClientHandler) RotateSecretMine(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		Fail(c, http.StatusBadRequest, "无效的应用 ID")
+		return
+	}
+	var client models.OAuthClient
+	if err := h.db.Where("id = ? AND created_by = ?", id, CurrentUserID(c)).First(&client).Error; err != nil {
+		Fail(c, http.StatusNotFound, "应用不存在或无权操作")
+		return
+	}
+	h.RotateSecret(c)
+}
+
+// DeleteMine 允许用户删除自己创建的 OAuth 应用。
+func (h *OAuthClientHandler) DeleteMine(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		Fail(c, http.StatusBadRequest, "无效的应用 ID")
+		return
+	}
+	var client models.OAuthClient
+	if err := h.db.Where("id = ? AND created_by = ?", id, CurrentUserID(c)).First(&client).Error; err != nil {
+		Fail(c, http.StatusNotFound, "应用不存在或无权操作")
+		return
+	}
+	h.Delete(c)
+}

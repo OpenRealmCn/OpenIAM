@@ -173,6 +173,22 @@ export const api = {
       http.post(`/oauth-clients/${id}/rotate-secret`).then((r) => r.data.data),
     delete: (id: number) => http.delete(`/oauth-clients/${id}`).then((r) => r.data.data),
   },
+  myOAuthClients: {
+    list: () => http.get('/my/oauth-clients').then((r) => r.data.data),
+    create: (data: {
+      name: string;
+      description?: string;
+      domain_code: string;
+      redirect_uris: string[];
+      grant_types: string[];
+      scopes: string[];
+      require_pkce: boolean;
+      is_confidential: boolean;
+    }) => http.post('/my/oauth-clients', data).then((r) => r.data.data),
+    rotateSecret: (id: number) =>
+      http.post(`/my/oauth-clients/${id}/rotate-secret`).then((r) => r.data.data),
+    delete: (id: number) => http.delete(`/my/oauth-clients/${id}`).then((r) => r.data.data),
+  },
   oauthProviders: {
     listPlugins: () => http.get('/oauth-providers/plugins').then((r) => r.data.data),
     list: () => http.get('/oauth-providers').then((r) => r.data.data),
@@ -185,6 +201,12 @@ export const api = {
     getConsent: (id: string) => http.get(`/oauth2/consent/${id}`).then((r) => r.data.data),
     submitConsent: (id: string, approved: boolean) =>
       http.post(`/oauth2/consent/${id}`, { approved }).then((r) => r.data.data),
+    createCode: (data: {
+      client_id: string;
+      redirect_uri?: string;
+      scopes?: string[];
+      state?: string;
+    }) => http.post('/oauth2/codes', data).then((r) => r.data.data),
   },
   audit: {
     list: (params: Record<string, unknown>) => http.get('/audit-logs', { params }).then((r) => r.data.data),

@@ -54,6 +54,8 @@ func EnsureDefaults(db *gorm.DB, enforcer *rbac.Enforcer, cfg config.SeedConfig)
 		{DomainCode: rbac.DefaultDomain, Code: "permission:write", Name: "管理权限与策略", Resource: "permissions", Action: "write"},
 		{DomainCode: rbac.DefaultDomain, Code: "oauth_client:read", Name: "查看 OAuth 应用", Resource: "oauth_clients", Action: "read"},
 		{DomainCode: rbac.DefaultDomain, Code: "oauth_client:write", Name: "管理 OAuth 应用", Resource: "oauth_clients", Action: "write"},
+		{DomainCode: rbac.DefaultDomain, Code: "oauth_client:create_own", Name: "创建个人 OAuth 应用", Resource: "oauth_clients", Action: "create_own"},
+		{DomainCode: rbac.DefaultDomain, Code: "oauth_client:authorize", Name: "使用并授权 OAuth 应用", Resource: "oauth_clients", Action: "authorize"},
 		{DomainCode: rbac.DefaultDomain, Code: "oauth_provider:read", Name: "查看联合登录插件", Resource: "oauth_providers", Action: "read"},
 		{DomainCode: rbac.DefaultDomain, Code: "oauth_provider:write", Name: "管理联合登录插件", Resource: "oauth_providers", Action: "write"},
 		{DomainCode: rbac.DefaultDomain, Code: "audit:read", Name: "查看审计日志", Resource: "audit_logs", Action: "read"},
@@ -85,6 +87,10 @@ func EnsureDefaults(db *gorm.DB, enforcer *rbac.Enforcer, cfg config.SeedConfig)
 		// auditor 拥有只读审计与系统权限
 		_, _ = enforcer.AddPolicy("auditor", rbac.DefaultDomain, "audit_logs", "read")
 		_, _ = enforcer.AddPolicy("auditor", rbac.DefaultDomain, "system", "read")
+
+		// viewer（普通用户）默认可创建个人 OAuth 应用，并对已接入的 OAuth 应用进行授权与签发授权码
+		_, _ = enforcer.AddPolicy("viewer", rbac.DefaultDomain, "oauth_clients", "create_own")
+		_, _ = enforcer.AddPolicy("viewer", rbac.DefaultDomain, "oauth_clients", "authorize")
 	}
 
 	// 5. 默认超级管理员账号

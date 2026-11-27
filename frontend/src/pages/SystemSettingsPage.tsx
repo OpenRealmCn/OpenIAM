@@ -16,18 +16,19 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
-import { Refresh as RefreshIcon, Save as SaveIcon, Tune as TuneIcon } from '@mui/icons-material';
+import { Save as SaveIcon, Tune as TuneIcon } from '@mui/icons-material';
 import dayjs from 'dayjs';
 import { api } from '../api/client';
+import { AnimatedRefreshIcon } from '../components/PageTransition';
 import { SystemSetting } from '../types/api';
 
 const categoryMeta: Record<string, { label: string; desc: string }> = {
-  security: { label: '安全与注册策略', desc: '登录失败锁定阈值、锁定时长及公开自助注册开关' },
-  jwt: { label: 'JWT 令牌', desc: '平台 RS256 Access/Refresh 令牌签发者与有效期配置' },
-  ratelimit: { label: 'IP 速率限制', desc: '基于 Redis 的请求频率保护与防暴力破解规则' },
-  oauth_server: { label: 'OAuth2 / OIDC 服务端', desc: 'OpenIAM 作为身份提供方对外暴露的 Issuer、授权同意页与令牌生命周期' },
-  oauth_plugin: { label: '联合登录回调', desc: '外部第三方 OAuth 登录返回 OpenIAM 前端的默认回调基地址' },
-  server: { label: 'CORS 与服务策略', desc: '允许跨域访问 OpenIAM API 的来源列表' },
+  security: { label: '登录与安全', desc: '管理账号锁定阈值、锁定时长及用户注册开关' },
+  jwt: { label: '令牌设置', desc: '配置访问令牌与刷新令牌的签发方及有效期' },
+  ratelimit: { label: '请求限流', desc: '配置按来源 IP 的接口频率保护规则' },
+  oauth_server: { label: 'OAuth / OIDC 服务', desc: '配置对外授权服务的标识、确认页与令牌有效期' },
+  oauth_plugin: { label: '第三方登录回调', desc: '配置外部登录方式的默认回调地址前缀' },
+  server: { label: '跨域设置', desc: '配置允许访问平台接口的前端来源域名' },
 };
 
 const categoryOrder = ['security', 'jwt', 'ratelimit', 'oauth_server', 'oauth_plugin', 'server'];
@@ -37,6 +38,7 @@ export const SystemSettingsPage: React.FC = () => {
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [activeTab, setActiveTab] = useState<string>('security');
   const [loading, setLoading] = useState<boolean>(true);
+  const [refreshCount, setRefreshCount] = useState<number>(0);
   const [saving, setSaving] = useState<boolean>(false);
   const [error, setError] = useState<string>('');
   const [success, setSuccess] = useState<string>('');
@@ -135,7 +137,15 @@ export const SystemSettingsPage: React.FC = () => {
           </Typography>
         </Box>
         <Stack direction="row" spacing={1.5}>
-          <Button variant="outlined" startIcon={<RefreshIcon />} onClick={loadSettings} disabled={loading || saving}>
+          <Button
+            variant="outlined"
+            startIcon={<AnimatedRefreshIcon spinning={loading} spinCount={refreshCount} />}
+            onClick={() => {
+              setRefreshCount((c) => c + 1);
+              loadSettings();
+            }}
+            disabled={loading || saving}
+          >
             刷新
           </Button>
           <Button
