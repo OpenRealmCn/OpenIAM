@@ -37,17 +37,18 @@ services:
       timeout: 3s
       retries: 10
 
+  # 后端仅在 Docker 内部网络监听，不对外宿主机开放端口；所有外部流量统一经由 frontend (Nginx) 反代进入
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: openiam-backend
     restart: unless-stopped
-    ports:
-      - "${OPENIAM_PORT:-8080}:8080"
+    expose:
+      - "${OPENIAM_BACKEND_PORT:-8080}"
     environment:
       OPENIAM_HOST: "0.0.0.0"
-      OPENIAM_PORT: "8080"
+      OPENIAM_PORT: "${OPENIAM_BACKEND_PORT:-8080}"
       OPENIAM_MODE: "${OPENIAM_MODE:-release}"
       OPENIAM_MYSQL_DSN: "${OPENIAM_MYSQL_DSN:-openiam:openiam_password@tcp(host.docker.internal:3306)/openiam?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true}"
       OPENIAM_REDIS_ADDR: "${OPENIAM_REDIS_ADDR:-host.docker.internal:6379}"
@@ -63,6 +64,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  # 前端 Nginx 为唯一对外开放的主入口端口，反向代理 /api、/oauth2、/.well-known 到后端
   frontend:
     build:
       context: ./frontend
@@ -71,8 +73,10 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+    environment:
+      BACKEND_UPSTREAM: "${OPENIAM_BACKEND_UPSTREAM:-http://backend:8080}"
     ports:
-      - "${OPENIAM_FRONTEND_PORT:-5173}:80"
+      - "${OPENIAM_PORT:-5173}:80"
 
 volumes:
   openiam_mysql_data:

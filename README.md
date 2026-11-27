@@ -55,8 +55,8 @@ docker compose --profile redis up -d --build
 docker compose --profile mysql up -d --build
 ```
 
-- 前端控制台: `http://localhost:5173`
-- 后端 API & OIDC 服务: `http://localhost:8080`
+- 唯一对外主入口（控制台 + API + OIDC 反代）: `http://localhost:5173`（可通过 `OPENIAM_PORT` 修改，例如设为 `80`）
+- 后端服务仅在 Docker 内网监听，不对外暴露端口；前端 Nginx 通过 `OPENIAM_BACKEND_UPSTREAM` 动态转发至后端
 - 默认超级管理员: `admin` / `Admin@123456`
 
 ### 方式二：本地开发启动
@@ -100,10 +100,10 @@ docker compose --profile mysql up -d --build
 ## 如何让 OpenRealm 子应用接入 OpenIAM OAuth2 / OIDC
 
 1. 在 OpenIAM 控制台进入 **OAuth 应用接入**，创建新应用并填写回调地址（如 `https://app.openrealm.local/callback`），保存一次性展示的 `Client ID` 和 `Client Secret`。
-2. 在子应用的 OIDC 客户端库中配置：
-   - **Issuer / Discovery URL**: `http://localhost:8080/.well-known/openid-configuration`
-   - **Authorization Endpoint**: `http://localhost:8080/oauth2/authorize`
-   - **Token Endpoint**: `http://localhost:8080/oauth2/token`
-   - **UserInfo Endpoint**: `http://localhost:8080/oauth2/userinfo`
-   - **JWKS URI**: `http://localhost:8080/.well-known/jwks.json`
+2. 在子应用的 OIDC 客户端库中配置（统一通过 OpenIAM 主入口访问）：
+   - **Issuer / Discovery URL**: `http://localhost:5173/.well-known/openid-configuration`
+   - **Authorization Endpoint**: `http://localhost:5173/oauth2/authorize`
+   - **Token Endpoint**: `http://localhost:5173/oauth2/token`
+   - **UserInfo Endpoint**: `http://localhost:5173/oauth2/userinfo`
+   - **JWKS URI**: `http://localhost:5173/.well-known/jwks.json`
 3. 业务服务如需校验用户在特定 OpenRealm 域下的细粒度权限，可直接调用 `POST /api/v1/policies/check`（传 `user_id`, `domain`, `resource`, `action`）或使用 JWKS 本地验证 JWT 后在网关层集成。

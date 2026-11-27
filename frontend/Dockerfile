@@ -6,6 +6,8 @@ COPY . .
 RUN npm run build
 
 FROM nginx:alpine
+ENV BACKEND_UPSTREAM=http://backend:8080
+ENV NGINX_ENVSUBST_FILTER=BACKEND_UPSTREAM
 COPY --from=builder /app/dist /usr/share/nginx/html
-RUN printf 'server {\n  listen 80;\n  location / {\n    root /usr/share/nginx/html;\n    try_files $uri $uri/ /index.html;\n  }\n  location /api/ {\n    proxy_pass http://backend:8080;\n  }\n  location /oauth2/ {\n    proxy_pass http://backend:8080;\n  }\n  location /.well-known/ {\n    proxy_pass http://backend:8080;\n  }\n}\n' > /etc/nginx/conf.d/default.conf
+COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 EXPOSE 80

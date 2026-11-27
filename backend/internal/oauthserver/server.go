@@ -610,9 +610,12 @@ func (s *Server) ApplySettings(snap settings.RuntimeSettings) {
 func (s *Server) Discovery(c *gin.Context) {
 	issuer := strings.TrimRight(s.settingsSvc.Snapshot().OAuthServerIssuer, "/")
 	if issuer == "" {
-		scheme := "http"
-		if c.Request.TLS != nil {
-			scheme = "https"
+		scheme := c.GetHeader("X-Forwarded-Proto")
+		if scheme == "" {
+			scheme = "http"
+			if c.Request.TLS != nil {
+				scheme = "https"
+			}
 		}
 		issuer = scheme + "://" + c.Request.Host
 	}

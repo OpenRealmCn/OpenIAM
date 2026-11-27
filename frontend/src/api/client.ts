@@ -32,8 +32,10 @@ export function setCurrentDomain(domain: string) {
   localStorage.setItem(DOMAIN_KEY, domain);
 }
 
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\/+$/, '');
+
 export const http = axios.create({
-  baseURL: '/api/v1',
+  baseURL: API_BASE_URL,
   timeout: 15000,
 });
 
@@ -58,7 +60,7 @@ http.interceptors.response.use(
       if (refresh) {
         if (!refreshingPromise) {
           refreshingPromise = axios
-            .post('/api/v1/auth/refresh', { refresh_token: refresh })
+            .post(`${API_BASE_URL}/auth/refresh`, { refresh_token: refresh })
             .then((res) => {
               const { access_token, refresh_token } = res.data.data;
               setTokens(access_token, refresh_token);
