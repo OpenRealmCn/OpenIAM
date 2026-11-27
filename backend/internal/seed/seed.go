@@ -87,6 +87,23 @@ func EnsureDefaults(db *gorm.DB, enforcer *rbac.Enforcer, cfg config.SeedConfig,
 			_, _ = enforcer.AddPolicy("domain_admin", rbac.DefaultDomain, p.Resource, p.Action)
 		}
 
+		// 升级兼容：清掉历史版本给内置 domain_admin 角色留下的平台级策略。
+		// 运行时闸门已经屏蔽这些权限，但「能不能分配角色」读的是原始策略，
+		// 残留会让域管理员连内置 domain_admin 角色都分配不出去（403）。
+		var legacyDomains []string
+		db.Model(&models.Role{}).Where("code = ?", "domain_admin").Distinct().Pluck("domain_code", &legacyDomains)
+		for _, d := range legacyDomains {
+			rules, err := enforcer.GetPolicies(d, "domain_admin")
+			if err != nil {
+				continue
+			}
+			for _, p := range rules {
+				if !rbac.IsDelegable(p.Resource, p.Action) {
+					_, _ = enforcer.RemovePolicy("domain_admin", d, p.Resource, p.Action)
+				}
+			}
+		}
+
 		// auditor 拥有只读审计与系统权限
 		_, _ = enforcer.AddPolicy("auditor", rbac.DefaultDomain, "audit_logs", "read")
 		_, _ = enforcer.AddPolicy("auditor", rbac.DefaultDomain, "system", "read")

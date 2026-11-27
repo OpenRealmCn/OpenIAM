@@ -415,6 +415,23 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		Fail(c, http.StatusBadRequest, "原密码不正确")
 		return
 	}
+	// 新口令不得与当前口令相同：否则强制改密账号可以把已知的默认口令原样提交一次，
+	// 标记被清掉、默认口令继续可用，等于绕过整套初始凭据修复。
+	if security.VerifyPassword(user.PasswordHash, req.NewPassword) {
+		Fail(c, http.StatusBadRequest, "新密码不能与当前密码相同")
+		return
+	}
+	if security.IsLegacyDefaultPassword(req.NewPassword) {
+		Fail(c, http.StatusBadRequest, "新密码不能使用历史默认口令")
+		return
+	}
+	// 强制改密（初始管理员）沿用初始口令策略，避免用 8 位弱口令替代初始强口令。
+	if user.MustChangePassword {
+		if vErr := security.ValidateInitialPassword(req.NewPassword); vErr != nil {
+			Fail(c, http.StatusBadRequest, "新密码不符合初始口令策略: "+vErr.Error())
+			return
+		}
+	}
 	hash, err := security.HashPassword(req.NewPassword)
 	if err != nil {
 		Fail(c, http.StatusInternalServerError, "密码加密失败")

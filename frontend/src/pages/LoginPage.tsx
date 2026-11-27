@@ -56,6 +56,13 @@ export const LoginPage: React.FC = () => {
       .catch(() => setProviders([]));
   }, []);
 
+  // 从改密页回来时给一条明确的成功提示，避免用户以为没保存成功。
+  useEffect(() => {
+    if (searchParams.get('changed')) {
+      setSuccessMsg('密码已修改，请使用新密码重新登录');
+    }
+  }, [searchParams]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -63,8 +70,8 @@ export const LoginPage: React.FC = () => {
     setSubmitting(true);
     try {
       if (tab === 'login') {
-        await loginWithCredentials(username, password);
-        navigate(redirectTarget, { replace: true });
+        const forced = await loginWithCredentials(username, password);
+        navigate(forced ? '/change-password' : redirectTarget, { replace: true });
       } else {
         await api.auth.register({ username, email, password, display_name: displayName });
         setSuccessMsg('注册成功，请使用账号密码登录');

@@ -104,17 +104,18 @@ func AuthMiddleware(jwtMgr *security.JWTManager, stateStore *security.StateStore
 }
 
 // passwordChangeAllowedRoutes 为强制改密状态下唯一允许访问的接口。
+// 键为「方法 路径」。受限会话只能读自己的身份、改密与退出。
+// 允许 GET /auth/me 是为了让控制台能识别 must_change_password 并进入改密页；
+// 否则前端一刷新就拿不到身份、只能被踢回登录页，首次登录永远走不完初始化。
 var passwordChangeAllowedRoutes = map[string]bool{
-	"/api/v1/auth/change-password": true,
-	"/api/v1/auth/logout":          true,
+	"POST /api/v1/auth/change-password": true,
+	"POST /api/v1/auth/logout":          true,
+	"GET /api/v1/auth/me":               true,
 }
 
-// allowsPasswordChangeOnly 判断强制改密账号能否访问该请求（仅允许 POST 改密与退出登录）。
+// allowsPasswordChangeOnly 判断强制改密账号能否访问该请求。
 func allowsPasswordChangeOnly(method, path string) bool {
-	if method != http.MethodPost {
-		return false
-	}
-	return passwordChangeAllowedRoutes[path]
+	return passwordChangeAllowedRoutes[method+" "+path]
 }
 
 // requestPath 优先使用 Gin 注册路由的完整路径，避免尾斜杠等写法绕过白名单。

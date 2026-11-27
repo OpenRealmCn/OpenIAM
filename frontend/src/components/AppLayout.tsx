@@ -58,6 +58,9 @@ interface NavItem {
   path: string;
   keywords: string;
   icon: React.ReactNode;
+  // 平台级入口（全局设置、全局身份源）只对超级管理员展示；
+  // 域管理员点了也只会拿到 403，隐藏只是体验，鉴权仍在服务端。
+  platformOnly?: boolean;
 }
 
 const navSections: { title: string; items: NavItem[] }[] = [
@@ -78,14 +81,14 @@ const navSections: { title: string; items: NavItem[] }[] = [
     title: '应用与登录',
     items: [
       { label: '应用管理', path: '/oauth-apps', keywords: 'oauth client oidc sso 应用', icon: <AppsIcon fontSize="small" /> },
-      { label: '第三方登录', path: '/identity-providers', keywords: 'idp sso github google feishu wecom 联合登录', icon: <ProviderIcon fontSize="small" /> },
+      { label: '第三方登录', path: '/identity-providers', keywords: 'idp sso github google feishu wecom 联合登录', icon: <ProviderIcon fontSize="small" />, platformOnly: true },
     ],
   },
   {
     title: '系统',
     items: [
       { label: '审计日志', path: '/audit-logs', keywords: 'audit logs 登录记录 变更记录', icon: <AuditIcon fontSize="small" /> },
-      { label: '系统设置', path: '/system-settings', keywords: 'settings config jwt ratelimit cors 设置', icon: <SettingsIcon fontSize="small" /> },
+      { label: '系统设置', path: '/system-settings', keywords: 'settings config jwt ratelimit cors 设置', icon: <SettingsIcon fontSize="small" />, platformOnly: true },
       { label: '版本信息', path: '/system-version', keywords: 'version migration 数据库 版本', icon: <VersionIcon fontSize="small" /> },
     ],
   },
@@ -100,11 +103,19 @@ export const AppLayout: React.FC = () => {
   const [searchFocused, setSearchFocused] = useState(false);
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const [themeDrawerOpen, setThemeDrawerOpen] = useState(false);
-  const { user, domains, currentDomain, switchDomain, logout } = useAuth();
+  const { user, roles, domains, currentDomain, switchDomain, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
 
-  const allNavItems = useMemo(() => navSections.flatMap((s) => s.items), []);
+  const isSuperAdmin = useMemo(() => (roles['openiam'] || []).includes('super_admin'), [roles]);
+  const visibleSections = useMemo(
+    () =>
+      navSections
+        .map((sec) => ({ ...sec, items: sec.items.filter((i) => !i.platformOnly || isSuperAdmin) }))
+        .filter((sec) => sec.items.length > 0),
+    [isSuperAdmin],
+  );
+  const allNavItems = useMemo(() => visibleSections.flatMap((s) => s.items), [visibleSections]);
   const radius = Number(theme.shape.borderRadius);
 
   const handleLogout = async () => {
@@ -151,7 +162,7 @@ export const AppLayout: React.FC = () => {
 
       {/* 导航菜单 */}
       <Box sx={{ flex: 1, overflowY: 'auto', px: 1.5, py: 1 }}>
-        {navSections.map((sec) => (
+        {visibleSections.map((sec) => (
           <Box key={sec.title} sx={{ mb: 2 }}>
             <Typography
               variant="overline"

@@ -1,0 +1,96 @@
+import React, { useState } from 'react';
+import { Alert, Box, Button, Card, CardContent, CircularProgress, Stack, TextField, Typography } from '@mui/material';
+import { Navigate } from 'react-router-dom';
+import { api, clearTokens } from '../api/client';
+import { useAuth } from '../context/AuthContext';
+
+// 强制改密页：初始管理员以及被标记的存量账号，登录后只能先走这里。
+// 后端改密成功会吊销全部旧会话，所以完成后一律回登录页重新登录。
+export const ChangePasswordPage: React.FC = () => {
+  const { user, loading, mustChangePassword } = useAuth();
+  const [oldPassword, setOldPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  if (loading) {
+    return (
+      <Box sx={{ display: 'flex', minHeight: '100vh', alignItems: 'center', justifyContent: 'center' }}>
+        <CircularProgress />
+      </Box>
+    );
+  }
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+  if (!mustChangePassword) {
+    return <Navigate to="/" replace />;
+  }
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    if (newPassword !== confirmPassword) {
+      setError('两次输入的新密码不一致');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await api.auth.changePassword(oldPassword, newPassword);
+      clearTokens();
+      window.location.replace('/login?changed=1');
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Box sx={{ display: 'flex', minHeight: '100vh', alignItems: 'center', justifyContent: 'center', p: 2 }}>
+      <Card sx={{ width: '100%', maxWidth: 460 }}>
+        <CardContent>
+          <Stack spacing={2} component="form" onSubmit={handleSubmit}>
+            <Typography variant="h6">请先设置新密码</Typography>
+            <Typography variant="body2" color="text.secondary">
+              账号 {user.username} 仍在使用初始或历史默认口令，完成修改后才能进入控制台。
+            </Typography>
+            {error && <Alert severity="error">{error}</Alert>}
+            <TextField
+              label="当前密码"
+              type="password"
+              value={oldPassword}
+              onChange={(e) => setOldPassword(e.target.value)}
+              required
+              fullWidth
+              autoComplete="current-password"
+            />
+            <TextField
+              label="新密码"
+              type="password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              required
+              fullWidth
+              autoComplete="new-password"
+              helperText="至少 12 位，需包含大写字母、小写字母与数字，且不能是历史默认口令"
+            />
+            <TextField
+              label="确认新密码"
+              type="password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              required
+              fullWidth
+              autoComplete="new-password"
+            />
+            <Button type="submit" variant="contained" disabled={submitting}>
+              {submitting ? '提交中…' : '修改密码并重新登录'}
+            </Button>
+          </Stack>
+        </CardContent>
+      </Card>
+    </Box>
+  );
+};

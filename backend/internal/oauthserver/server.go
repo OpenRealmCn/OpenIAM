@@ -723,6 +723,12 @@ func (s *Server) Introspect(c *gin.Context) {
 
 	ctx := c.Request.Context()
 	if ti, err := s.manager.LoadAccessToken(ctx, token); err == nil && ti != nil {
+		// 强制改密账号的令牌对外一律视为不可用。这条判定必须和下面的 JWT 回退分支共用，
+		// 否则早已签发的真实 OAuth access token 在账号被标记后依然内省为 active。
+		if s.subjectRequiresPasswordChange(ctx, ti.GetUserID()) {
+			c.JSON(http.StatusOK, gin.H{"active": false})
+			return
+		}
 		exp := ti.GetAccessCreateAt().Add(ti.GetAccessExpiresIn()).Unix()
 		c.JSON(http.StatusOK, gin.H{
 			"active":    true,
@@ -757,6 +763,25 @@ func (s *Server) Introspect(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"active": false})
+}
+
+// subjectRequiresPasswordChange 判断令牌主体当前是否处于强制改密状态。
+// 主体无法解析为账号、或账号已不存在时按「不可用」处理（fail-closed）。
+func (s *Server) subjectRequiresPasswordChange(ctx context.Context, subject string) bool {
+	subject = strings.TrimSpace(subject)
+	if subject == "" {
+		return true
+	}
+	var user models.User
+	q := s.db.WithContext(ctx).Select("id, must_change_password")
+	if id, err := strconv.ParseUint(subject, 10, 64); err == nil {
+		if err := q.First(&user, id).Error; err != nil {
+			return true
+		}
+	} else if err := q.Where("username = ?", subject).First(&user).Error; err != nil {
+		return true
+	}
+	return user.MustChangePassword
 }
 
 // authenticateClient 校验调用方为已登记的机密客户端（HTTP Basic 或表单 client_id/client_secret）。

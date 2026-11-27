@@ -198,7 +198,15 @@ func (h *UserHandler) Update(c *gin.Context) {
 	}
 	// 对象归属：目标用户必须在操作者本次办理的域内至少有一个角色绑定（超管除外）。
 	// 越界时不区分"不存在"与"不在你的域"，统一 404，避免跨域探测。
-	if _, ok := requireTargetUserInDomain(c, h.enforcer, id, middleware.ResolveDomain(c)); !ok {
+	bindings, ok := requireTargetUserInDomain(c, h.enforcer, id, middleware.ResolveDomain(c))
+	if !ok {
+		return
+	}
+	// 共享身份：目标用户在别的域也有角色绑定，说明它的资料与状态属于全平台身份。
+	// 否则任一所属域的域管理员都能改其邮箱或停用账号，波及其它域。
+	if outside := bindingsOutsideDomain(bindings, middleware.ResolveDomain(c)); len(outside) > 0 &&
+		!isSuperAdmin(h.enforcer, CurrentUserID(c)) {
+		Fail(c, http.StatusForbidden, "该用户同时在其它域有归属，其资料与状态只能由平台超级管理员修改")
 		return
 	}
 	before := user
@@ -469,6 +477,12 @@ func (h *UserHandler) AssignRoles(c *gin.Context) {
 	if protectSuperAdminTarget(c, h.enforcer, id) {
 		return
 	}
+	// 授权边界：只能给「已经属于该域」的用户分配角色。
+	// 否则域管理员可以先给外域用户挂一个本域空角色、自行制造归属，
+	// 再借这个归属修改其全局资料或停用账号，等于跨域接管。
+	if _, ok := requireTargetUserInDomain(c, h.enforcer, id, req.DomainCode); !ok {
+		return
+	}
 	if !h.requireAssignableRoles(c, req.DomainCode, req.RoleCodes) {
 		return
 	}
@@ -528,6 +542,9 @@ func (h *UserHandler) RevokeRole(c *gin.Context) {
 		return
 	}
 	if protectSuperAdminTarget(c, h.enforcer, id) {
+		return
+	}
+	if _, ok := requireTargetUserInDomain(c, h.enforcer, id, domain); !ok {
 		return
 	}
 	// 保护管理路径：不得撤销最后一个可用超管的 super_admin 角色。
