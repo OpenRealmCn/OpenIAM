@@ -108,6 +108,10 @@ func (h *UserHandler) Create(c *gin.Context) {
 		if rejectSuperAdminGrant(c, h.enforcer, req.RoleCodes) {
 			return
 		}
+		// 建号时夹带角色同样是一次授予，必须过可委派上限检查。
+		if !h.requireAssignableRoles(c, roleDomain, req.RoleCodes) {
+			return
+		}
 	}
 	if req.Status != "" && req.Status != "active" && req.Status != "disabled" {
 		Fail(c, http.StatusBadRequest, "无效的用户状态")
@@ -350,6 +354,44 @@ type assignRolesReq struct {
 	Replace    bool     `json:"replace"` // true 时替换该域下原有角色；false 时增量添加
 }
 
+// requireAssignableRoles 校验把 roleCodes 授予目标域用户后不会造成越权：
+//  1. 角色必须真实存在于目标域（禁止引用其它域的角色，也禁止挂不存在的角色）；
+//  2. 角色在该域的最终生效权限集合必须落在调用者可委派上限与自身权限内
+//     —— 直接授予一个已存在的高权角色同样会被拦下。
+//
+// 超管不受限。注意这里看的是角色「当前」的最终权限，而不是角色名或角色是否内置。
+func (h *UserHandler) requireAssignableRoles(c *gin.Context, domain string, roleCodes []string) bool {
+	if h.enforcer.IsSuperAdmin(CurrentUserID(c)) {
+		return true
+	}
+	seen := make(map[string]struct{}, len(roleCodes))
+	for _, rc := range roleCodes {
+		code := strings.TrimSpace(rc)
+		if code == "" {
+			continue
+		}
+		if _, ok := seen[code]; ok {
+			continue
+		}
+		seen[code] = struct{}{}
+
+		var role models.Role
+		if err := h.db.Where("domain_code = ? AND code = ?", domain, code).First(&role).Error; err != nil {
+			Fail(c, http.StatusForbidden, "角色 ["+code+"] 不存在于域 ["+domain+"]，禁止跨域引用角色")
+			return false
+		}
+		rules, err := h.enforcer.GetPolicies(domain, code)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, "查询角色权限失败")
+			return false
+		}
+		if !validateDelegablePolicies(c, h.enforcer, domain, policiesToPermissions(rules)) {
+			return false
+		}
+	}
+	return true
+}
+
 // AssignRoles 为用户在指定域分配或替换角色，并记录完整前后审计快照。
 func (h *UserHandler) AssignRoles(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
@@ -377,6 +419,9 @@ func (h *UserHandler) AssignRoles(c *gin.Context) {
 		return
 	}
 	if protectSuperAdminTarget(c, h.enforcer, id) {
+		return
+	}
+	if !h.requireAssignableRoles(c, req.DomainCode, req.RoleCodes) {
 		return
 	}
 

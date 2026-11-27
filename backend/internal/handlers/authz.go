@@ -10,17 +10,10 @@ import (
 	"github.com/openrealm/openiam/internal/rbac"
 )
 
-// isSuperAdmin 判断用户是否拥有平台超级管理员角色。
+// isSuperAdmin 判断用户是否拥有平台超级管理员身份；实现收敛到 rbac.Enforcer，
+// 全平台只有一处推导逻辑（openiam 域下的固定角色常量 rbac.SuperAdminRole）。
 func isSuperAdmin(enforcer *rbac.Enforcer, userID uint64) bool {
-	if userID == 0 {
-		return false
-	}
-	for _, r := range enforcer.GetRolesForUserInDomain(userID, rbac.DefaultDomain) {
-		if r == rbac.SuperAdminRole {
-			return true
-		}
-	}
-	return false
+	return enforcer.IsSuperAdmin(userID)
 }
 
 // requireDomainPermission 校验当前用户在「目标域」（而非请求头声明的域）拥有指定权限，防止跨域越权。
@@ -74,6 +67,56 @@ func protectSuperAdminTarget(c *gin.Context, enforcer *rbac.Enforcer, targetID u
 		return true
 	}
 	return false
+}
+
+// validateDelegablePolicies 校验「非超管写入的最终生效权限集合」是否超界。
+// 判定按最终生效的 (resource, action) 逐条进行，不看请求里有没有出现通配符：
+//  1. 平台级权限（settings/domains/oauth_providers、任何通配形式）直接拒绝；
+//  2. 必须落在代码内固定的可委派上限（rbac.IsDelegable）内；
+//  3. 调用者自身在目标域必须拥有同一权限，禁止借委派放大自己的权力。
+//
+// 超管不受限（超管本身就是平台级权限的来源）。
+func validateDelegablePolicies(c *gin.Context, enforcer *rbac.Enforcer, domain string, policies []rbac.Permission) bool {
+	if enforcer.IsSuperAdmin(CurrentUserID(c)) {
+		return true
+	}
+	domain = strings.TrimSpace(domain)
+	if domain == "" || domain == "*" {
+		Fail(c, http.StatusForbidden, "仅超级管理员可操作全局域")
+		return false
+	}
+	uid := CurrentUserID(c)
+	for _, p := range policies {
+		res := strings.TrimSpace(p.Resource)
+		act := strings.TrimSpace(p.Action)
+		if rbac.IsPlatformPermission(res, act) {
+			Fail(c, http.StatusForbidden, "仅超级管理员可授予平台级权限: "+res+" ("+act+")")
+			return false
+		}
+		if !rbac.IsDelegable(res, act) {
+			Fail(c, http.StatusForbidden, "该权限不在域管理员可委派上限内: "+res+" ("+act+")")
+			return false
+		}
+		allowed, err := enforcer.Enforce(uid, domain, res, act)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, "权限校验服务异常")
+			return false
+		}
+		if !allowed {
+			Fail(c, http.StatusForbidden, "不可委派超出自身权限的能力: "+res+" ("+act+")")
+			return false
+		}
+	}
+	return true
+}
+
+// policiesToPermissions 把 Casbin 策略行转换成 (resource, action) 列表，用于委派上限校验。
+func policiesToPermissions(rules []rbac.PolicyRule) []rbac.Permission {
+	out := make([]rbac.Permission, 0, len(rules))
+	for _, r := range rules {
+		out = append(out, rbac.Permission{Resource: r.Resource, Action: r.Action})
+	}
+	return out
 }
 
 // validatePolicyScope 非超级管理员不得配置 super_admin 策略或含通配符的策略，防止自我提权。

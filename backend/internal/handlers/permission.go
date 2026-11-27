@@ -61,6 +61,12 @@ func (h *PermissionHandler) Create(c *gin.Context) {
 	if !requireDomainPermission(c, h.enforcer, domain, "permissions", "write") {
 		return
 	}
+	// 平台级权限点只在平台超管手里维护，避免域内权限体系里出现全局能力的入口。
+	if !h.enforcer.IsSuperAdmin(CurrentUserID(c)) &&
+		rbac.IsPlatformPermission(strings.TrimSpace(req.Resource), strings.TrimSpace(req.Action)) {
+		Fail(c, http.StatusForbidden, "平台级权限点仅超级管理员可维护")
+		return
+	}
 
 	var dup int64
 	h.db.Model(&models.Permission{}).Where("domain_code = ? AND code = ?", domain, req.Code).Count(&dup)
@@ -132,6 +138,11 @@ func (h *PermissionHandler) Update(c *gin.Context) {
 	}
 	if req.Description != "" {
 		perm.Description = strings.TrimSpace(req.Description)
+	}
+	// 按合并后的最终 resource/action 判定：不允许把域内权限点改造成平台级能力。
+	if !h.enforcer.IsSuperAdmin(CurrentUserID(c)) && rbac.IsPlatformPermission(perm.Resource, perm.Action) {
+		Fail(c, http.StatusForbidden, "平台级权限点仅超级管理员可维护")
+		return
 	}
 	if err := h.db.Save(&perm).Error; err != nil {
 		Fail(c, http.StatusInternalServerError, "更新权限点失败")
@@ -214,6 +225,14 @@ func (h *PermissionHandler) AddPolicy(c *gin.Context) {
 	if !requirePolicyWriteAccess(c, h.enforcer, req.Role, req.Domain, req.Resource, req.Action) {
 		return
 	}
+	// 策略写入同样受「可委派上限 ∩ 调用者自身权限」约束，并且在写入前确认角色属于该域，
+	// 否则可以给 B 域角色或幽灵角色挂权限，等角色被引用时一次性放大。
+	if !validateDelegablePolicies(c, h.enforcer, req.Domain, []rbac.Permission{{Resource: req.Resource, Action: req.Action}}) {
+		return
+	}
+	if !h.requireRoleInDomain(c, req.Role, req.Domain) {
+		return
+	}
 	added, err := h.enforcer.AddPolicy(req.Role, req.Domain, req.Resource, req.Action)
 	if err != nil {
 		Fail(c, http.StatusInternalServerError, "添加策略失败: "+err.Error())
@@ -264,6 +283,24 @@ type checkPolicyReq struct {
 	Domain   string `json:"domain" binding:"required"`
 	Resource string `json:"resource" binding:"required"`
 	Action   string `json:"action" binding:"required"`
+}
+
+// requireRoleInDomain 校验策略目标角色确实存在于该域；超管不受限。
+// 用于阻断「引用其它域的角色」「为不存在的角色预先挂权限」两类写入。
+func (h *PermissionHandler) requireRoleInDomain(c *gin.Context, role, domain string) bool {
+	if h.enforcer.IsSuperAdmin(CurrentUserID(c)) {
+		return true
+	}
+	var count int64
+	if err := h.db.Model(&models.Role{}).Where("domain_code = ? AND code = ?", domain, role).Count(&count).Error; err != nil {
+		Fail(c, http.StatusInternalServerError, "查询角色失败")
+		return false
+	}
+	if count == 0 {
+		Fail(c, http.StatusForbidden, "角色 ["+role+"] 不存在于域 ["+domain+"]，禁止跨域引用角色")
+		return false
+	}
+	return true
 }
 
 // CheckPolicy 提供实时权限仿真校验接口，同时供 OpenRealm 业务微服务或控制台测试调用。

@@ -77,11 +77,11 @@ func EnsureDefaults(db *gorm.DB, enforcer *rbac.Enforcer, cfg config.SeedConfig)
 		// super_admin 拥有全局通配权限
 		_, _ = enforcer.AddPolicy(rbac.SuperAdminRole, rbac.DefaultDomain, "*", "*")
 
-		// domain_admin 拥有常见读/写管理权限
-		for _, p := range defaultPerms {
-			if !((p.Resource == "domains" || p.Resource == "settings" || p.Resource == "oauth_providers") && p.Action != "read") {
-				_, _ = enforcer.AddPolicy("domain_admin", rbac.DefaultDomain, p.Resource, p.Action)
-			}
+		// domain_admin 只拿到可委派上限内的本域业务权限（与 rbac.IsDelegable 同一份事实来源），
+		// 平台级权限（settings:*、domains:*、oauth_providers:*）一律不下放，
+		// 不再依赖「排除清单」兜底，避免新增权限点被默认授予。
+		for _, p := range rbac.DelegablePermissions() {
+			_, _ = enforcer.AddPolicy("domain_admin", rbac.DefaultDomain, p.Resource, p.Action)
 		}
 
 		// auditor 拥有只读审计与系统权限

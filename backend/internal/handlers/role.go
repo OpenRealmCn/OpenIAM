@@ -76,6 +76,11 @@ func (h *RoleHandler) Create(c *gin.Context) {
 	if !requireDomainPermission(c, h.enforcer, domain, "roles", "write") {
 		return
 	}
+	// 超管角色标识是平台保留常量，非超管不得创建同名角色（防止伪造超管身份的数据）。
+	if code == rbac.SuperAdminRole && !isSuperAdmin(h.enforcer, CurrentUserID(c)) {
+		Fail(c, http.StatusForbidden, "仅超级管理员可创建超级管理员角色")
+		return
+	}
 
 	var dup int64
 	h.db.Model(&models.Role{}).Where("domain_code = ? AND code = ?", domain, code).Count(&dup)
@@ -253,10 +258,19 @@ func (h *RoleHandler) SetPermissions(c *gin.Context) {
 	if !requireRoleMutation(c, h.enforcer, role) {
 		return
 	}
+	requested := make([]rbac.Permission, 0, len(req.Policies))
 	for _, p := range req.Policies {
-		if !validatePolicyScope(c, h.enforcer, role.Code, strings.TrimSpace(p.Resource), strings.TrimSpace(p.Action)) {
+		res := strings.TrimSpace(p.Resource)
+		act := strings.TrimSpace(p.Action)
+		if !validatePolicyScope(c, h.enforcer, role.Code, res, act) {
 			return
 		}
+		requested = append(requested, rbac.Permission{Resource: res, Action: act})
+	}
+	// 全量替换后的最终生效权限集合必须落在调用者自身权限与可委派上限之内，
+	// 否则「先建空角色→授给自己→再加高权」就能绕过授予侧。
+	if !validateDelegablePolicies(c, h.enforcer, role.DomainCode, requested) {
+		return
 	}
 
 	beforePolicies, _ := h.enforcer.GetPolicies(role.DomainCode, role.Code)

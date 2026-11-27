@@ -18,7 +18,70 @@ var modelConf string
 const (
 	DefaultDomain  = "openiam"
 	SuperAdminRole = "super_admin"
+
+	// 平台级资源：只对平台超管生效，域内角色即使被预置了这些策略也不生效。
+	ResourceSettings       = "settings"
+	ResourceDomains        = "domains"
+	ResourceOAuthProviders = "oauth_providers"
 )
+
+// Permission 表示一条资源-动作权限点，对应 Casbin 策略中的 obj 与 act。
+type Permission struct {
+	Resource string `json:"resource"`
+	Action   string `json:"action"`
+}
+
+// delegablePermissions 是域管理员可委派的本域业务权限上限。
+// 这是代码内固定白名单：不含平台级资源，也不含任何通配形式。
+var delegablePermissions = []Permission{
+	{Resource: "users", Action: "read"},
+	{Resource: "users", Action: "write"},
+	{Resource: "roles", Action: "read"},
+	{Resource: "roles", Action: "write"},
+	{Resource: "permissions", Action: "read"},
+	{Resource: "permissions", Action: "write"},
+	{Resource: "audit_logs", Action: "read"},
+	{Resource: "oauth_clients", Action: "read"},
+	{Resource: "oauth_clients", Action: "write"},
+	{Resource: "oauth_clients", Action: "create_own"},
+	{Resource: "oauth_clients", Action: "authorize"},
+	{Resource: "system", Action: "read"},
+}
+
+// DelegablePermissions 返回可委派上限的副本，供 seed 与各写入路径共用同一份事实来源。
+func DelegablePermissions() []Permission {
+	out := make([]Permission, len(delegablePermissions))
+	copy(out, delegablePermissions)
+	return out
+}
+
+// IsDelegable 判断某权限点是否落在域管理员可委派上限内。
+func IsDelegable(resource, action string) bool {
+	res, act := strings.TrimSpace(resource), strings.TrimSpace(action)
+	for _, p := range delegablePermissions {
+		if p.Resource == res && p.Action == act {
+			return true
+		}
+	}
+	return false
+}
+
+// IsPlatformPermission 判断某权限点是否属于平台级能力（只对超管生效）。
+// 判定 fail-closed：空值、任何含 * 的通配形式、以及平台级资源一律视为平台级。
+func IsPlatformPermission(resource, action string) bool {
+	res, act := strings.TrimSpace(resource), strings.TrimSpace(action)
+	if res == "" || act == "" {
+		return true
+	}
+	if strings.Contains(res, "*") || strings.Contains(act, "*") {
+		return true
+	}
+	switch res {
+	case ResourceSettings, ResourceDomains, ResourceOAuthProviders:
+		return true
+	}
+	return false
+}
 
 // PolicyRule 表示一条域内 Casbin 权限策略 p(role, domain, resource, action)。
 type PolicyRule struct {
@@ -70,11 +133,73 @@ func ParseUserIDFromSubject(sub string) (uint64, bool) {
 }
 
 func (e *Enforcer) Enforce(userID uint64, domain, resource, action string) (bool, error) {
-	return e.enforcer.Enforce(SubjectForUser(userID), domain, resource, action)
+	return e.EnforceSubject(SubjectForUser(userID), domain, resource, action)
 }
 
+// EnforceSubject 是全部权限判定的唯一入口，在 Casbin 之上加两道平台级闸门：
+//  1. 平台级权限（settings/domains/oauth_providers、任何通配形式）只对超管生效，
+//     非超管即使被预置了这些策略也一律判为无权；
+//  2. 非超管的每一次「放行」都必须能在本域找到一条精确策略（obj/act 字面相等、域完全一致）。
+//     Casbin 的 keyMatch2 与域通配能让一条 *:* 或 dom=* 的脏策略放行任意请求，
+//     这类策略属于平台级授权，不能代表业务委派 —— 只由它带来的能力一律不生效（fail-closed）。
+//     同一身份在本域的其它精确策略不受影响，删掉通配策略即完全恢复。
 func (e *Enforcer) EnforceSubject(subject, domain, resource, action string) (bool, error) {
-	return e.enforcer.Enforce(subject, domain, resource, action)
+	super := e.IsSuperAdminSubject(subject)
+	if !super && IsPlatformPermission(resource, action) {
+		return false, nil
+	}
+	allowed, err := e.enforcer.Enforce(subject, domain, resource, action)
+	if err != nil || !allowed {
+		return allowed, err
+	}
+	if super {
+		return true, nil
+	}
+	if !e.hasExactGrant(subject, domain, resource, action) {
+		return false, nil
+	}
+	return true, nil
+}
+
+// IsSuperAdmin 判断用户是否持有平台超管角色（openiam 域下的固定常量角色 rbac.SuperAdminRole）。
+func (e *Enforcer) IsSuperAdmin(userID uint64) bool {
+	if userID == 0 {
+		return false
+	}
+	return e.IsSuperAdminSubject(SubjectForUser(userID))
+}
+
+// IsSuperAdminSubject 判断 Casbin subject 是否为超管身份；只认 openiam 域下的固定角色常量。
+func (e *Enforcer) IsSuperAdminSubject(subject string) bool {
+	if _, ok := ParseUserIDFromSubject(subject); !ok {
+		return false
+	}
+	for _, r := range e.enforcer.GetRolesForUserInDomain(subject, DefaultDomain) {
+		if r == SuperAdminRole {
+			return true
+		}
+	}
+	return false
+}
+
+// hasExactGrant 报告某身份是否在本域至少有一条「精确」策略与该权限点字面相等。
+// 只认 obj/act 字面相等且策略域与本域一致的策略，policy 里任何通配（obj、act 或 dom=*）
+// 都不算数；查询出错时按「没有」处理（fail-closed）。只统计直接角色，不推导角色继承，
+// 因为本仓库的 g 策略只做 user→role，没有 role→role 继承。
+func (e *Enforcer) hasExactGrant(subject, domain, resource, action string) bool {
+	roles := e.enforcer.GetRolesForUserInDomain(subject, domain)
+	for _, role := range roles {
+		rules, err := e.GetPolicies(domain, role)
+		if err != nil {
+			return false
+		}
+		for _, r := range rules {
+			if r.Resource == resource && r.Action == action && r.Domain == domain {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (e *Enforcer) AddRoleForUserInDomain(userID uint64, roleCode, domain string) (bool, error) {

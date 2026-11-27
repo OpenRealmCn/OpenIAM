@@ -35,10 +35,12 @@ import (
 )
 
 type testEnv struct {
-	engine *gin.Engine
-	db     *gorm.DB
-	rdb    *redis.Client
-	mr     *miniredis.Miniredis
+	engine      *gin.Engine
+	db          *gorm.DB
+	rdb         *redis.Client
+	mr          *miniredis.Miniredis
+	enforcer    *rbac.Enforcer
+	settingsSvc *settings.Service
 }
 
 func setupTestEnv(t *testing.T, authRate string) *testEnv {
@@ -111,7 +113,7 @@ func setupTestEnv(t *testing.T, authRate string) *testEnv {
 	})
 	require.NoError(t, err)
 
-	return &testEnv{engine: engine, db: db, rdb: rdb, mr: mr}
+	return &testEnv{engine: engine, db: db, rdb: rdb, mr: mr, enforcer: enforcer, settingsSvc: settingsSvc}
 }
 
 func doJSON(t *testing.T, engine *gin.Engine, method, path string, body interface{}, token string, headers ...map[string]string) *httptest.ResponseRecorder {
