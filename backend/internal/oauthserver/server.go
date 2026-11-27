@@ -725,7 +725,9 @@ func (s *Server) Introspect(c *gin.Context) {
 	if ti, err := s.manager.LoadAccessToken(ctx, token); err == nil && ti != nil {
 		// 强制改密账号的令牌对外一律视为不可用。这条判定必须和下面的 JWT 回退分支共用，
 		// 否则早已签发的真实 OAuth access token 在账号被标记后依然内省为 active。
-		if s.subjectRequiresPasswordChange(ctx, ti.GetUserID()) {
+		// 客户端凭据令牌没有用户主体，不参与账号态判定。
+		if subject := userTokenSubject(ti.GetUserID(), 0); subject != "" &&
+			s.subjectRequiresPasswordChange(ctx, subject) {
 			c.JSON(http.StatusOK, gin.H{"active": false})
 			return
 		}
@@ -746,12 +748,9 @@ func (s *Server) Introspect(c *gin.Context) {
 			// 与上面的令牌存储分支共用同一个主体判定：账号处于强制改密、已被删除、
 			// 或查询失败时一律按不可用处理（fail-closed），不再由本分支自己查库、
 			// 避免两条分支对内省结果给出不一致的结论。
-			// 主体为空的令牌不属于任何用户（例如客户端凭据令牌），不做账号态判定。
-			subject := strings.TrimSpace(claims.Subject)
-			if subject == "" && claims.UserID > 0 {
-				subject = strconv.FormatUint(claims.UserID, 10)
-			}
-			if subject != "" && s.subjectRequiresPasswordChange(ctx, subject) {
+			// 客户端凭据令牌没有用户主体（签发器把 userID=0 写成 sub="0"），不参与账号态判定。
+			if subject := userTokenSubject(claims.Subject, claims.UserID); subject != "" &&
+				s.subjectRequiresPasswordChange(ctx, subject) {
 				revoked = true
 			}
 		}
@@ -769,6 +768,25 @@ func (s *Server) Introspect(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"active": false})
+}
+
+// userTokenSubject 从令牌主体里取出代表用户账号的部分。
+// 客户端凭据（client_credentials）令牌不属于任何用户：go-oauth2 签发时不设置 UserID，
+// 令牌存储里的 GetUserID() 为空，JWT 签发器又把 userID=0 写成 sub="0"。若把这种主体
+// 交给账号态判定，合法的机器对机器令牌会一律内省为 inactive（空主体按 fail-closed 处理），
+// 因此这里显式区分：返回空串表示该令牌不代表任何用户账号。
+func userTokenSubject(subject string, userID uint64) string {
+	subject = strings.TrimSpace(subject)
+	if subject == "" && userID > 0 {
+		subject = strconv.FormatUint(userID, 10)
+	}
+	if subject == "" {
+		return ""
+	}
+	if id, err := strconv.ParseUint(subject, 10, 64); err == nil && id == 0 {
+		return ""
+	}
+	return subject
 }
 
 // subjectRequiresPasswordChange 判断令牌主体当前是否处于强制改密状态。
