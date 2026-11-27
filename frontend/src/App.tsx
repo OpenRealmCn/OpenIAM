@@ -1,8 +1,10 @@
 import React, { useMemo, useState } from 'react';
 import { CssBaseline, ThemeProvider } from '@mui/material';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import dayjs from 'dayjs';
+import 'dayjs/locale/zh-cn';
 import { AuthProvider } from './context/AuthContext';
-import { buildOpenIAMTheme } from './theme/theme';
+import { buildOpenIAMTheme, ThemePresetKey } from './theme/theme';
 import { AppLayout } from './components/AppLayout';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { LoginPage } from './pages/LoginPage';
@@ -19,12 +21,17 @@ import { AuditLogsPage } from './pages/AuditLogsPage';
 import { SystemSettingsPage } from './pages/SystemSettingsPage';
 import { SystemVersionPage } from './pages/SystemVersionPage';
 
+dayjs.locale('zh-cn');
+
 export const App: React.FC = () => {
   const [mode, setMode] = useState<'light' | 'dark'>(
     () => (localStorage.getItem('openiam_theme_mode') as 'light' | 'dark') || 'light',
   );
+  const [preset, setPreset] = useState<ThemePresetKey>(
+    () => (localStorage.getItem('openiam_theme_preset') as ThemePresetKey) || 'cloudBlue',
+  );
 
-  const theme = useMemo(() => buildOpenIAMTheme(mode), [mode]);
+  const theme = useMemo(() => buildOpenIAMTheme(mode, preset), [mode, preset]);
 
   const toggleMode = () => {
     setMode((prev) => {
@@ -32,6 +39,11 @@ export const App: React.FC = () => {
       localStorage.setItem('openiam_theme_mode', next);
       return next;
     });
+  };
+
+  const changePreset = (next: ThemePresetKey) => {
+    setPreset(next);
+    localStorage.setItem('openiam_theme_preset', next);
   };
 
   return (
@@ -54,7 +66,12 @@ export const App: React.FC = () => {
               path="/"
               element={
                 <ProtectedRoute>
-                  <AppLayout mode={mode} onToggleMode={toggleMode} />
+                  <AppLayout
+                    mode={mode}
+                    preset={preset}
+                    onToggleMode={toggleMode}
+                    onChangePreset={changePreset}
+                  />
                 </ProtectedRoute>
               }
             >

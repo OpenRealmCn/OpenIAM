@@ -24,7 +24,7 @@ import {
   Delete as DeleteIcon,
   Refresh as RotateIcon,
 } from '@mui/icons-material';
-import { DataGrid, GridActionsCellItem, GridColDef } from '@mui/x-data-grid';
+import { DataGrid, GridActionsCellItem, GridColDef, GridToolbar } from '@mui/x-data-grid';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { OAuthClient } from '../types/api';
@@ -204,8 +204,15 @@ export const OAuthAppsPage: React.FC = () => {
         </CardContent>
       </Card>
 
-      <Box sx={{ height: 470, bgcolor: 'background.paper', borderRadius: 3 }}>
-        <DataGrid rows={clients} columns={columns} loading={loading} disableRowSelectionOnClick />
+      <Box sx={{ height: 500 }}>
+        <DataGrid
+          rows={clients}
+          columns={columns}
+          loading={loading}
+          disableRowSelectionOnClick
+          slots={{ toolbar: GridToolbar }}
+          slotProps={{ toolbar: { showQuickFilter: true } }}
+        />
       </Box>
 
       {/* 创建应用弹窗 */}

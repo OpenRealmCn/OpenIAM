@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Alert, Box, Card, CardContent, Chip, Grid2 as Grid, Stack, Typography } from '@mui/material';
-import { DataGrid, GridColDef } from '@mui/x-data-grid';
+import { DataGrid, GridColDef, GridToolbar } from '@mui/x-data-grid';
 import dayjs from 'dayjs';
 import { api } from '../api/client';
 import { VersionHistoryItem, VersionStatus } from '../types/api';
@@ -118,8 +118,13 @@ export const SystemVersionPage: React.FC = () => {
         </Grid>
       )}
 
-      <Box sx={{ height: 440, bgcolor: 'background.paper', borderRadius: 3 }}>
-        <DataGrid rows={history} columns={columns} disableRowSelectionOnClick />
+      <Box sx={{ height: 460 }}>
+        <DataGrid
+          rows={history}
+          columns={columns}
+          disableRowSelectionOnClick
+          slots={{ toolbar: GridToolbar }}
+        />
       </Box>
     </Box>
   );

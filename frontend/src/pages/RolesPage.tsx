@@ -15,7 +15,7 @@ import {
   Typography,
 } from '@mui/material';
 import { Add as AddIcon, Delete as DeleteIcon, Tune as PermIcon } from '@mui/icons-material';
-import { DataGrid, GridActionsCellItem, GridColDef } from '@mui/x-data-grid';
+import { DataGrid, GridActionsCellItem, GridColDef, GridToolbar } from '@mui/x-data-grid';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { Permission, Role } from '../types/api';
@@ -158,8 +158,15 @@ export const RolesPage: React.FC = () => {
         </Alert>
       )}
 
-      <Box sx={{ height: 520, bgcolor: 'background.paper', borderRadius: 3 }}>
-        <DataGrid rows={roles} columns={columns} loading={loading} disableRowSelectionOnClick />
+      <Box sx={{ height: 540 }}>
+        <DataGrid
+          rows={roles}
+          columns={columns}
+          loading={loading}
+          disableRowSelectionOnClick
+          slots={{ toolbar: GridToolbar }}
+          slotProps={{ toolbar: { showQuickFilter: true } }}
+        />
       </Box>
 
       <Dialog open={createOpen} onClose={() => setCreateOpen(false)} maxWidth="xs" fullWidth>

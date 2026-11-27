@@ -14,7 +14,7 @@ import {
   Typography,
 } from '@mui/material';
 import { Visibility as DetailIcon } from '@mui/icons-material';
-import { DataGrid, GridActionsCellItem, GridColDef } from '@mui/x-data-grid';
+import { DataGrid, GridActionsCellItem, GridColDef, GridToolbar } from '@mui/x-data-grid';
 import { DateTimePicker } from '@mui/x-date-pickers/DateTimePicker';
 import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider';
 import { AdapterDayjs } from '@mui/x-date-pickers/AdapterDayjs';
@@ -108,7 +108,7 @@ export const AuditLogsPage: React.FC = () => {
   ];
 
   return (
-    <LocalizationProvider dateAdapter={AdapterDayjs}>
+    <LocalizationProvider dateAdapter={AdapterDayjs} adapterLocale="zh-cn">
       <Box>
         <Typography variant="h5" mb={0.5}>
           安全审计日志
@@ -187,8 +187,14 @@ export const AuditLogsPage: React.FC = () => {
           </Button>
         </Stack>
 
-        <Box sx={{ height: 540, bgcolor: 'background.paper', borderRadius: 3 }}>
-          <DataGrid rows={logs} columns={columns} loading={loading} disableRowSelectionOnClick />
+        <Box sx={{ height: 560 }}>
+          <DataGrid
+            rows={logs}
+            columns={columns}
+            loading={loading}
+            disableRowSelectionOnClick
+            slots={{ toolbar: GridToolbar }}
+          />
         </Box>
 
         <Drawer anchor="right" open={Boolean(detailLog)} onClose={() => setDetailLog(null)}>

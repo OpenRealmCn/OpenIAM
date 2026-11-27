@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   Alert,
+  alpha,
   Box,
   Button,
   Card,
@@ -11,6 +12,7 @@ import {
   Tabs,
   TextField,
   Typography,
+  useTheme,
 } from '@mui/material';
 import {
   GitHub as GitHubIcon,
@@ -25,6 +27,7 @@ import { useAuth } from '../context/AuthContext';
 import { PublicProvider } from '../types/api';
 
 export const LoginPage: React.FC = () => {
+  const theme = useTheme();
   const [tab, setTab] = useState<'login' | 'register'>('login');
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
@@ -94,46 +97,76 @@ export const LoginPage: React.FC = () => {
         alignItems: 'center',
         justifyContent: 'center',
         p: 2,
-        background: 'linear-gradient(135deg, #0F172A 0%, #1E3A8A 55%, #0284C7 100%)',
+        bgcolor: 'background.default',
+        backgroundImage: `radial-gradient(at 15% 20%, ${alpha(theme.palette.primary.main, 0.14)} 0px, transparent 50%), radial-gradient(at 85% 80%, ${alpha(theme.palette.secondary.main, 0.12)} 0px, transparent 50%)`,
       }}
     >
-      <Card sx={{ width: '100%', maxWidth: 440, p: 1 }}>
-        <CardContent sx={{ p: 3 }}>
-          <Stack direction="row" spacing={1.5} alignItems="center" mb={2.5}>
+      <Card
+        sx={{
+          width: '100%',
+          maxWidth: 430,
+          borderRadius: 4,
+          bgcolor: alpha(theme.palette.background.paper, 0.92),
+          backdropFilter: 'blur(16px)',
+          boxShadow:
+            theme.palette.mode === 'dark'
+              ? '0 24px 64px rgba(0, 0, 0, 0.55)'
+              : '0 20px 50px rgba(15, 23, 42, 0.08)',
+        }}
+      >
+        <CardContent sx={{ p: 4 }}>
+          <Stack spacing={1.5} alignItems="center" textAlign="center" mb={3}>
             <Box
               sx={{
-                width: 44,
-                height: 44,
-                borderRadius: 2.5,
-                bgcolor: 'primary.main',
+                width: 52,
+                height: 52,
+                borderRadius: 3,
+                background: `linear-gradient(135deg, ${theme.palette.primary.main} 0%, ${theme.palette.secondary.main} 100%)`,
                 color: '#fff',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
+                boxShadow: `0 8px 20px ${alpha(theme.palette.primary.main, 0.35)}`,
               }}
             >
-              <ShieldIcon />
+              <ShieldIcon fontSize="medium" />
             </Box>
             <Box>
               <Typography variant="h5">OpenIAM</Typography>
-              <Typography variant="body2" color="text.secondary">
-                OpenRealm 私有身份与访问管理平台
+              <Typography variant="body2" color="text.secondary" mt={0.3}>
+                OpenRealm 统一身份与访问管理平台
               </Typography>
             </Box>
           </Stack>
 
-          <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="fullWidth" sx={{ mb: 2.5 }}>
+          <Tabs
+            value={tab}
+            onChange={(_, v) => setTab(v)}
+            variant="fullWidth"
+            sx={{
+              mb: 2.5,
+              borderRadius: 2.5,
+              bgcolor: alpha(theme.palette.text.primary, 0.04),
+              p: 0.4,
+              '& .MuiTabs-indicator': { display: 'none' },
+              '& .MuiTab-root': { borderRadius: 2, minHeight: 38 },
+              '& .Mui-selected': {
+                bgcolor: 'background.paper',
+                boxShadow: '0 1px 4px rgba(15,23,42,0.08)',
+              },
+            }}
+          >
             <Tab label="账号登录" value="login" />
             <Tab label="注册账号" value="register" />
           </Tabs>
 
           {error && (
-            <Alert severity="error" sx={{ mb: 2 }}>
+            <Alert severity="error" sx={{ mb: 2, borderRadius: 2 }}>
               {error}
             </Alert>
           )}
           {successMsg && (
-            <Alert severity="success" sx={{ mb: 2 }}>
+            <Alert severity="success" sx={{ mb: 2, borderRadius: 2 }}>
               {successMsg}
             </Alert>
           )}
@@ -184,6 +217,7 @@ export const LoginPage: React.FC = () => {
                 disabled={submitting}
                 startIcon={<LoginIcon />}
                 fullWidth
+                sx={{ py: 1.15 }}
               >
                 {submitting ? '处理中...' : tab === 'login' ? '登 录' : '注 册'}
               </Button>

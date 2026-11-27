@@ -19,7 +19,7 @@ import {
   Typography,
 } from '@mui/material';
 import { Add as AddIcon, Key as KeyIcon, Security as RoleIcon } from '@mui/icons-material';
-import { DataGrid, GridActionsCellItem, GridColDef } from '@mui/x-data-grid';
+import { DataGrid, GridActionsCellItem, GridColDef, GridToolbar } from '@mui/x-data-grid';
 import dayjs from 'dayjs';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
@@ -241,12 +241,14 @@ export const UsersPage: React.FC = () => {
         </Alert>
       )}
 
-      <Box sx={{ height: 560, bgcolor: 'background.paper', borderRadius: 3 }}>
+      <Box sx={{ height: 580 }}>
         <DataGrid
           rows={users}
           columns={columns}
           loading={loading}
           disableRowSelectionOnClick
+          slots={{ toolbar: GridToolbar }}
+          slotProps={{ toolbar: { showQuickFilter: true } }}
           pageSizeOptions={[10, 25, 50]}
           initialState={{ pagination: { paginationModel: { pageSize: 25 } } }}
         />

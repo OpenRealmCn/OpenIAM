@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Box,
@@ -15,8 +15,15 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
-import { Add as AddIcon, CheckCircle as CheckIcon, Delete as DeleteIcon } from '@mui/icons-material';
-import { DataGrid, GridActionsCellItem, GridColDef } from '@mui/x-data-grid';
+import {
+  AccountTree as TreeIcon,
+  Add as AddIcon,
+  CheckCircle as CheckIcon,
+  Delete as DeleteIcon,
+} from '@mui/icons-material';
+import { DataGrid, GridActionsCellItem, GridColDef, GridToolbar } from '@mui/x-data-grid';
+import { SimpleTreeView } from '@mui/x-tree-view/SimpleTreeView';
+import { TreeItem } from '@mui/x-tree-view/TreeItem';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { Permission, PolicyRule } from '../types/api';
@@ -60,6 +67,16 @@ export const PermissionsPage: React.FC = () => {
     loadData();
     setCheckForm((prev) => ({ ...prev, domain: currentDomain }));
   }, [loadData, currentDomain]);
+
+  // 按角色分组构建 MUI X TreeView 数据结构（域 -> 角色 -> Casbin 策略）
+  const rolePolicyTree = useMemo(() => {
+    const grouped: Record<string, PolicyRule[]> = {};
+    for (const rule of policies) {
+      if (!grouped[rule.role]) grouped[rule.role] = [];
+      grouped[rule.role].push(rule);
+    }
+    return Object.entries(grouped);
+  }, [policies]);
 
   const handleCreatePerm = async () => {
     try {
@@ -107,8 +124,8 @@ export const PermissionsPage: React.FC = () => {
   const permColumns: GridColDef<Permission>[] = [
     { field: 'code', headerName: '权限编码', width: 160 },
     { field: 'name', headerName: '权限名称', width: 150 },
-    { field: 'resource', headerName: '资源 (obj)', width: 140 },
-    { field: 'action', headerName: '动作 (act)', width: 100 },
+    { field: 'resource', headerName: '资源 (obj)', width: 130 },
+    { field: 'action', headerName: '动作 (act)', width: 95 },
     {
       field: 'actions',
       type: 'actions',
@@ -122,10 +139,10 @@ export const PermissionsPage: React.FC = () => {
 
   const policyRows = policies.map((p, idx) => ({ id: `${p.role}-${p.domain}-${p.resource}-${p.action}-${idx}`, ...p }));
   const policyColumns: GridColDef<PolicyRule & { id: string }>[] = [
-    { field: 'role', headerName: '角色 (sub)', width: 140 },
-    { field: 'domain', headerName: '域 (dom)', width: 110 },
-    { field: 'resource', headerName: '资源 (obj)', width: 150 },
-    { field: 'action', headerName: '动作 (act)', width: 100 },
+    { field: 'role', headerName: '角色 (sub)', width: 135 },
+    { field: 'domain', headerName: '域 (dom)', width: 105 },
+    { field: 'resource', headerName: '资源 (obj)', width: 145 },
+    { field: 'action', headerName: '动作 (act)', width: 95 },
     {
       field: 'actions',
       type: 'actions',
@@ -143,7 +160,7 @@ export const PermissionsPage: React.FC = () => {
         <Box>
           <Typography variant="h5">权限点目录与 Casbin 策略 ({currentDomain})</Typography>
           <Typography variant="body2" color="text.secondary">
-            基于 Casbin RBAC with Domains 模型实时校验与管理策略
+            基于 Casbin RBAC with Domains 模型实时校验，并通过 MUI X TreeView & DataGrid 可视化呈现
           </Typography>
         </Box>
         <Button variant="contained" startIcon={<AddIcon />} onClick={() => setCreateOpen(true)}>
@@ -209,21 +226,72 @@ export const PermissionsPage: React.FC = () => {
         </CardContent>
       </Card>
 
+      {/* MUI X TreeView 多域 RBAC 权限层级树 */}
+      <Card sx={{ mb: 2.5 }}>
+        <CardContent>
+          <Stack direction="row" spacing={1} alignItems="center" mb={1.5}>
+            <TreeIcon color="primary" fontSize="small" />
+            <Typography variant="subtitle1" fontWeight={600}>
+              域权限拓扑树（MUI X Tree View）
+            </Typography>
+          </Stack>
+          {rolePolicyTree.length === 0 ? (
+            <Typography variant="body2" color="text.secondary">
+              当前域暂无已绑定的 Casbin 策略。
+            </Typography>
+          ) : (
+            <SimpleTreeView defaultExpandedItems={[`domain:${currentDomain}`, ...rolePolicyTree.slice(0, 2).map(([r]) => `role:${r}`)]}>
+              <TreeItem itemId={`domain:${currentDomain}`} label={`业务域: ${currentDomain} (${rolePolicyTree.length} 个角色)`}>
+                {rolePolicyTree.map(([roleCode, rules]) => (
+                  <TreeItem
+                    key={roleCode}
+                    itemId={`role:${roleCode}`}
+                    label={`角色: ${roleCode} (${rules.length} 条策略)`}
+                  >
+                    {rules.map((rule, i) => (
+                      <TreeItem
+                        key={`${roleCode}-${i}`}
+                        itemId={`rule:${roleCode}:${i}`}
+                        label={`${rule.resource}  →  ${rule.action}`}
+                      />
+                    ))}
+                  </TreeItem>
+                ))}
+              </TreeItem>
+            </SimpleTreeView>
+          )}
+        </CardContent>
+      </Card>
+
       <Grid container spacing={2.5}>
         <Grid size={{ xs: 12, lg: 6 }}>
           <Typography variant="subtitle1" fontWeight={600} mb={1}>
             权限点目录
           </Typography>
-          <Box sx={{ height: 420, bgcolor: 'background.paper', borderRadius: 3 }}>
-            <DataGrid rows={perms} columns={permColumns} loading={loading} disableRowSelectionOnClick />
+          <Box sx={{ height: 440 }}>
+            <DataGrid
+              rows={perms}
+              columns={permColumns}
+              loading={loading}
+              disableRowSelectionOnClick
+              slots={{ toolbar: GridToolbar }}
+              slotProps={{ toolbar: { showQuickFilter: true } }}
+            />
           </Box>
         </Grid>
         <Grid size={{ xs: 12, lg: 6 }}>
           <Typography variant="subtitle1" fontWeight={600} mb={1}>
             生效中的 Casbin 策略 (casbin_rule)
           </Typography>
-          <Box sx={{ height: 420, bgcolor: 'background.paper', borderRadius: 3 }}>
-            <DataGrid rows={policyRows} columns={policyColumns} loading={loading} disableRowSelectionOnClick />
+          <Box sx={{ height: 440 }}>
+            <DataGrid
+              rows={policyRows}
+              columns={policyColumns}
+              loading={loading}
+              disableRowSelectionOnClick
+              slots={{ toolbar: GridToolbar }}
+              slotProps={{ toolbar: { showQuickFilter: true } }}
+            />
           </Box>
         </Grid>
       </Grid>
