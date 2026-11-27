@@ -15,6 +15,7 @@ import (
 	"github.com/openrealm/openiam/internal/models"
 	"github.com/openrealm/openiam/internal/rbac"
 	"github.com/openrealm/openiam/internal/security"
+	"github.com/openrealm/openiam/internal/settings"
 	"gorm.io/gorm"
 )
 
@@ -28,14 +29,13 @@ type LoginResult struct {
 
 // Service 编排 OAuth 联合登录的发起与回调流程。
 type Service struct {
-	db              *gorm.DB
-	registry        *Registry
-	stateStore      *security.StateStore
-	jwtMgr          *security.JWTManager
-	enforcer        *rbac.Enforcer
-	auditSvc        *audit.Service
-	callbackBaseURL string
-	refreshTTL      time.Duration
+	db          *gorm.DB
+	registry    *Registry
+	stateStore  *security.StateStore
+	jwtMgr      *security.JWTManager
+	enforcer    *rbac.Enforcer
+	auditSvc    *audit.Service
+	settingsSvc *settings.Service
 }
 
 func NewService(
@@ -45,24 +45,16 @@ func NewService(
 	jwtMgr *security.JWTManager,
 	enforcer *rbac.Enforcer,
 	auditSvc *audit.Service,
-	callbackBaseURL string,
-	refreshTTL time.Duration,
+	settingsSvc *settings.Service,
 ) *Service {
-	if callbackBaseURL == "" {
-		callbackBaseURL = "http://localhost:5173/oauth/callback"
-	}
-	if refreshTTL <= 0 {
-		refreshTTL = 7 * 24 * time.Hour
-	}
 	return &Service{
-		db:              db,
-		registry:        registry,
-		stateStore:      stateStore,
-		jwtMgr:          jwtMgr,
-		enforcer:        enforcer,
-		auditSvc:        auditSvc,
-		callbackBaseURL: strings.TrimRight(callbackBaseURL, "/"),
-		refreshTTL:      refreshTTL,
+		db:          db,
+		registry:    registry,
+		stateStore:  stateStore,
+		jwtMgr:      jwtMgr,
+		enforcer:    enforcer,
+		auditSvc:    auditSvc,
+		settingsSvc: settingsSvc,
 	}
 }
 
@@ -71,7 +63,22 @@ func (s *Service) Registry() *Registry {
 }
 
 func (s *Service) buildRedirectURI(providerName string) string {
-	return s.callbackBaseURL + "/" + providerName
+	base := "http://localhost:5173/oauth/callback"
+	if s.settingsSvc != nil {
+		if v := strings.TrimSpace(s.settingsSvc.Snapshot().OAuthPluginCallbackBaseURL); v != "" {
+			base = v
+		}
+	}
+	return strings.TrimRight(base, "/") + "/" + providerName
+}
+
+func (s *Service) refreshTTL() time.Duration {
+	if s.settingsSvc != nil {
+		if ttl := s.settingsSvc.Snapshot().JWTRefreshTTL; ttl > 0 {
+			return ttl
+		}
+	}
+	return 7 * 24 * time.Hour
 }
 
 // StartLogin 生成 state 与 PKCE 并调用插件生成授权跳转 URL。
@@ -239,7 +246,7 @@ func (s *Service) HandleCallback(ctx context.Context, providerName, code, state,
 	if err := s.stateStore.SaveRefreshToken(ctx, refreshToken, security.RefreshTokenRecord{
 		UserID:   user.ID,
 		Username: user.Username,
-	}, s.refreshTTL); err != nil {
+	}, s.refreshTTL()); err != nil {
 		return nil, err
 	}
 

@@ -58,6 +58,8 @@ func EnsureDefaults(db *gorm.DB, enforcer *rbac.Enforcer, cfg config.SeedConfig)
 		{DomainCode: rbac.DefaultDomain, Code: "oauth_provider:write", Name: "管理联合登录插件", Resource: "oauth_providers", Action: "write"},
 		{DomainCode: rbac.DefaultDomain, Code: "audit:read", Name: "查看审计日志", Resource: "audit_logs", Action: "read"},
 		{DomainCode: rbac.DefaultDomain, Code: "system:read", Name: "查看系统与版本信息", Resource: "system", Action: "read"},
+		{DomainCode: rbac.DefaultDomain, Code: "setting:read", Name: "查看系统设置", Resource: "settings", Action: "read"},
+		{DomainCode: rbac.DefaultDomain, Code: "setting:write", Name: "修改系统设置", Resource: "settings", Action: "write"},
 	}
 	for _, p := range defaultPerms {
 		var existing models.Permission

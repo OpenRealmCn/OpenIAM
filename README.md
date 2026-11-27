@@ -11,8 +11,11 @@ OpenIAM 是为 **OpenRealm** 打造的私有身份与访问管理（IAM）平台
    - Redis 管理 Refresh Token 会话、JWT 注销黑名单（JTI）、连续登录失败计数与临时锁定、OAuth 临时 State。
    - 基于 `github.com/ulule/limiter/v3` 的 IP 速率限制中间件（支持分布式 Redis 存储，区分认证严格限流与通用 API 限流）。
 2. **多域 RBAC 权限控制（Casbin）**
-   - 基于 `github.com/casbin/casbin/v2` + `gorm-adapter/v3` 实现 **RBAC with Domains** 模型，按 OpenRealm 业务域/租户隔离角色与权限。
+   - 基于 `github.com/casbin/casbin/v3` + `gorm-adapter/v3` 实现 **RBAC with Domains** 模型，按 OpenRealm 业务域/租户隔离角色与权限。
    - 提供 `RequirePermission` 中间件（通过 `X-OpenIAM-Domain` 请求头自动识别域上下文）以及 `/api/v1/policies/check` 实时权限校验接口。
+3. **数据库动态系统设置（无需维护 `config.yaml`）**
+   - 本地仅需配置 **MySQL** 与 **Redis** 连接地址（环境变量或 `.env`），所有安全策略、JWT、IP 速率限制、CORS、OAuth 服务端与联合登录回调设置均存储在 MySQL `system_settings` 表中。
+   - 管理员可在控制台「系统设置」面板在线修改并立即热生效，所有变更记入审计日志。
 3. **全面安全审计（覆盖认证与 RBAC 变更）**
    - 不仅记录登录、注册、登出、联合登录、OAuth 授权同意等认证行为，还完整记录**角色创建/修改/删除、角色权限绑定、用户域角色分配/撤销、权限点与 Casbin 策略增删**的变更前后 JSON 快照（`before_state` / `after_state`），自动对密钥/密码脱敏。
 4. **可插拔 OAuth 2.0 / OIDC 联合登录插件体系**
@@ -34,10 +37,22 @@ OpenIAM 是为 **OpenRealm** 打造的私有身份与访问管理（IAM）平台
 
 ## 快速启动
 
-### 方式一：Docker Compose 一键编排
+### 方式一：Docker Compose 编排（MySQL 与 Redis 均支持外部接入或按需启用）
+
+`docker-compose.yml` 默认仅启动 `backend` 和 `frontend`，通过环境变量连接已有 MySQL 和 Redis；如需一并拉起内置 MySQL / Redis 容器，使用 Docker Compose `profiles`：
 
 ```bash
+# 1. 连接外部已有的 MySQL 和 Redis（参考 .env.example 设置 OPENIAM_MYSQL_DSN / OPENIAM_REDIS_ADDR）
 docker compose up -d --build
+
+# 2. 同时启动内置 MySQL + Redis（全套容器化）
+docker compose --profile full up -d --build
+
+# 3. 仅额外启动内置 Redis（使用外部 MySQL）
+docker compose --profile redis up -d --build
+
+# 4. 仅额外启动内置 MySQL（使用外部 Redis）
+docker compose --profile mysql up -d --build
 ```
 
 - 前端控制台: `http://localhost:5173`
@@ -46,9 +61,9 @@ docker compose up -d --build
 
 ### 方式二：本地开发启动
 
-1. **启动 MySQL 8 与 Redis 7**，复制并修改后端配置：
+1. **配置本地 MySQL 8 与 Redis 7 连接**（可选复制 `.env.example` 为 `.env`）：
    ```bash
-   cp backend/config.example.yaml backend/config.yaml
+   cp .env.example .env
    ```
 2. **启动后端服务**：
    ```bash
@@ -60,8 +75,8 @@ docker compose up -d --build
 3. **启动前端控制台**：
    ```bash
    cd frontend
-   pnpm install
-   pnpm run dev
+   npm install
+   npm run dev
    ```
 
 ---

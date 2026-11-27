@@ -1,15 +1,17 @@
 services:
+  # 可选：内置 MySQL 8.0（仅在启用 profile: mysql 或 full 时启动；若使用外部 MySQL 可直接跳过）
   mysql:
     image: mysql:8.0
     container_name: openiam-mysql
+    profiles: ["mysql", "full"]
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: openiam_root_password
-      MYSQL_DATABASE: openiam
-      MYSQL_USER: openiam
-      MYSQL_PASSWORD: openiam_password
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-openiam_root_password}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-openiam}
+      MYSQL_USER: ${MYSQL_USER:-openiam}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-openiam_password}
     ports:
-      - "3306:3306"
+      - "${MYSQL_PORT:-3306}:3306"
     volumes:
       - openiam_mysql_data:/var/lib/mysql
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
@@ -19,12 +21,14 @@ services:
       timeout: 5s
       retries: 15
 
+  # 可选：内置 Redis 7（仅在启用 profile: redis 或 full 时启动；若使用外部 Redis 可直接跳过）
   redis:
     image: redis:7-alpine
     container_name: openiam-redis
+    profiles: ["redis", "full"]
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - openiam_redis_data:/data
     healthcheck:
@@ -39,18 +43,25 @@ services:
       dockerfile: Dockerfile
     container_name: openiam-backend
     restart: unless-stopped
-    depends_on:
-      mysql:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
     ports:
-      - "8080:8080"
+      - "${OPENIAM_PORT:-8080}:8080"
     environment:
-      OPENIAM_MYSQL_DSN: "openiam:openiam_password@tcp(mysql:3306)/openiam?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true"
-      OPENIAM_REDIS_ADDR: "redis:6379"
-      OPENIAM_OAUTH_SERVER_ISSUER: "http://localhost:8080"
-      OPENIAM_OAUTH_SERVER_FRONTEND_CONSENT_URL: "http://localhost:5173/oauth2/consent"
+      OPENIAM_HOST: "0.0.0.0"
+      OPENIAM_PORT: "8080"
+      OPENIAM_MODE: "${OPENIAM_MODE:-release}"
+      OPENIAM_MYSQL_DSN: "${OPENIAM_MYSQL_DSN:-openiam:openiam_password@tcp(host.docker.internal:3306)/openiam?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true}"
+      OPENIAM_REDIS_ADDR: "${OPENIAM_REDIS_ADDR:-host.docker.internal:6379}"
+      OPENIAM_REDIS_PASSWORD: "${OPENIAM_REDIS_PASSWORD:-}"
+      OPENIAM_REDIS_DB: "${OPENIAM_REDIS_DB:-0}"
+      OPENIAM_REDIS_KEY_PREFIX: "${OPENIAM_REDIS_KEY_PREFIX:-openiam:}"
+      OPENIAM_AUTO_MIGRATE: "${OPENIAM_AUTO_MIGRATE:-true}"
+      OPENIAM_STRICT_VERSION_CHECK: "${OPENIAM_STRICT_VERSION_CHECK:-true}"
+      OPENIAM_SEED_ENABLED: "${OPENIAM_SEED_ENABLED:-true}"
+      OPENIAM_SEED_ADMIN_USERNAME: "${OPENIAM_SEED_ADMIN_USERNAME:-admin}"
+      OPENIAM_SEED_ADMIN_EMAIL: "${OPENIAM_SEED_ADMIN_EMAIL:-admin@openrealm.local}"
+      OPENIAM_SEED_ADMIN_PASSWORD: "${OPENIAM_SEED_ADMIN_PASSWORD:-Admin@123456}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   frontend:
     build:
@@ -61,7 +72,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "5173:80"
+      - "${OPENIAM_FRONTEND_PORT:-5173}:80"
 
 volumes:
   openiam_mysql_data:

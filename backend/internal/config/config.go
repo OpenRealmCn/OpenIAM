@@ -1,95 +1,66 @@
 package config
 
 import (
-	"fmt"
+	"bufio"
+	"os"
+	"strconv"
 	"strings"
-
-	"github.com/spf13/viper"
 )
 
-type Config struct {
-	Server      ServerConfig      `mapstructure:"server"`
-	MySQL       MySQLConfig       `mapstructure:"mysql"`
-	Redis       RedisConfig       `mapstructure:"redis"`
-	JWT         JWTConfig         `mapstructure:"jwt"`
-	RateLimit   RateLimitConfig   `mapstructure:"ratelimit"`
-	Security    SecurityConfig    `mapstructure:"security"`
-	Migration   MigrationConfig   `mapstructure:"migration"`
-	OAuthServer OAuthServerConfig `mapstructure:"oauth_server"`
-	OAuthPlugin OAuthPluginConfig `mapstructure:"oauth_plugin"`
-	Seed        SeedConfig        `mapstructure:"seed"`
+// BootstrapConfig 仅包含本地启动必需的基础设施连接与监听参数（环境变量 / .env）。
+// 其余所有业务、安全、JWT、限流、CORS 与 OAuth 参数均存储在 MySQL system_settings 表中，
+// 并可在管理员控制台实时修改。
+type BootstrapConfig struct {
+	Server    ServerConfig
+	MySQL     MySQLConfig
+	Redis     RedisConfig
+	Migration MigrationConfig
+	JWT       JWTBootstrapConfig
+	Seed      SeedConfig
 }
 
 type ServerConfig struct {
-	Host             string   `mapstructure:"host"`
-	Port             int      `mapstructure:"port"`
-	Mode             string   `mapstructure:"mode"`
-	CORSAllowOrigins []string `mapstructure:"cors_allow_origins"`
+	Host string
+	Port int
+	Mode string
 }
 
 type MySQLConfig struct {
-	DSN                    string `mapstructure:"dsn"`
-	MaxIdleConns           int    `mapstructure:"max_idle_conns"`
-	MaxOpenConns           int    `mapstructure:"max_open_conns"`
-	ConnMaxLifetimeMinutes int    `mapstructure:"conn_max_lifetime_minutes"`
+	DSN                    string
+	MaxIdleConns           int
+	MaxOpenConns           int
+	ConnMaxLifetimeMinutes int
 }
 
 type RedisConfig struct {
-	Addr      string `mapstructure:"addr"`
-	Password  string `mapstructure:"password"`
-	DB        int    `mapstructure:"db"`
-	KeyPrefix string `mapstructure:"key_prefix"`
-}
-
-type JWTConfig struct {
-	Issuer                 string `mapstructure:"issuer"`
-	PrivateKeyPath         string `mapstructure:"private_key_path"`
-	AccessTokenTTLMinutes  int    `mapstructure:"access_token_ttl_minutes"`
-	RefreshTokenTTLHours   int    `mapstructure:"refresh_token_ttl_hours"`
-}
-
-type RateLimitConfig struct {
-	Enabled     bool   `mapstructure:"enabled"`
-	GeneralRate string `mapstructure:"general_rate"`
-	AuthRate    string `mapstructure:"auth_rate"`
-}
-
-type SecurityConfig struct {
-	MaxLoginFailures int `mapstructure:"max_login_failures"`
-	LockoutMinutes   int `mapstructure:"lockout_minutes"`
+	Addr      string
+	Password  string
+	DB        int
+	KeyPrefix string
 }
 
 type MigrationConfig struct {
-	AutoMigrate        bool `mapstructure:"auto_migrate"`
-	StrictVersionCheck bool `mapstructure:"strict_version_check"`
+	AutoMigrate        bool
+	StrictVersionCheck bool
 }
 
-type OAuthServerConfig struct {
-	Issuer                 string `mapstructure:"issuer"`
-	FrontendConsentURL     string `mapstructure:"frontend_consent_url"`
-	AuthCodeTTLMinutes     int    `mapstructure:"auth_code_ttl_minutes"`
-	AccessTokenTTLMinutes  int    `mapstructure:"access_token_ttl_minutes"`
-	RefreshTokenTTLHours   int    `mapstructure:"refresh_token_ttl_hours"`
-}
-
-type OAuthPluginConfig struct {
-	CallbackBaseURL string `mapstructure:"callback_base_url"`
+type JWTBootstrapConfig struct {
+	PrivateKeyPath string
 }
 
 type SeedConfig struct {
-	Enabled       bool   `mapstructure:"enabled"`
-	AdminUsername string `mapstructure:"admin_username"`
-	AdminEmail    string `mapstructure:"admin_email"`
-	AdminPassword string `mapstructure:"admin_password"`
+	Enabled       bool
+	AdminUsername string
+	AdminEmail    string
+	AdminPassword string
 }
 
-func Default() *Config {
-	return &Config{
+func Default() *BootstrapConfig {
+	return &BootstrapConfig{
 		Server: ServerConfig{
-			Host:             "0.0.0.0",
-			Port:             8080,
-			Mode:             "debug",
-			CORSAllowOrigins: []string{"http://localhost:5173", "http://127.0.0.1:5173"},
+			Host: "0.0.0.0",
+			Port: 8080,
+			Mode: "debug",
 		},
 		MySQL: MySQLConfig{
 			DSN:                    "openiam:openiam_password@tcp(127.0.0.1:3306)/openiam?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true",
@@ -103,33 +74,12 @@ func Default() *Config {
 			DB:        0,
 			KeyPrefix: "openiam:",
 		},
-		JWT: JWTConfig{
-			Issuer:                "http://localhost:8080",
-			AccessTokenTTLMinutes: 30,
-			RefreshTokenTTLHours:  168,
-		},
-		RateLimit: RateLimitConfig{
-			Enabled:     true,
-			GeneralRate: "120-M",
-			AuthRate:    "15-M",
-		},
-		Security: SecurityConfig{
-			MaxLoginFailures: 5,
-			LockoutMinutes:   15,
-		},
 		Migration: MigrationConfig{
 			AutoMigrate:        true,
 			StrictVersionCheck: true,
 		},
-		OAuthServer: OAuthServerConfig{
-			Issuer:                "http://localhost:8080",
-			FrontendConsentURL:    "http://localhost:5173/oauth2/consent",
-			AuthCodeTTLMinutes:    10,
-			AccessTokenTTLMinutes: 60,
-			RefreshTokenTTLHours:  720,
-		},
-		OAuthPlugin: OAuthPluginConfig{
-			CallbackBaseURL: "http://localhost:5173/oauth/callback",
+		JWT: JWTBootstrapConfig{
+			PrivateKeyPath: "",
 		},
 		Seed: SeedConfig{
 			Enabled:       true,
@@ -140,31 +90,89 @@ func Default() *Config {
 	}
 }
 
-func Load(configPath string) (*Config, error) {
-	v := viper.New()
-	cfg := Default()
-
-	if configPath != "" {
-		v.SetConfigFile(configPath)
+// Load 从环境变量与可选的本地 .env 文件加载基础启动配置，不再依赖 config.yaml。
+func Load(envFilePath string) (*BootstrapConfig, error) {
+	if envFilePath != "" {
+		loadDotEnv(envFilePath)
 	} else {
-		v.SetConfigName("config")
-		v.SetConfigType("yaml")
-		v.AddConfigPath(".")
-		v.AddConfigPath("./backend")
+		loadDotEnv(".env")
+		loadDotEnv("../.env")
 	}
 
-	v.SetEnvPrefix("OPENIAM")
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	v.AutomaticEnv()
+	cfg := Default()
+	cfg.Server.Host = getEnv("OPENIAM_HOST", cfg.Server.Host)
+	cfg.Server.Port = getEnvInt("OPENIAM_PORT", cfg.Server.Port)
+	cfg.Server.Mode = getEnv("OPENIAM_MODE", cfg.Server.Mode)
 
-	if err := v.ReadInConfig(); err != nil {
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok && configPath != "" {
-			return nil, fmt.Errorf("read config file: %w", err)
+	cfg.MySQL.DSN = getEnv("OPENIAM_MYSQL_DSN", cfg.MySQL.DSN)
+	cfg.MySQL.MaxIdleConns = getEnvInt("OPENIAM_MYSQL_MAX_IDLE_CONNS", cfg.MySQL.MaxIdleConns)
+	cfg.MySQL.MaxOpenConns = getEnvInt("OPENIAM_MYSQL_MAX_OPEN_CONNS", cfg.MySQL.MaxOpenConns)
+	cfg.MySQL.ConnMaxLifetimeMinutes = getEnvInt("OPENIAM_MYSQL_CONN_MAX_LIFETIME_MINUTES", cfg.MySQL.ConnMaxLifetimeMinutes)
+
+	cfg.Redis.Addr = getEnv("OPENIAM_REDIS_ADDR", cfg.Redis.Addr)
+	cfg.Redis.Password = getEnv("OPENIAM_REDIS_PASSWORD", cfg.Redis.Password)
+	cfg.Redis.DB = getEnvInt("OPENIAM_REDIS_DB", cfg.Redis.DB)
+	cfg.Redis.KeyPrefix = getEnv("OPENIAM_REDIS_KEY_PREFIX", cfg.Redis.KeyPrefix)
+
+	cfg.Migration.AutoMigrate = getEnvBool("OPENIAM_AUTO_MIGRATE", cfg.Migration.AutoMigrate)
+	cfg.Migration.StrictVersionCheck = getEnvBool("OPENIAM_STRICT_VERSION_CHECK", cfg.Migration.StrictVersionCheck)
+
+	cfg.JWT.PrivateKeyPath = getEnv("OPENIAM_JWT_PRIVATE_KEY_PATH", cfg.JWT.PrivateKeyPath)
+
+	cfg.Seed.Enabled = getEnvBool("OPENIAM_SEED_ENABLED", cfg.Seed.Enabled)
+	cfg.Seed.AdminUsername = getEnv("OPENIAM_SEED_ADMIN_USERNAME", cfg.Seed.AdminUsername)
+	cfg.Seed.AdminEmail = getEnv("OPENIAM_SEED_ADMIN_EMAIL", cfg.Seed.AdminEmail)
+	cfg.Seed.AdminPassword = getEnv("OPENIAM_SEED_ADMIN_PASSWORD", cfg.Seed.AdminPassword)
+
+	return cfg, nil
+}
+
+func loadDotEnv(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.Trim(strings.TrimSpace(v), `"'`)
+		if k != "" && os.Getenv(k) == "" {
+			_ = os.Setenv(k, v)
 		}
 	}
+}
 
-	if err := v.Unmarshal(cfg); err != nil {
-		return nil, fmt.Errorf("unmarshal config: %w", err)
+func getEnv(key, fallback string) string {
+	if val, ok := os.LookupEnv(key); ok && val != "" {
+		return val
 	}
-	return cfg, nil
+	return fallback
+}
+
+func getEnvInt(key string, fallback int) int {
+	if val, ok := os.LookupEnv(key); ok && val != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(val)); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	if val, ok := os.LookupEnv(key); ok && val != "" {
+		if b, err := strconv.ParseBool(strings.TrimSpace(val)); err == nil {
+			return b
+		}
+	}
+	return fallback
 }

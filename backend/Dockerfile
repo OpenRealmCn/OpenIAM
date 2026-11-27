@@ -10,6 +10,5 @@ FROM alpine:3.20
 WORKDIR /app
 RUN apk add --no-cache ca-certificates tzdata
 COPY --from=builder /openiam /app/openiam
-COPY config.example.yaml /app/config.yaml
 EXPOSE 8080
 ENTRYPOINT ["/app/openiam"]

@@ -141,3 +141,15 @@ export interface VersionHistoryItem {
   details: string;
   created_at: string;
 }
+
+export interface SystemSetting {
+  id: number;
+  setting_key: string;
+  category: string;
+  value: string;
+  value_type: 'string' | 'int' | 'bool' | 'string_list';
+  label: string;
+  description: string;
+  updated_by: number;
+  updated_at: string;
+}

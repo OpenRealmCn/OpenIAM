@@ -9,11 +9,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/openrealm/openiam/internal/audit"
-	"github.com/openrealm/openiam/internal/config"
 	"github.com/openrealm/openiam/internal/models"
 	"github.com/openrealm/openiam/internal/oauthplugin"
 	"github.com/openrealm/openiam/internal/rbac"
 	"github.com/openrealm/openiam/internal/security"
+	"github.com/openrealm/openiam/internal/settings"
 	"gorm.io/gorm"
 )
 
@@ -24,8 +24,7 @@ type AuthHandler struct {
 	enforcer    *rbac.Enforcer
 	auditSvc    *audit.Service
 	pluginSvc   *oauthplugin.Service
-	secCfg      config.SecurityConfig
-	refreshTTL  time.Duration
+	settingsSvc *settings.Service
 }
 
 func NewAuthHandler(
@@ -35,21 +34,16 @@ func NewAuthHandler(
 	enforcer *rbac.Enforcer,
 	auditSvc *audit.Service,
 	pluginSvc *oauthplugin.Service,
-	secCfg config.SecurityConfig,
-	refreshTTL time.Duration,
+	settingsSvc *settings.Service,
 ) *AuthHandler {
-	if refreshTTL <= 0 {
-		refreshTTL = 7 * 24 * time.Hour
-	}
 	return &AuthHandler{
-		db:         db,
-		jwtMgr:     jwtMgr,
-		stateStore: stateStore,
-		enforcer:   enforcer,
-		auditSvc:   auditSvc,
-		pluginSvc:  pluginSvc,
-		secCfg:     secCfg,
-		refreshTTL: refreshTTL,
+		db:          db,
+		jwtMgr:      jwtMgr,
+		stateStore:  stateStore,
+		enforcer:    enforcer,
+		auditSvc:    auditSvc,
+		pluginSvc:   pluginSvc,
+		settingsSvc: settingsSvc,
 	}
 }
 
@@ -81,9 +75,11 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
+	snap := h.settingsSvc.Snapshot()
+
 	var user models.User
 	if err := h.db.Where("username = ? OR email = ?", username, username).First(&user).Error; err != nil {
-		_, locked, _ := h.stateStore.RecordLoginFailure(ctx, username, h.secCfg.MaxLoginFailures, time.Duration(h.secCfg.LockoutMinutes)*time.Minute)
+		_, locked, _ := h.stateStore.RecordLoginFailure(ctx, username, snap.MaxLoginFailures, time.Duration(snap.LockoutMinutes)*time.Minute)
 		msg := "用户名或密码错误"
 		if locked {
 			msg = "连续登录失败次数过多，账号已被临时锁定"
@@ -117,7 +113,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 
 	if !security.VerifyPassword(user.PasswordHash, req.Password) {
-		count, locked, _ := h.stateStore.RecordLoginFailure(ctx, username, h.secCfg.MaxLoginFailures, time.Duration(h.secCfg.LockoutMinutes)*time.Minute)
+		count, locked, _ := h.stateStore.RecordLoginFailure(ctx, username, snap.MaxLoginFailures, time.Duration(snap.LockoutMinutes)*time.Minute)
 		h.auditSvc.RecordFromContext(c, audit.Entry{
 			ActorID:       user.ID,
 			ActorUsername: user.Username,
@@ -153,7 +149,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	if err := h.stateStore.SaveRefreshToken(ctx, refreshToken, security.RefreshTokenRecord{
 		UserID:   user.ID,
 		Username: user.Username,
-	}, h.refreshTTL); err != nil {
+	}, snap.JWTRefreshTTL); err != nil {
 		Fail(c, http.StatusInternalServerError, "保存会话失败")
 		return
 	}
@@ -186,6 +182,10 @@ type registerReq struct {
 }
 
 func (h *AuthHandler) Register(c *gin.Context) {
+	if !h.settingsSvc.Snapshot().AllowPublicRegister {
+		Fail(c, http.StatusForbidden, "系统管理员已关闭自助注册功能")
+		return
+	}
 	var req registerReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, http.StatusBadRequest, "注册参数无效: "+err.Error())
@@ -268,7 +268,7 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 	if err := h.stateStore.SaveRefreshToken(ctx, newRefresh, security.RefreshTokenRecord{
 		UserID:   user.ID,
 		Username: user.Username,
-	}, h.refreshTTL); err != nil {
+	}, h.settingsSvc.Snapshot().JWTRefreshTTL); err != nil {
 		Fail(c, http.StatusInternalServerError, "刷新会话失败")
 		return
 	}

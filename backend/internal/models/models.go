@@ -208,3 +208,21 @@ type SystemVersionHistory struct {
 func (SystemVersionHistory) TableName() string {
 	return "system_version_history"
 }
+
+// SystemSetting 存储可在管理员面板动态调整的所有平台系统设置。
+type SystemSetting struct {
+	ID          uint64    `gorm:"primaryKey" json:"id"`
+	SettingKey  string    `gorm:"size:128;uniqueIndex;not null" json:"setting_key"`
+	Category    string    `gorm:"size:64;index;not null" json:"category"`
+	Value       string    `gorm:"type:text;not null" json:"value"`
+	ValueType   string    `gorm:"size:32;not null;default:'string'" json:"value_type"` // string | int | bool | string_list
+	Label       string    `gorm:"size:128;not null;default:''" json:"label"`
+	Description string    `gorm:"size:512;not null;default:''" json:"description"`
+	UpdatedBy   uint64    `gorm:"not null;default:0" json:"updated_by"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+func (SystemSetting) TableName() string {
+	return "system_settings"
+}

@@ -16,10 +16,10 @@ import (
 	"github.com/go-oauth2/oauth2/v4/server"
 	"github.com/google/uuid"
 	"github.com/openrealm/openiam/internal/audit"
-	"github.com/openrealm/openiam/internal/config"
 	"github.com/openrealm/openiam/internal/models"
 	"github.com/openrealm/openiam/internal/rbac"
 	"github.com/openrealm/openiam/internal/security"
+	"github.com/openrealm/openiam/internal/settings"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
@@ -69,14 +69,14 @@ func (g *JWTAccessGenerator) Token(ctx context.Context, data *oauth2.GenerateBas
 
 // Server 封装 OpenIAM OAuth 2.0 / OIDC 授权服务端能力。
 type Server struct {
-	db         *gorm.DB
-	rdb        *redis.Client
-	stateStore *security.StateStore
-	jwtMgr     *security.JWTManager
-	auditSvc   *audit.Service
-	cfg        config.OAuthServerConfig
-	manager    *manage.Manager
-	oauthSrv   *server.Server
+	db          *gorm.DB
+	rdb         *redis.Client
+	stateStore  *security.StateStore
+	jwtMgr      *security.JWTManager
+	auditSvc    *audit.Service
+	settingsSvc *settings.Service
+	manager     *manage.Manager
+	oauthSrv    *server.Server
 }
 
 func NewServer(
@@ -85,18 +85,19 @@ func NewServer(
 	stateStore *security.StateStore,
 	jwtMgr *security.JWTManager,
 	auditSvc *audit.Service,
-	cfg config.OAuthServerConfig,
+	settingsSvc *settings.Service,
 ) *Server {
 	mgr := manage.NewDefaultManager()
-	codeTTL := time.Duration(cfg.AuthCodeTTLMinutes) * time.Minute
+	snap := settingsSvc.Snapshot()
+	codeTTL := snap.OAuthServerAuthCodeTTL
 	if codeTTL <= 0 {
 		codeTTL = 10 * time.Minute
 	}
-	accessTTL := time.Duration(cfg.AccessTokenTTLMinutes) * time.Minute
+	accessTTL := snap.OAuthServerAccessTokenTTL
 	if accessTTL <= 0 {
 		accessTTL = time.Hour
 	}
-	refreshTTL := time.Duration(cfg.RefreshTokenTTLHours) * time.Hour
+	refreshTTL := snap.OAuthServerRefreshTokenTTL
 	if refreshTTL <= 0 {
 		refreshTTL = 30 * 24 * time.Hour
 	}
@@ -169,14 +170,14 @@ func NewServer(
 	)
 
 	s := &Server{
-		db:         db,
-		rdb:        rdb,
-		stateStore: stateStore,
-		jwtMgr:     jwtMgr,
-		auditSvc:   auditSvc,
-		cfg:        cfg,
-		manager:    mgr,
-		oauthSrv:   srv,
+		db:          db,
+		rdb:         rdb,
+		stateStore:  stateStore,
+		jwtMgr:      jwtMgr,
+		auditSvc:    auditSvc,
+		settingsSvc: settingsSvc,
+		manager:     mgr,
+		oauthSrv:    srv,
 	}
 
 	srv.SetClientAuthorizedHandler(func(clientID string, grant oauth2.GrantType) (bool, error) {
@@ -205,6 +206,10 @@ func NewServer(
 			if uid, err := strconv.ParseUint(ti.GetUserID(), 10, 64); err == nil {
 				var user models.User
 				if err := db.First(&user, uid).Error; err == nil {
+					ttl := settingsSvc.Snapshot().OAuthServerAccessTokenTTL
+					if ttl <= 0 {
+						ttl = time.Hour
+					}
 					if idToken, err := jwtMgr.GenerateIDToken(
 						user.ID,
 						user.Username,
@@ -212,7 +217,7 @@ func NewServer(
 						user.DisplayName,
 						user.AvatarURL,
 						ti.GetClientID(),
-						accessTTL,
+						ttl,
 					); err == nil {
 						ext["id_token"] = idToken
 					}
@@ -296,7 +301,7 @@ func (s *Server) Authorize(c *gin.Context) {
 		return
 	}
 
-	consentURL := s.cfg.FrontendConsentURL
+	consentURL := s.settingsSvc.Snapshot().OAuthServerFrontendConsentURL
 	if consentURL == "" {
 		consentURL = "http://localhost:5173/oauth2/consent"
 	}
@@ -569,9 +574,41 @@ func (s *Server) Introspect(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"active": false})
 }
 
+// ApplySettings 热更新 OAuth2 授权码与令牌有效期。
+func (s *Server) ApplySettings(snap settings.RuntimeSettings) {
+	if snap.OAuthServerAuthCodeTTL > 0 {
+		s.manager.SetAuthorizeCodeExp(snap.OAuthServerAuthCodeTTL)
+	}
+	accessTTL := snap.OAuthServerAccessTokenTTL
+	if accessTTL <= 0 {
+		accessTTL = time.Hour
+	}
+	refreshTTL := snap.OAuthServerRefreshTokenTTL
+	if refreshTTL <= 0 {
+		refreshTTL = 30 * 24 * time.Hour
+	}
+	s.manager.SetAuthorizeCodeTokenCfg(&manage.Config{
+		AccessTokenExp:    accessTTL,
+		RefreshTokenExp:   refreshTTL,
+		IsGenerateRefresh: true,
+	})
+	s.manager.SetClientTokenCfg(&manage.Config{
+		AccessTokenExp:    accessTTL,
+		IsGenerateRefresh: false,
+	})
+	s.manager.SetRefreshTokenCfg(&manage.RefreshingConfig{
+		AccessTokenExp:     accessTTL,
+		RefreshTokenExp:    refreshTTL,
+		IsGenerateRefresh:  true,
+		IsResetRefreshTime: true,
+		IsRemoveAccess:     true,
+		IsRemoveRefreshing: true,
+	})
+}
+
 // Discovery 处理 GET /.well-known/openid-configuration。
 func (s *Server) Discovery(c *gin.Context) {
-	issuer := strings.TrimRight(s.cfg.Issuer, "/")
+	issuer := strings.TrimRight(s.settingsSvc.Snapshot().OAuthServerIssuer, "/")
 	if issuer == "" {
 		scheme := "http"
 		if c.Request.TLS != nil {

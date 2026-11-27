@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -52,6 +53,7 @@ type JWKS struct {
 
 // JWTManager 管理 RS256 密钥对、Access/ID Token 签发、验签与 JWKS 导出。
 type JWTManager struct {
+	mu         sync.RWMutex
 	privateKey *rsa.PrivateKey
 	publicKey  *rsa.PublicKey
 	kid        string
@@ -126,17 +128,36 @@ func (m *JWTManager) KeyID() string {
 	return m.kid
 }
 
+// UpdateSettings 支持在控制台修改系统设置后热更新 Issuer 与 AccessToken TTL。
+func (m *JWTManager) UpdateSettings(issuer string, accessTTL time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if issuer != "" {
+		m.issuer = issuer
+	}
+	if accessTTL > 0 {
+		m.accessTTL = accessTTL
+	}
+}
+
 func (m *JWTManager) Issuer() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.issuer
 }
 
 func (m *JWTManager) AccessTTL() time.Duration {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.accessTTL
 }
 
 // GenerateAccessToken 签发 RS256 Access Token，同时返回 JTI 和过期时间。
 func (m *JWTManager) GenerateAccessToken(userID uint64, username, email, scope, clientID string, customTTL ...time.Duration) (tokenStr string, jti string, expiresAt time.Time, err error) {
+	m.mu.RLock()
 	ttl := m.accessTTL
+	issuer := m.issuer
+	m.mu.RUnlock()
 	if len(customTTL) > 0 && customTTL[0] > 0 {
 		ttl = customTTL[0]
 	}
@@ -151,7 +172,7 @@ func (m *JWTManager) GenerateAccessToken(userID uint64, username, email, scope, 
 		Scope:    scope,
 		ClientID: clientID,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    m.issuer,
+			Issuer:    issuer,
 			Subject:   fmt.Sprintf("%d", userID),
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
@@ -167,8 +188,12 @@ func (m *JWTManager) GenerateAccessToken(userID uint64, username, email, scope, 
 
 // GenerateIDToken 签发 OIDC ID Token。
 func (m *JWTManager) GenerateIDToken(userID uint64, username, email, displayName, avatarURL, clientID string, ttl time.Duration) (string, error) {
+	m.mu.RLock()
+	defaultTTL := m.accessTTL
+	issuer := m.issuer
+	m.mu.RUnlock()
 	if ttl <= 0 {
-		ttl = m.accessTTL
+		ttl = defaultTTL
 	}
 	now := time.Now()
 	claims := IDTokenClaims{
@@ -178,7 +203,7 @@ func (m *JWTManager) GenerateIDToken(userID uint64, username, email, displayName
 		Picture:         avatarURL,
 		AuthorizedParty: clientID,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    m.issuer,
+			Issuer:    issuer,
 			Subject:   fmt.Sprintf("%d", userID),
 			Audience:  jwt.ClaimStrings{clientID},
 			IssuedAt:  jwt.NewNumericDate(now),

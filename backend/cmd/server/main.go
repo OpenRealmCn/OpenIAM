@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/openrealm/openiam/internal/audit"
 	"github.com/openrealm/openiam/internal/config"
@@ -15,12 +14,13 @@ import (
 	"github.com/openrealm/openiam/internal/router"
 	"github.com/openrealm/openiam/internal/security"
 	"github.com/openrealm/openiam/internal/seed"
+	"github.com/openrealm/openiam/internal/settings"
 	"github.com/openrealm/openiam/internal/version"
 	"go.uber.org/zap"
 )
 
 func main() {
-	configPath := flag.String("config", "", "path to config.yaml")
+	envFile := flag.String("env-file", "", "optional path to .env file for bootstrap MySQL/Redis connection")
 	migrateOnly := flag.Bool("migrate-only", false, "run database migrations and exit")
 	checkVersion := flag.Bool("check-version", false, "check database schema version against app version and exit")
 	flag.Parse()
@@ -28,9 +28,9 @@ func main() {
 	logger, _ := zap.NewProduction()
 	defer func() { _ = logger.Sync() }()
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.Load(*envFile)
 	if err != nil {
-		logger.Fatal("failed to load config", zap.Error(err))
+		logger.Fatal("failed to load bootstrap config", zap.Error(err))
 	}
 	if cfg.Server.Mode == "debug" {
 		if devLog, err := zap.NewDevelopment(); err == nil {
@@ -88,10 +88,17 @@ func main() {
 	}
 	defer func() { _ = rdb.Close() }()
 
+	// 从数据库初始化与加载系统运行时配置
+	settingsSvc, err := settings.NewService(db)
+	if err != nil {
+		logger.Fatal("failed to initialize database system settings", zap.Error(err))
+	}
+	snap := settingsSvc.Snapshot()
+
 	jwtMgr, err := security.NewJWTManager(
-		cfg.JWT.Issuer,
+		snap.JWTIssuer,
 		cfg.JWT.PrivateKeyPath,
-		time.Duration(cfg.JWT.AccessTokenTTLMinutes)*time.Minute,
+		snap.JWTAccessTTL,
 	)
 	if err != nil {
 		logger.Fatal("failed to initialize JWT manager", zap.Error(err))
@@ -117,22 +124,22 @@ func main() {
 		jwtMgr,
 		enforcer,
 		auditSvc,
-		cfg.OAuthPlugin.CallbackBaseURL,
-		time.Duration(cfg.JWT.RefreshTokenTTLHours)*time.Hour,
+		settingsSvc,
 	)
-	oauthSrv := oauthserver.NewServer(db, rdb, stateStore, jwtMgr, auditSvc, cfg.OAuthServer)
+	oauthSrv := oauthserver.NewServer(db, rdb, stateStore, jwtMgr, auditSvc, settingsSvc)
 
 	engine, err := router.Setup(router.Dependencies{
-		Config:     cfg,
-		DB:         db,
-		Redis:      rdb,
-		Logger:     logger,
-		JWTManager: jwtMgr,
-		StateStore: stateStore,
-		Enforcer:   enforcer,
-		AuditSvc:   auditSvc,
-		PluginSvc:  pluginSvc,
-		OAuthSrv:   oauthSrv,
+		Config:      cfg,
+		DB:          db,
+		Redis:       rdb,
+		Logger:      logger,
+		JWTManager:  jwtMgr,
+		StateStore:  stateStore,
+		Enforcer:    enforcer,
+		AuditSvc:    auditSvc,
+		SettingsSvc: settingsSvc,
+		PluginSvc:   pluginSvc,
+		OAuthSrv:    oauthSrv,
 	})
 	if err != nil {
 		logger.Fatal("failed to setup router", zap.Error(err))

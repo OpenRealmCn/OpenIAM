@@ -1,8 +1,6 @@
 package router
 
 import (
-	"time"
-
 	"github.com/gin-gonic/gin"
 	"github.com/openrealm/openiam/internal/audit"
 	"github.com/openrealm/openiam/internal/config"
@@ -13,22 +11,24 @@ import (
 	"github.com/openrealm/openiam/internal/ratelimit"
 	"github.com/openrealm/openiam/internal/rbac"
 	"github.com/openrealm/openiam/internal/security"
+	"github.com/openrealm/openiam/internal/settings"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
 type Dependencies struct {
-	Config     *config.Config
-	DB         *gorm.DB
-	Redis      *redis.Client
-	Logger     *zap.Logger
-	JWTManager *security.JWTManager
-	StateStore *security.StateStore
-	Enforcer   *rbac.Enforcer
-	AuditSvc   *audit.Service
-	PluginSvc  *oauthplugin.Service
-	OAuthSrv   *oauthserver.Server
+	Config      *config.BootstrapConfig
+	DB          *gorm.DB
+	Redis       *redis.Client
+	Logger      *zap.Logger
+	JWTManager  *security.JWTManager
+	StateStore  *security.StateStore
+	Enforcer    *rbac.Enforcer
+	AuditSvc    *audit.Service
+	SettingsSvc *settings.Service
+	PluginSvc   *oauthplugin.Service
+	OAuthSrv    *oauthserver.Server
 }
 
 func Setup(deps Dependencies) (*gin.Engine, error) {
@@ -36,31 +36,49 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
+	snap := deps.SettingsSvc.Snapshot()
+
+	generalLimiter, err := ratelimit.NewDynamicIPRateLimiter(
+		deps.Redis,
+		deps.Config.Redis.KeyPrefix+"rl:general",
+		snap.RateLimitEnabled,
+		snap.RateLimitGeneralRate,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	authLimiter, err := ratelimit.NewDynamicIPRateLimiter(
+		deps.Redis,
+		deps.Config.Redis.KeyPrefix+"rl:auth",
+		snap.RateLimitEnabled,
+		snap.RateLimitAuthRate,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// 注册系统设置变更热更新钩子
+	deps.SettingsSvc.RegisterOnChange(func(s settings.RuntimeSettings) {
+		deps.JWTManager.UpdateSettings(s.JWTIssuer, s.JWTAccessTTL)
+		deps.OAuthSrv.ApplySettings(s)
+		if err := generalLimiter.Update(s.RateLimitEnabled, s.RateLimitGeneralRate); err != nil && deps.Logger != nil {
+			deps.Logger.Warn("failed to update general rate limiter", zap.Error(err))
+		}
+		if err := authLimiter.Update(s.RateLimitEnabled, s.RateLimitAuthRate); err != nil && deps.Logger != nil {
+			deps.Logger.Warn("failed to update auth rate limiter", zap.Error(err))
+		}
+	})
+
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(middleware.ZapLogger(deps.Logger))
-	r.Use(middleware.CORS(deps.Config.Server.CORSAllowOrigins))
+	r.Use(middleware.DynamicCORS(func() []string {
+		return deps.SettingsSvc.Snapshot().CORSAllowOrigins
+	}))
+	r.Use(generalLimiter.Middleware())
 
-	if deps.Config.RateLimit.Enabled {
-		generalLimiter, err := ratelimit.NewIPRateLimiter(deps.Redis, deps.Config.RateLimit.GeneralRate, deps.Config.Redis.KeyPrefix+"rl:general")
-		if err != nil {
-			return nil, err
-		}
-		r.Use(generalLimiter)
-	}
-
-	var authRateLimiter gin.HandlerFunc
-	if deps.Config.RateLimit.Enabled {
-		var err error
-		authRateLimiter, err = ratelimit.NewIPRateLimiter(deps.Redis, deps.Config.RateLimit.AuthRate, deps.Config.Redis.KeyPrefix+"rl:auth")
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		authRateLimiter = func(c *gin.Context) { c.Next() }
-	}
-
-	refreshTTL := time.Duration(deps.Config.JWT.RefreshTokenTTLHours) * time.Hour
+	authRateMiddleware := authLimiter.Middleware()
 
 	authH := handlers.NewAuthHandler(
 		deps.DB,
@@ -69,8 +87,7 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 		deps.Enforcer,
 		deps.AuditSvc,
 		deps.PluginSvc,
-		deps.Config.Security,
-		refreshTTL,
+		deps.SettingsSvc,
 	)
 	userH := handlers.NewUserHandler(deps.DB, deps.Enforcer, deps.AuditSvc)
 	domainH := handlers.NewDomainHandler(deps.DB, deps.AuditSvc)
@@ -80,6 +97,7 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 	oauthProviderH := handlers.NewOAuthProviderHandler(deps.DB, deps.PluginSvc.Registry(), deps.AuditSvc)
 	auditH := handlers.NewAuditHandler(deps.DB)
 	systemH := handlers.NewSystemHandler(deps.DB, deps.Redis)
+	settingsH := handlers.NewSettingsHandler(deps.SettingsSvc, deps.AuditSvc)
 
 	// OIDC Discovery & JWKS
 	r.GET("/.well-known/openid-configuration", deps.OAuthSrv.Discovery)
@@ -89,7 +107,7 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 	oauth2Group := r.Group("/oauth2")
 	{
 		oauth2Group.GET("/authorize", deps.OAuthSrv.Authorize)
-		oauth2Group.POST("/token", authRateLimiter, deps.OAuthSrv.Token)
+		oauth2Group.POST("/token", authRateMiddleware, deps.OAuthSrv.Token)
 		oauth2Group.GET("/userinfo", deps.OAuthSrv.UserInfo)
 		oauth2Group.POST("/revoke", deps.OAuthSrv.Revoke)
 		oauth2Group.POST("/introspect", deps.OAuthSrv.Introspect)
@@ -102,13 +120,13 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 		// 公开认证与联合登录端点（受严格 IP 速率限制保护）
 		authGroup := api.Group("/auth")
 		{
-			authGroup.POST("/login", authRateLimiter, authH.Login)
-			authGroup.POST("/register", authRateLimiter, authH.Register)
-			authGroup.POST("/refresh", authRateLimiter, authH.Refresh)
+			authGroup.POST("/login", authRateMiddleware, authH.Login)
+			authGroup.POST("/register", authRateMiddleware, authH.Register)
+			authGroup.POST("/refresh", authRateMiddleware, authH.Refresh)
 			authGroup.GET("/oauth/providers", authH.ListPublicProviders)
-			authGroup.GET("/oauth/:provider/authorize", authRateLimiter, authH.OAuthAuthorize)
-			authGroup.GET("/oauth/:provider/callback", authRateLimiter, authH.OAuthCallback)
-			authGroup.POST("/oauth/:provider/callback", authRateLimiter, authH.OAuthCallback)
+			authGroup.GET("/oauth/:provider/authorize", authRateMiddleware, authH.OAuthAuthorize)
+			authGroup.GET("/oauth/:provider/callback", authRateMiddleware, authH.OAuthCallback)
+			authGroup.POST("/oauth/:provider/callback", authRateMiddleware, authH.OAuthCallback)
 		}
 
 		// 需要认证的路由
@@ -123,9 +141,11 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 			protected.GET("/oauth2/consent/:id", deps.OAuthSrv.GetConsentRequest)
 			protected.POST("/oauth2/consent/:id", deps.OAuthSrv.SubmitConsentDecision)
 
-			// 系统与版本状态
+			// 系统、版本与动态设置管理
 			protected.GET("/system/version", middleware.RequirePermission(deps.Enforcer, "system", "read"), systemH.VersionInfo)
 			protected.GET("/system/dashboard", middleware.RequirePermission(deps.Enforcer, "system", "read"), systemH.Dashboard)
+			protected.GET("/system/settings", middleware.RequirePermission(deps.Enforcer, "settings", "read"), settingsH.List)
+			protected.PUT("/system/settings", middleware.RequirePermission(deps.Enforcer, "settings", "write"), settingsH.Update)
 
 			// 域管理
 			protected.GET("/domains", domainH.List)

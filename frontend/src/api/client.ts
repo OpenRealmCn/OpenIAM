@@ -192,5 +192,8 @@ export const api = {
     health: () => http.get('/health').then((r) => r.data.data),
     version: () => http.get('/system/version').then((r) => r.data.data),
     dashboard: () => http.get('/system/dashboard').then((r) => r.data.data),
+    getSettings: () => http.get('/system/settings').then((r) => r.data.data),
+    updateSettings: (settings: Record<string, string>) =>
+      http.put('/system/settings', { settings }).then((r) => r.data.data),
   },
 };

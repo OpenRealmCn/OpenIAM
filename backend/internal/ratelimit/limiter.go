@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -46,7 +47,6 @@ func NewIPRateLimiter(rdb *redis.Client, rateStr, keyPrefix string) (gin.Handler
 			})
 		}),
 		mgin.WithErrorHandler(func(c *gin.Context, err error) {
-			// 存储层异常时不阻断正常业务流量，但仍写响应头提示
 			c.Header("X-RateLimit-Error", err.Error())
 			c.Next()
 		}),
@@ -55,7 +55,6 @@ func NewIPRateLimiter(rdb *redis.Client, rateStr, keyPrefix string) (gin.Handler
 		}),
 	)
 
-	// 包装以补充 Retry-After 头部
 	return func(c *gin.Context) {
 		middleware(c)
 		if c.Writer.Status() == http.StatusTooManyRequests {
@@ -66,4 +65,61 @@ func NewIPRateLimiter(rdb *redis.Client, rateStr, keyPrefix string) (gin.Handler
 			}
 		}
 	}, nil
+}
+
+// DynamicIPRateLimiter 支持管理员在数据库配置更改开关或限流表达式后热切换中间件。
+type DynamicIPRateLimiter struct {
+	mu        sync.RWMutex
+	rdb       *redis.Client
+	keyPrefix string
+	enabled   bool
+	rateStr   string
+	handler   gin.HandlerFunc
+}
+
+func NewDynamicIPRateLimiter(rdb *redis.Client, keyPrefix string, enabled bool, rateStr string) (*DynamicIPRateLimiter, error) {
+	d := &DynamicIPRateLimiter{
+		rdb:       rdb,
+		keyPrefix: keyPrefix,
+	}
+	if err := d.Update(enabled, rateStr); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+func (d *DynamicIPRateLimiter) Update(enabled bool, rateStr string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.handler != nil && d.enabled == enabled && d.rateStr == rateStr {
+		return nil
+	}
+	d.enabled = enabled
+	if !enabled {
+		d.rateStr = rateStr
+		d.handler = nil
+		return nil
+	}
+	h, err := NewIPRateLimiter(d.rdb, rateStr, d.keyPrefix)
+	if err != nil {
+		return err
+	}
+	d.rateStr = rateStr
+	d.handler = h
+	return nil
+}
+
+func (d *DynamicIPRateLimiter) Middleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		d.mu.RLock()
+		enabled := d.enabled
+		h := d.handler
+		d.mu.RUnlock()
+
+		if !enabled || h == nil {
+			c.Next()
+			return
+		}
+		h(c)
+	}
 }

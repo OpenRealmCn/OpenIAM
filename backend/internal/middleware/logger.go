@@ -31,15 +31,22 @@ func ZapLogger(logger *zap.Logger) gin.HandlerFunc {
 }
 
 func CORS(allowOrigins []string) gin.HandlerFunc {
-	originSet := make(map[string]bool, len(allowOrigins))
-	for _, o := range allowOrigins {
-		originSet[o] = true
-	}
+	return DynamicCORS(func() []string { return allowOrigins })
+}
 
+func DynamicCORS(getOrigins func() []string) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		allowOrigins := getOrigins()
 		origin := c.GetHeader("Origin")
 		if origin != "" {
-			if len(originSet) == 0 || originSet["*"] || originSet[origin] {
+			allowed := len(allowOrigins) == 0
+			for _, o := range allowOrigins {
+				if o == "*" || o == origin {
+					allowed = true
+					break
+				}
+			}
+			if allowed {
 				c.Header("Access-Control-Allow-Origin", origin)
 			}
 		} else {

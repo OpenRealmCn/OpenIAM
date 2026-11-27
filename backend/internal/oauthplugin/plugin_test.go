@@ -15,6 +15,7 @@ import (
 	"github.com/openrealm/openiam/internal/oauthplugin"
 	"github.com/openrealm/openiam/internal/rbac"
 	"github.com/openrealm/openiam/internal/security"
+	"github.com/openrealm/openiam/internal/settings"
 	"github.com/openrealm/openiam/internal/version"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
@@ -99,6 +100,8 @@ func TestFederatedLoginFlowWithMockGitHubAndFeishu(t *testing.T) {
 	enforcer, err := rbac.NewEnforcer(db)
 	require.NoError(t, err)
 	auditSvc := audit.NewService(db, zap.NewNop())
+	settingsSvc, err := settings.NewService(db)
+	require.NoError(t, err)
 
 	svc := oauthplugin.NewService(
 		db,
@@ -107,8 +110,7 @@ func TestFederatedLoginFlowWithMockGitHubAndFeishu(t *testing.T) {
 		jwtMgr,
 		enforcer,
 		auditSvc,
-		"http://localhost:5173/oauth/callback",
-		24*time.Hour,
+		settingsSvc,
 	)
 
 	require.NoError(t, db.Create(&models.OAuthProvider{

@@ -16,6 +16,7 @@ import { PermissionsPage } from './pages/PermissionsPage';
 import { OAuthAppsPage } from './pages/OAuthAppsPage';
 import { IdentityProvidersPage } from './pages/IdentityProvidersPage';
 import { AuditLogsPage } from './pages/AuditLogsPage';
+import { SystemSettingsPage } from './pages/SystemSettingsPage';
 import { SystemVersionPage } from './pages/SystemVersionPage';
 
 export const App: React.FC = () => {
@@ -65,6 +66,7 @@ export const App: React.FC = () => {
               <Route path="oauth-apps" element={<OAuthAppsPage />} />
               <Route path="identity-providers" element={<IdentityProvidersPage />} />
               <Route path="audit-logs" element={<AuditLogsPage />} />
+              <Route path="system-settings" element={<SystemSettingsPage />} />
               <Route path="system-version" element={<SystemVersionPage />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />

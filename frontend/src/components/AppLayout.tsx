@@ -32,6 +32,7 @@ import {
   Menu as MenuIcon,
   People as PeopleIcon,
   Security as RoleIcon,
+  Settings as SettingsIcon,
   VerifiedUser as ShieldIcon,
   SystemUpdateAlt as VersionIcon,
 } from '@mui/icons-material';
@@ -71,6 +72,7 @@ const navSections: { title: string; items: NavItem[] }[] = [
     title: '审计与系统运维',
     items: [
       { label: '安全审计日志', path: '/audit-logs', icon: <AuditIcon fontSize="small" /> },
+      { label: '系统设置', path: '/system-settings', icon: <SettingsIcon fontSize="small" /> },
       { label: '版本与数据库升级', path: '/system-version', icon: <VersionIcon fontSize="small" /> },
     ],
   },

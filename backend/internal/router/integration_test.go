@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
@@ -25,6 +24,7 @@ import (
 	"github.com/openrealm/openiam/internal/router"
 	"github.com/openrealm/openiam/internal/security"
 	"github.com/openrealm/openiam/internal/seed"
+	"github.com/openrealm/openiam/internal/settings"
 	"github.com/openrealm/openiam/internal/version"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
@@ -58,15 +58,26 @@ func setupTestEnv(t *testing.T, authRate string) *testEnv {
 
 	cfg := config.Default()
 	cfg.Server.Mode = "release"
-	cfg.RateLimit.Enabled = authRate != ""
-	if authRate != "" {
-		cfg.RateLimit.GeneralRate = "500-M"
-		cfg.RateLimit.AuthRate = authRate
-	}
-	cfg.Security.MaxLoginFailures = 3
-	cfg.Security.LockoutMinutes = 5
 
-	jwtMgr, err := security.NewJWTManager(cfg.JWT.Issuer, "", 30*time.Minute)
+	settingsSvc, err := settings.NewService(db)
+	require.NoError(t, err)
+
+	updates := map[string]string{
+		settings.KeySecurityMaxLoginFailures: "3",
+		settings.KeySecurityLockoutMinutes:   "5",
+	}
+	if authRate != "" {
+		updates[settings.KeyRateLimitEnabled] = "true"
+		updates[settings.KeyRateLimitGeneralRate] = "500-M"
+		updates[settings.KeyRateLimitAuthRate] = authRate
+	} else {
+		updates[settings.KeyRateLimitEnabled] = "false"
+	}
+	_, _, err = settingsSvc.UpdateBatch(updates, 0)
+	require.NoError(t, err)
+
+	snap := settingsSvc.Snapshot()
+	jwtMgr, err := security.NewJWTManager(snap.JWTIssuer, "", snap.JWTAccessTTL)
 	require.NoError(t, err)
 	stateStore := security.NewStateStore(rdb, cfg.Redis.KeyPrefix)
 	enforcer, err := rbac.NewEnforcer(db)
@@ -81,22 +92,22 @@ func setupTestEnv(t *testing.T, authRate string) *testEnv {
 		jwtMgr,
 		enforcer,
 		auditSvc,
-		cfg.OAuthPlugin.CallbackBaseURL,
-		24*time.Hour,
+		settingsSvc,
 	)
-	oauthSrv := oauthserver.NewServer(db, rdb, stateStore, jwtMgr, auditSvc, cfg.OAuthServer)
+	oauthSrv := oauthserver.NewServer(db, rdb, stateStore, jwtMgr, auditSvc, settingsSvc)
 
 	engine, err := router.Setup(router.Dependencies{
-		Config:     cfg,
-		DB:         db,
-		Redis:      rdb,
-		Logger:     zap.NewNop(),
-		JWTManager: jwtMgr,
-		StateStore: stateStore,
-		Enforcer:   enforcer,
-		AuditSvc:   auditSvc,
-		PluginSvc:  pluginSvc,
-		OAuthSrv:   oauthSrv,
+		Config:      cfg,
+		DB:          db,
+		Redis:       rdb,
+		Logger:      zap.NewNop(),
+		JWTManager:  jwtMgr,
+		StateStore:  stateStore,
+		Enforcer:    enforcer,
+		AuditSvc:    auditSvc,
+		SettingsSvc: settingsSvc,
+		PluginSvc:   pluginSvc,
+		OAuthSrv:    oauthSrv,
 	})
 	require.NoError(t, err)
 
@@ -433,4 +444,50 @@ func TestOpenIAMOAuth2ServerFullFlow(t *testing.T) {
 		"token": tokResp.AccessToken,
 	}, "")
 	assert.Contains(t, introAfterW.Body.String(), `"active":false`)
+}
+
+func TestSystemSettingsDatabasePersistenceAndHotReload(t *testing.T) {
+	env := setupTestEnv(t, "")
+	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+
+	// 1. 管理员读取数据库中的系统设置列表
+	listW := doJSON(t, env.engine, http.MethodGet, "/api/v1/system/settings", nil, adminToken)
+	require.Equal(t, http.StatusOK, listW.Code)
+	assert.Contains(t, listW.Body.String(), settings.KeySecurityAllowPublicRegister)
+	assert.Contains(t, listW.Body.String(), settings.KeyOAuthServerIssuer)
+
+	// 2. 在线修改配置：关闭公开注册 + 修改 OIDC Issuer + 开启限流
+	updW := doJSON(t, env.engine, http.MethodPut, "/api/v1/system/settings", map[string]interface{}{
+		"settings": map[string]string{
+			settings.KeySecurityAllowPublicRegister: "false",
+			settings.KeyOAuthServerIssuer:           "https://iam.openrealm.io",
+			settings.KeyRateLimitEnabled:            "true",
+			settings.KeyRateLimitAuthRate:           "2-M",
+		},
+	}, adminToken)
+	require.Equal(t, http.StatusOK, updW.Code, updW.Body.String())
+
+	// 3. 验证公开注册接口立即受控关闭（热生效）
+	regW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "blocked_user",
+		"email":    "blocked@openrealm.local",
+		"password": "Password@123",
+	}, "")
+	assert.Equal(t, http.StatusForbidden, regW.Code)
+
+	// 4. 验证 OIDC Discovery 立即反映新的 Issuer
+	discW := doJSON(t, env.engine, http.MethodGet, "/.well-known/openid-configuration", nil, "")
+	require.Equal(t, http.StatusOK, discW.Code)
+	assert.Contains(t, discW.Body.String(), `"issuer":"https://iam.openrealm.io"`)
+
+	// 5. 验证数据库持久化记录 & 审计日志写入 system.settings.update
+	var saved models.SystemSetting
+	require.NoError(t, env.db.Where("setting_key = ?", settings.KeyOAuthServerIssuer).First(&saved).Error)
+	assert.Equal(t, "https://iam.openrealm.io", saved.Value)
+
+	var auditRow models.AuditLog
+	require.NoError(t, env.db.Where("action = ?", "system.settings.update").Order("id DESC").First(&auditRow).Error)
+	assert.Equal(t, "system_setting", auditRow.ResourceType)
+	assert.NotNil(t, auditRow.BeforeState)
+	assert.NotNil(t, auditRow.AfterState)
 }
