@@ -13,7 +13,7 @@ import (
 // 域管理员不得通过角色分配、策略配置或操作超级管理员账号来提权，也不得跨域写入。
 func TestDomainAdminCannotEscalatePrivileges(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 
 	createW := doJSON(t, env.engine, http.MethodPost, "/api/v1/users", map[string]interface{}{
 		"username":    "da_user",

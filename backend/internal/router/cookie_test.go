@@ -40,7 +40,7 @@ func TestRefreshTokenIsDeliveredViaHttpOnlyCookie(t *testing.T) {
 
 	w := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/login", map[string]string{
 		"username": "admin",
-		"password": "Admin@123456",
+		"password": testSeedAdminPassword,
 	}, "")
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 

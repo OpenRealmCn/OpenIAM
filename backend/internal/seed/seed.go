@@ -1,6 +1,8 @@
 package seed
 
 import (
+	"context"
+	"errors"
 	"fmt"
 
 	"github.com/openrealm/openiam/internal/config"
@@ -10,8 +12,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// EnsureDefaults 幂等初始化默认域、系统角色、基础权限点与默认超级管理员账号。
-func EnsureDefaults(db *gorm.DB, enforcer *rbac.Enforcer, cfg config.SeedConfig) error {
+// EnsureDefaults 幂等初始化默认域、系统角色、基础权限点与初始超级管理员账号。
+// 空库首次初始化必须显式提供满足策略的初始口令；stateStore 用于吊销存量默认口令管理员的旧会话，可为 nil。
+func EnsureDefaults(db *gorm.DB, enforcer *rbac.Enforcer, cfg config.SeedConfig, stateStore *security.StateStore) error {
 	// 1. 默认域 openiam
 	var dom models.Domain
 	if err := db.Where("code = ?", rbac.DefaultDomain).First(&dom).Error; err != nil {
@@ -93,27 +96,56 @@ func EnsureDefaults(db *gorm.DB, enforcer *rbac.Enforcer, cfg config.SeedConfig)
 		_, _ = enforcer.AddPolicy("viewer", rbac.DefaultDomain, "oauth_clients", "authorize")
 	}
 
-	// 5. 默认超级管理员账号
+	// 5. 初始超级管理员账号
+	// 只在账号不存在时创建，且必须显式提供满足策略的强口令；创建出来的初始管理员一律带强制改密标记。
+	// 重复运行初始化不会覆盖已有账号的密码，也不会重复建号。
 	if cfg.Enabled {
 		var admin models.User
-		if err := db.Where("username = ?", cfg.AdminUsername).First(&admin).Error; err != nil {
-			hash, err := security.HashPassword(cfg.AdminPassword)
-			if err != nil {
-				return fmt.Errorf("hash seed admin password: %w", err)
+		err := db.Where("username = ?", cfg.AdminUsername).First(&admin).Error
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			if verr := security.ValidateInitialPassword(cfg.AdminPassword); verr != nil {
+				return fmt.Errorf("拒绝初始化超级管理员 %q：%v；请通过环境变量 OPENIAM_SEED_ADMIN_PASSWORD 显式设置强口令（至少 %d 位，同时包含大写字母、小写字母与数字，且不得使用历史默认口令）",
+					cfg.AdminUsername, verr, security.InitialPasswordMinLength)
+			}
+			hash, herr := security.HashPassword(cfg.AdminPassword)
+			if herr != nil {
+				return fmt.Errorf("hash seed admin password: %w", herr)
 			}
 			admin = models.User{
-				Username:     cfg.AdminUsername,
-				Email:        cfg.AdminEmail,
-				DisplayName:  "超级管理员",
-				PasswordHash: hash,
-				Status:       "active",
+				Username:           cfg.AdminUsername,
+				Email:              cfg.AdminEmail,
+				DisplayName:        "超级管理员",
+				PasswordHash:       hash,
+				Status:             "active",
+				MustChangePassword: true,
 			}
-			if err := db.Create(&admin).Error; err != nil {
-				return fmt.Errorf("seed admin user: %w", err)
+			if cerr := db.Create(&admin).Error; cerr != nil {
+				return fmt.Errorf("seed admin user: %w", cerr)
 			}
+		case err != nil:
+			return fmt.Errorf("lookup seed admin user: %w", err)
 		}
 		if enforcer != nil {
 			_, _ = enforcer.AddRoleForUserInDomain(admin.ID, rbac.SuperAdminRole, rbac.DefaultDomain)
+		}
+	}
+
+	// 6. 存量库升级：初始超管仍能用历史默认口令通过 bcrypt 校验时，标记为必须改密并吊销其全部旧会话。
+	// 已改过密的管理员不会命中，密码与状态都不会被覆盖或重置。
+	if cfg.AdminUsername != "" {
+		var admin models.User
+		if err := db.Where("username = ?", cfg.AdminUsername).First(&admin).Error; err == nil {
+			if !admin.MustChangePassword && security.MatchesLegacyDefaultPassword(admin.PasswordHash) {
+				if uerr := db.Model(&admin).Update("must_change_password", true).Error; uerr != nil {
+					return fmt.Errorf("flag legacy admin for password change: %w", uerr)
+				}
+				if stateStore != nil {
+					if rerr := stateStore.RevokeUserTokens(context.Background(), admin.ID); rerr != nil {
+						return fmt.Errorf("revoke legacy admin sessions: %w", rerr)
+					}
+				}
+			}
 		}
 	}
 

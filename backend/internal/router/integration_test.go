@@ -34,6 +34,9 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+// testSeedAdminPassword 为测试环境初始管理员口令：必须满足初始化口令策略，且不能是历史默认口令。
+const testSeedAdminPassword = "SeedAdmin@2026#Str0ng"
+
 type testEnv struct {
 	engine      *gin.Engine
 	db          *gorm.DB
@@ -60,6 +63,7 @@ func setupTestEnv(t *testing.T, authRate string) *testEnv {
 
 	cfg := config.Default()
 	cfg.Server.Mode = "release"
+	cfg.Seed.AdminPassword = testSeedAdminPassword
 
 	settingsSvc, err := settings.NewService(db)
 	require.NoError(t, err)
@@ -84,7 +88,11 @@ func setupTestEnv(t *testing.T, authRate string) *testEnv {
 	stateStore := security.NewStateStore(rdb, cfg.Redis.KeyPrefix)
 	enforcer, err := rbac.NewEnforcer(db)
 	require.NoError(t, err)
-	require.NoError(t, seed.EnsureDefaults(db, enforcer, cfg.Seed))
+	require.NoError(t, seed.EnsureDefaults(db, enforcer, cfg.Seed, stateStore))
+	// 常规用例关注管理 API 行为，这里直接解除初始管理员的强制改密标记；
+	// 强制改密流程本身在 bootstrap_password_test.go 中单独覆盖。
+	require.NoError(t, db.Model(&models.User{}).Where("username = ?", cfg.Seed.AdminUsername).
+		Update("must_change_password", false).Error)
 
 	auditSvc := audit.NewService(db, zap.NewNop())
 	pluginSvc := oauthplugin.NewService(
@@ -237,7 +245,7 @@ func TestIPRateLimiting(t *testing.T) {
 
 func TestMultiDomainRBACAndAuditLogs(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 
 	// 1. 创建一个新业务域 billing
 	domW := doJSON(t, env.engine, http.MethodPost, "/api/v1/domains", map[string]string{
@@ -326,7 +334,7 @@ func TestMultiDomainRBACAndAuditLogs(t *testing.T) {
 
 func TestOpenIAMOAuth2ServerFullFlow(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 
 	// 1. 检查 OIDC Discovery & JWKS
 	discW := doJSON(t, env.engine, http.MethodGet, "/.well-known/openid-configuration", nil, "")
@@ -451,7 +459,7 @@ func TestOpenIAMOAuth2ServerFullFlow(t *testing.T) {
 
 func TestSystemSettingsDatabasePersistenceAndHotReload(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 
 	// 1. 管理员读取数据库中的系统设置列表
 	listW := doJSON(t, env.engine, http.MethodGet, "/api/v1/system/settings", nil, adminToken)

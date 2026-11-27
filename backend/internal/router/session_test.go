@@ -34,7 +34,7 @@ func TestPasswordChangeRevokesExistingSessions(t *testing.T) {
 // 管理员重置他人密码后，目标用户的旧会话必须失效。
 func TestAdminPasswordResetRevokesTargetSessions(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 	w := doJSON(t, env.engine, http.MethodPost, "/api/v1/users", map[string]any{
 		"username": "dave", "email": "dave@openrealm.local", "password": "Dave@123456",
 	}, adminToken)
@@ -55,7 +55,7 @@ func TestAdminPasswordResetRevokesTargetSessions(t *testing.T) {
 // 列表类接口必须按调用者所在域收敛，不能通过 domain 参数读取其他域的数据。
 func TestListEndpointsAreScopedToCallerDomain(t *testing.T) {
 	env := setupTestEnv(t, "")
-	adminToken, _ := loginAs(t, env.engine, "admin", "Admin@123456")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 
 	w := doJSON(t, env.engine, http.MethodPost, "/api/v1/domains", map[string]string{"code": "billing", "name": "Billing"}, adminToken)
 	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())

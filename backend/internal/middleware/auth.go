@@ -68,7 +68,7 @@ func AuthMiddleware(jwtMgr *security.JWTManager, stateStore *security.StateStore
 
 		if db != nil && claims.UserID > 0 {
 			var user models.User
-			if err := db.Select("id, username, status").First(&user, claims.UserID).Error; err != nil {
+			if err := db.Select("id, username, status, must_change_password").First(&user, claims.UserID).Error; err != nil {
 				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 					"code":    401,
 					"message": "用户不存在",
@@ -82,6 +82,16 @@ func AuthMiddleware(jwtMgr *security.JWTManager, stateStore *security.StateStore
 				})
 				return
 			}
+			// 强制改密状态：除修改密码与退出登录外，一律拒绝，避免受限账号拿到可用于业务的令牌。
+			if user.MustChangePassword && !allowsPasswordChangeOnly(c.Request.Method, requestPath(c)) {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+					"code":       403,
+					"error":      "password_change_required",
+					"message":    "当前账号处于强制改密状态，请先修改密码后再访问其他接口",
+					"change_url": "/api/v1/auth/change-password",
+				})
+				return
+			}
 		}
 
 		c.Set("user_id", claims.UserID)
@@ -91,4 +101,26 @@ func AuthMiddleware(jwtMgr *security.JWTManager, stateStore *security.StateStore
 		c.Set("claims", claims)
 		c.Next()
 	}
+}
+
+// passwordChangeAllowedRoutes 为强制改密状态下唯一允许访问的接口。
+var passwordChangeAllowedRoutes = map[string]bool{
+	"/api/v1/auth/change-password": true,
+	"/api/v1/auth/logout":          true,
+}
+
+// allowsPasswordChangeOnly 判断强制改密账号能否访问该请求（仅允许 POST 改密与退出登录）。
+func allowsPasswordChangeOnly(method, path string) bool {
+	if method != http.MethodPost {
+		return false
+	}
+	return passwordChangeAllowedRoutes[path]
+}
+
+// requestPath 优先使用 Gin 注册路由的完整路径，避免尾斜杠等写法绕过白名单。
+func requestPath(c *gin.Context) string {
+	if fp := c.FullPath(); fp != "" {
+		return fp
+	}
+	return c.Request.URL.Path
 }

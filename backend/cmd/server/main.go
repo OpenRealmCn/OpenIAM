@@ -41,9 +41,6 @@ func main() {
 		}
 	}
 
-	if cfg.Seed.Enabled && cfg.Seed.AdminPassword == "Admin@123456" {
-		logger.Warn("检测到仍在使用默认超级管理员口令，请通过 OPENIAM_SEED_ADMIN_PASSWORD 设置强口令并在首次登录后立即修改")
-	}
 	_, safeMySQLTarget, _ := database.NormalizeMySQLDSN(cfg.MySQL.DSN)
 	logger.Info("bootstrapping OpenIAM",
 		zap.String("app_version", version.AppVersion),
@@ -129,7 +126,7 @@ func main() {
 		logger.Fatal("failed to initialize Casbin RBAC enforcer", zap.Error(err))
 	}
 
-	if err := seed.EnsureDefaults(db, enforcer, cfg.Seed); err != nil {
+	if err := seed.EnsureDefaults(db, enforcer, cfg.Seed, stateStore); err != nil {
 		logger.Fatal("failed to seed default data", zap.Error(err))
 	}
 

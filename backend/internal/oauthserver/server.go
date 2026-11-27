@@ -39,7 +39,10 @@ func (g *JWTAccessGenerator) Token(ctx context.Context, data *oauth2.GenerateBas
 		if id, parseErr := strconv.ParseUint(data.UserID, 10, 64); parseErr == nil {
 			userID = id
 			var user models.User
-			if err := g.db.WithContext(ctx).Select("id, username, email").First(&user, id).Error; err == nil {
+			if err := g.db.WithContext(ctx).Select("id, username, email, must_change_password").First(&user, id).Error; err == nil {
+				if user.MustChangePassword {
+					return "", "", security.ErrPasswordChangeRequired
+				}
 				username = user.Username
 				email = user.Email
 			}
@@ -78,6 +81,7 @@ type Server struct {
 	settingsSvc *settings.Service
 	manager     *manage.Manager
 	oauthSrv    *server.Server
+	tokenStore  *RedisTokenStore
 }
 
 func NewServer(
@@ -182,6 +186,7 @@ func NewServer(
 		settingsSvc: settingsSvc,
 		manager:     mgr,
 		oauthSrv:    srv,
+		tokenStore:  tokenStore,
 	}
 
 	srv.SetClientAuthorizedHandler(func(clientID string, grant oauth2.GrantType) (bool, error) {
@@ -558,6 +563,9 @@ func (s *Server) CreateAuthorizationCode(c *gin.Context) {
 
 // Token 处理 POST /oauth2/token。
 func (s *Server) Token(c *gin.Context) {
+	if s.rejectPasswordChangeGrant(c) {
+		return
+	}
 	if err := s.oauthSrv.HandleTokenRequest(c.Writer, c.Request); err != nil {
 		s.auditSvc.RecordFromContext(c, audit.Entry{
 			DomainCode:   rbac.DefaultDomain,
@@ -567,6 +575,41 @@ func (s *Server) Token(c *gin.Context) {
 			ErrorMessage: err.Error(),
 		})
 	}
+}
+
+// rejectPasswordChangeGrant 在 OAuth2 令牌端点拦下强制改密账号的 refresh_token 续期请求。
+// authorization_code 授权码在同意阶段就已被 AuthMiddleware 拦截，签发阶段再由 JWTAccessGenerator 兜底拒绝。
+func (s *Server) rejectPasswordChangeGrant(c *gin.Context) bool {
+	if err := c.Request.ParseForm(); err != nil {
+		return false
+	}
+	if c.Request.PostForm.Get("grant_type") != string(oauth2.Refreshing) {
+		return false
+	}
+	token := c.Request.PostForm.Get("refresh_token")
+	if token == "" {
+		return false
+	}
+	ti, err := s.tokenStore.GetByRefresh(c.Request.Context(), token)
+	if err != nil || ti == nil {
+		return false
+	}
+	uid, err := strconv.ParseUint(ti.GetUserID(), 10, 64)
+	if err != nil || uid == 0 {
+		return false
+	}
+	var user models.User
+	if err := s.db.WithContext(c.Request.Context()).Select("id, must_change_password").First(&user, uid).Error; err != nil {
+		return false
+	}
+	if !user.MustChangePassword {
+		return false
+	}
+	c.JSON(http.StatusForbidden, gin.H{
+		"error":             "password_change_required",
+		"error_description": "当前账号处于强制改密状态，请先修改密码",
+	})
+	return true
 }
 
 // UserInfo 处理 GET /oauth2/userinfo，校验 OAuth2 Bearer Token 并返回 OIDC 用户信息。
@@ -609,6 +652,10 @@ func (s *Server) writeUserInfo(c *gin.Context, uid uint64) {
 	}
 	if user.Status != "active" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "error_description": "用户已被禁用"})
+		return
+	}
+	if user.MustChangePassword {
+		c.JSON(http.StatusForbidden, gin.H{"error": "password_change_required", "error_description": "当前账号处于强制改密状态，请先修改密码"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -689,6 +736,13 @@ func (s *Server) Introspect(c *gin.Context) {
 
 	if claims, err := s.jwtMgr.ParseAccessToken(token); err == nil {
 		revoked, _ := s.stateStore.IsAccessTokenRevoked(ctx, claims.ID)
+		if !revoked && claims.UserID > 0 {
+			// 强制改密账号的令牌对外一律视为不可用（inactive）。
+			var user models.User
+			if uErr := s.db.WithContext(ctx).Select("id, must_change_password").First(&user, claims.UserID).Error; uErr == nil && user.MustChangePassword {
+				revoked = true
+			}
+		}
 		if !revoked {
 			c.JSON(http.StatusOK, gin.H{
 				"active":    true,
