@@ -39,14 +39,23 @@ func main() {
 		}
 	}
 
-	db, err := database.InitMySQL(cfg.MySQL, cfg.Server.Mode == "debug")
+	_, safeMySQLTarget, _ := database.NormalizeMySQLDSN(cfg.MySQL.DSN)
+	logger.Info("bootstrapping OpenIAM",
+		zap.String("app_version", version.AppVersion),
+		zap.String("mode", cfg.Server.Mode),
+		zap.String("mysql", safeMySQLTarget),
+		zap.String("redis", cfg.Redis.Addr),
+	)
+
+	db, normalizedDSN, err := database.InitMySQL(cfg.MySQL, cfg.Server.Mode == "debug")
 	if err != nil {
-		logger.Fatal("failed to initialize MySQL", zap.Error(err))
+		logger.Fatal("failed to initialize MySQL", zap.String("mysql", safeMySQLTarget), zap.Error(err))
 	}
+	logger.Info("MySQL connected", zap.String("mysql", safeMySQLTarget))
 
 	// 数据库迁移与版本检查
 	if *migrateOnly {
-		status, err := version.MigrateMySQLUp(db)
+		status, err := version.MigrateMySQLUp(db, normalizedDSN)
 		if err != nil {
 			logger.Fatal("database migration failed", zap.Error(err))
 		}
@@ -59,7 +68,7 @@ func main() {
 	}
 
 	if *checkVersion {
-		status, err := version.CheckMySQLVersion(db, cfg.Migration.StrictVersionCheck)
+		status, err := version.CheckMySQLVersion(db, normalizedDSN, cfg.Migration.StrictVersionCheck)
 		if err != nil {
 			logger.Fatal("database version check failed", zap.Error(err))
 		}
@@ -72,22 +81,25 @@ func main() {
 	}
 
 	if cfg.Migration.AutoMigrate {
-		status, err := version.MigrateMySQLUp(db)
+		logger.Info("running database auto-migration...")
+		status, err := version.MigrateMySQLUp(db, normalizedDSN)
 		if err != nil {
 			logger.Fatal("auto migration failed", zap.Error(err))
 		}
 		logger.Info("auto migration completed", zap.Uint("schema_version", status.CurrentSchemaVersion))
 	}
 
-	if _, err := version.CheckMySQLVersion(db, cfg.Migration.StrictVersionCheck); err != nil {
+	if _, err := version.CheckMySQLVersion(db, normalizedDSN, cfg.Migration.StrictVersionCheck); err != nil {
 		logger.Fatal("database schema version mismatch", zap.Error(err))
 	}
 
+	logger.Info("connecting to Redis...", zap.String("redis", cfg.Redis.Addr))
 	rdb, err := database.InitRedis(cfg.Redis)
 	if err != nil {
-		logger.Fatal("failed to initialize Redis", zap.Error(err))
+		logger.Fatal("failed to initialize Redis", zap.String("redis", cfg.Redis.Addr), zap.Error(err))
 	}
 	defer func() { _ = rdb.Close() }()
+	logger.Info("Redis connected", zap.String("redis", cfg.Redis.Addr))
 
 	// 从数据库初始化与加载系统运行时配置
 	settingsSvc, err := settings.NewService(db)

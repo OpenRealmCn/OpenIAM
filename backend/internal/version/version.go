@@ -30,32 +30,38 @@ type Status struct {
 	Message               string    `json:"message"`
 }
 
-func newMigrator(sqlDB *sql.DB) (*migrate.Migrate, error) {
+// newIsolatedMigrator 使用独立数据库连接创建 migrate 实例，调用方务必 defer m.Close()，
+// 避免与 GORM 连接池共享导致连接或 MySQL 锁泄漏。
+func newIsolatedMigrator(dsn string) (*migrate.Migrate, error) {
 	sourceDriver, err := iofs.New(migrations.FS, ".")
 	if err != nil {
 		return nil, fmt.Errorf("create iofs migration source: %w", err)
 	}
-	dbDriver, err := mysql.WithInstance(sqlDB, &mysql.Config{})
+	rawDB, err := sql.Open("mysql", dsn)
 	if err != nil {
+		return nil, fmt.Errorf("open mysql for migration: %w", err)
+	}
+	dbDriver, err := mysql.WithInstance(rawDB, &mysql.Config{})
+	if err != nil {
+		_ = rawDB.Close()
 		return nil, fmt.Errorf("create mysql migration driver: %w", err)
 	}
 	m, err := migrate.NewWithInstance("iofs", sourceDriver, "mysql", dbDriver)
 	if err != nil {
+		_ = rawDB.Close()
 		return nil, fmt.Errorf("create migrate instance: %w", err)
 	}
 	return m, nil
 }
 
 // CheckMySQLVersion 检查 MySQL 当前 schema 版本并与 ExpectedSchemaVersion 比对。
-func CheckMySQLVersion(db *gorm.DB, strict bool) (*Status, error) {
-	sqlDB, err := db.DB()
+func CheckMySQLVersion(db *gorm.DB, dsn string, strict bool) (*Status, error) {
+	m, err := newIsolatedMigrator(dsn)
 	if err != nil {
 		return nil, err
 	}
-	m, err := newMigrator(sqlDB)
-	if err != nil {
-		return nil, err
-	}
+	defer func() { _, _ = m.Close() }()
+
 	ver, dirty, err := m.Version()
 	if errors.Is(err, migrate.ErrNilVersion) {
 		ver = 0
@@ -64,26 +70,7 @@ func CheckMySQLVersion(db *gorm.DB, strict bool) (*Status, error) {
 		return nil, fmt.Errorf("read schema version: %w", err)
 	}
 
-	status := &Status{
-		AppVersion:            AppVersion,
-		ExpectedSchemaVersion: ExpectedSchemaVersion,
-		CurrentSchemaVersion:  ver,
-		Dirty:                 dirty,
-		UpToDate:              !dirty && ver == ExpectedSchemaVersion,
-		CheckedAt:             time.Now(),
-	}
-
-	switch {
-	case dirty:
-		status.Message = fmt.Sprintf("数据库迁移处于 dirty 状态 (version=%d)，请人工修复后重试", ver)
-	case ver < ExpectedSchemaVersion:
-		status.Message = fmt.Sprintf("数据库版本落后: 当前 v%d, 期望 v%d，需要执行升级迁移", ver, ExpectedSchemaVersion)
-	case ver > ExpectedSchemaVersion:
-		status.Message = fmt.Sprintf("数据库版本高于当前程序: 当前 v%d, 期望 v%d", ver, ExpectedSchemaVersion)
-	default:
-		status.Message = fmt.Sprintf("数据库版本校验通过 (v%d)", ver)
-	}
-
+	status := buildStatus(ver, dirty)
 	recordHistory(db, ver, "version_check", boolToStatus(status.UpToDate), status.Message)
 
 	if strict && !status.UpToDate {
@@ -93,15 +80,12 @@ func CheckMySQLVersion(db *gorm.DB, strict bool) (*Status, error) {
 }
 
 // MigrateMySQLUp 将 MySQL Schema 升级至最新版本并记录历史。
-func MigrateMySQLUp(db *gorm.DB) (*Status, error) {
-	sqlDB, err := db.DB()
+func MigrateMySQLUp(db *gorm.DB, dsn string) (*Status, error) {
+	m, err := newIsolatedMigrator(dsn)
 	if err != nil {
 		return nil, err
 	}
-	m, err := newMigrator(sqlDB)
-	if err != nil {
-		return nil, err
-	}
+	defer func() { _, _ = m.Close() }()
 
 	err = m.Up()
 	if err != nil && !errors.Is(err, migrate.ErrNoChange) {
@@ -134,27 +118,6 @@ func MigrateMySQLUp(db *gorm.DB) (*Status, error) {
 	}, nil
 }
 
-// MigrateMySQLDown 回滚指定步数的迁移。
-func MigrateMySQLDown(db *gorm.DB, steps int) error {
-	if steps <= 0 {
-		steps = 1
-	}
-	sqlDB, err := db.DB()
-	if err != nil {
-		return err
-	}
-	m, err := newMigrator(sqlDB)
-	if err != nil {
-		return err
-	}
-	if err := m.Steps(-steps); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		return err
-	}
-	ver, _, _ := m.Version()
-	recordHistory(db, ver, "migrate_down", "success", fmt.Sprintf("回滚 %d 个版本至 v%d", steps, ver))
-	return nil
-}
-
 // AutoMigrateForTesting 仅用于 SQLite 测试环境自动建表与记录版本。
 func AutoMigrateForTesting(db *gorm.DB) error {
 	if err := db.AutoMigrate(
@@ -175,11 +138,18 @@ func AutoMigrateForTesting(db *gorm.DB) error {
 	return nil
 }
 
-// GetVersionStatus 返回版本状态（MySQL 使用 golang-migrate 检查，非 MySQL 回退查询历史表）。
+// GetVersionStatus 轻量查询当前数据库版本状态（直接读取 schema_migrations 表，避免额外建立迁移连接）。
 func GetVersionStatus(db *gorm.DB) (*Status, error) {
 	if db.Dialector.Name() == "mysql" {
-		return CheckMySQLVersion(db, false)
+		var row struct {
+			Version uint `gorm:"column:version"`
+			Dirty   bool `gorm:"column:dirty"`
+		}
+		if err := db.Table("schema_migrations").Select("version, dirty").Limit(1).Scan(&row).Error; err == nil {
+			return buildStatus(row.Version, row.Dirty), nil
+		}
 	}
+
 	var latest models.SystemVersionHistory
 	err := db.Order("id DESC").First(&latest).Error
 	ver := ExpectedSchemaVersion
@@ -195,6 +165,28 @@ func GetVersionStatus(db *gorm.DB) (*Status, error) {
 		CheckedAt:             time.Now(),
 		Message:               fmt.Sprintf("当前运行于 %s 驱动 (v%d)", db.Dialector.Name(), ver),
 	}, nil
+}
+
+func buildStatus(ver uint, dirty bool) *Status {
+	status := &Status{
+		AppVersion:            AppVersion,
+		ExpectedSchemaVersion: ExpectedSchemaVersion,
+		CurrentSchemaVersion:  ver,
+		Dirty:                 dirty,
+		UpToDate:              !dirty && ver == ExpectedSchemaVersion,
+		CheckedAt:             time.Now(),
+	}
+	switch {
+	case dirty:
+		status.Message = fmt.Sprintf("数据库迁移处于 dirty 状态 (version=%d)，请人工修复后重试", ver)
+	case ver < ExpectedSchemaVersion:
+		status.Message = fmt.Sprintf("数据库版本落后: 当前 v%d, 期望 v%d，需要执行升级迁移", ver, ExpectedSchemaVersion)
+	case ver > ExpectedSchemaVersion:
+		status.Message = fmt.Sprintf("数据库版本高于当前程序: 当前 v%d, 期望 v%d", ver, ExpectedSchemaVersion)
+	default:
+		status.Message = fmt.Sprintf("数据库版本校验通过 (v%d)", ver)
+	}
+	return status
 }
 
 func recordHistory(db *gorm.DB, schemaVersion uint, action, status, details string) {
