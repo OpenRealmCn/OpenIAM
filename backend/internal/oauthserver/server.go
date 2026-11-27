@@ -742,10 +742,16 @@ func (s *Server) Introspect(c *gin.Context) {
 
 	if claims, err := s.jwtMgr.ParseAccessToken(token); err == nil {
 		revoked, _ := s.stateStore.IsAccessTokenRevoked(ctx, claims.ID)
-		if !revoked && claims.UserID > 0 {
-			// 强制改密账号的令牌对外一律视为不可用（inactive）。
-			var user models.User
-			if uErr := s.db.WithContext(ctx).Select("id, must_change_password").First(&user, claims.UserID).Error; uErr == nil && user.MustChangePassword {
+		if !revoked {
+			// 与上面的令牌存储分支共用同一个主体判定：账号处于强制改密、已被删除、
+			// 或查询失败时一律按不可用处理（fail-closed），不再由本分支自己查库、
+			// 避免两条分支对内省结果给出不一致的结论。
+			// 主体为空的令牌不属于任何用户（例如客户端凭据令牌），不做账号态判定。
+			subject := strings.TrimSpace(claims.Subject)
+			if subject == "" && claims.UserID > 0 {
+				subject = strconv.FormatUint(claims.UserID, 10)
+			}
+			if subject != "" && s.subjectRequiresPasswordChange(ctx, subject) {
 				revoked = true
 			}
 		}

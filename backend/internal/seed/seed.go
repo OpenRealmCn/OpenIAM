@@ -12,6 +12,17 @@ import (
 	"gorm.io/gorm"
 )
 
+// legacyDomainAdminPlatformGrants 是旧版本 seed 错误下放给内置 domain_admin 的平台级只读策略。
+// 仅用于升级时清理历史残留；不表示这些权限现在可被委派。
+var legacyDomainAdminPlatformGrants = []struct {
+	Resource string
+	Action   string
+}{
+	{"settings", "read"},
+	{"domains", "read"},
+	{"oauth_providers", "read"},
+}
+
 // EnsureDefaults 幂等初始化默认域、系统角色、基础权限点与初始超级管理员账号。
 // 空库首次初始化必须显式提供满足策略的初始口令；stateStore 用于吊销存量默认口令管理员的旧会话，可为 nil。
 func EnsureDefaults(db *gorm.DB, enforcer *rbac.Enforcer, cfg config.SeedConfig, stateStore *security.StateStore) error {
@@ -87,20 +98,23 @@ func EnsureDefaults(db *gorm.DB, enforcer *rbac.Enforcer, cfg config.SeedConfig,
 			_, _ = enforcer.AddPolicy("domain_admin", rbac.DefaultDomain, p.Resource, p.Action)
 		}
 
-		// 升级兼容：清掉历史版本给内置 domain_admin 角色留下的平台级策略。
+		// 升级兼容：清掉历史版本给内置 domain_admin 角色留下的平台级只读策略。
 		// 运行时闸门已经屏蔽这些权限，但「能不能分配角色」读的是原始策略，
 		// 残留会让域管理员连内置 domain_admin 角色都分配不出去（403）。
-		var legacyDomains []string
-		db.Model(&models.Role{}).Where("code = ?", "domain_admin").Distinct().Pluck("domain_code", &legacyDomains)
-		for _, d := range legacyDomains {
-			rules, err := enforcer.GetPolicies(d, "domain_admin")
-			if err != nil {
-				continue
-			}
-			for _, p := range rules {
-				if !rbac.IsDelegable(p.Resource, p.Action) {
-					_, _ = enforcer.RemovePolicy("domain_admin", d, p.Resource, p.Action)
-				}
+		//
+		// 清理范围必须精确，不能按「凡不可委派就删」处理：
+		//   1. 只认内置角色（IsSystem=true）。其他域可以自建 code 同名的角色，
+		//      平台超管给那种角色配的权限是合法配置，不属于历史残留，不能删。
+		//   2. 只删旧 seed 确实授予过的那几对（settings/domains/oauth_providers 的 read）。
+		//      旧 seed 的规则是「这三个资源只给 read」，所以只有这三对是历史残留；
+		//      超管后来给内置角色另加的业务权限（例如 orders:approve）不在清理范围内。
+		var legacyRoleOwners []string
+		db.Model(&models.Role{}).
+			Where("code = ? AND is_system = ?", "domain_admin", true).
+			Distinct().Pluck("domain_code", &legacyRoleOwners)
+		for _, d := range legacyRoleOwners {
+			for _, legacy := range legacyDomainAdminPlatformGrants {
+				_, _ = enforcer.RemovePolicy("domain_admin", d, legacy.Resource, legacy.Action)
 			}
 		}
 

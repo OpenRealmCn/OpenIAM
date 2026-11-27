@@ -234,11 +234,9 @@ func TestDomainAdminCannotEscalateThroughRoleWorkflow(t *testing.T) {
 	}, daToken)
 	assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
 
-	// 以上都没有真正落库：被拒的分配之后，目标用户仍然只有接入时的基础角色
+	// 精确断言：被拒的越权分配一条都不能落库，目标用户仍只有接入时的基础角色。
 	rolesAfter := env.enforcer.GetRolesForUserInDomain(targetID, rbac.DefaultDomain)
-	assert.Len(t, rolesAfter, 1)
-	assert.NotContains(t, rolesAfter, "billing_ops")
-	assert.NotContains(t, rolesAfter, "legacy_high")
+	assert.Equal(t, []string{baseRole.Code}, rolesAfter)
 }
 
 // 验收 3：域管理员给本域用户委派允许的业务权限 → 成功。
