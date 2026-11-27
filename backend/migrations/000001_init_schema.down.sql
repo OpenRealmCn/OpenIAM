@@ -1,0 +1,6 @@
+DROP TABLE IF EXISTS system_version_history;
+DROP TABLE IF EXISTS casbin_rule;
+DROP TABLE IF EXISTS permissions;
+DROP TABLE IF EXISTS roles;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS domains;

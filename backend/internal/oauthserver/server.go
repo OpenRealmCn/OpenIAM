@@ -1,0 +1,603 @@
+package oauthserver
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/go-oauth2/oauth2/v4"
+	oautherrors "github.com/go-oauth2/oauth2/v4/errors"
+	"github.com/go-oauth2/oauth2/v4/manage"
+	"github.com/go-oauth2/oauth2/v4/server"
+	"github.com/google/uuid"
+	"github.com/openrealm/openiam/internal/audit"
+	"github.com/openrealm/openiam/internal/config"
+	"github.com/openrealm/openiam/internal/models"
+	"github.com/openrealm/openiam/internal/rbac"
+	"github.com/openrealm/openiam/internal/security"
+	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
+)
+
+// JWTAccessGenerator 使用 OpenIAM 的 RS256 JWTManager 签发 OAuth2 Access Token。
+type JWTAccessGenerator struct {
+	jwtMgr *security.JWTManager
+	db     *gorm.DB
+}
+
+func (g *JWTAccessGenerator) Token(ctx context.Context, data *oauth2.GenerateBasic, isGenRefresh bool) (access, refresh string, err error) {
+	var userID uint64
+	username := ""
+	email := ""
+	if data.UserID != "" {
+		if id, parseErr := strconv.ParseUint(data.UserID, 10, 64); parseErr == nil {
+			userID = id
+			var user models.User
+			if err := g.db.WithContext(ctx).Select("id, username, email").First(&user, id).Error; err == nil {
+				username = user.Username
+				email = user.Email
+			}
+		}
+	}
+
+	var ttl time.Duration
+	if data.TokenInfo != nil && data.TokenInfo.GetAccessExpiresIn() > 0 {
+		ttl = data.TokenInfo.GetAccessExpiresIn()
+	}
+
+	access, _, _, err = g.jwtMgr.GenerateAccessToken(
+		userID,
+		username,
+		email,
+		data.TokenInfo.GetScope(),
+		data.Client.GetID(),
+		ttl,
+	)
+	if err != nil {
+		return "", "", err
+	}
+	if isGenRefresh {
+		refresh = strings.ReplaceAll(uuid.NewString()+uuid.NewString(), "-", "")
+	}
+	return access, refresh, nil
+}
+
+// Server 封装 OpenIAM OAuth 2.0 / OIDC 授权服务端能力。
+type Server struct {
+	db         *gorm.DB
+	rdb        *redis.Client
+	stateStore *security.StateStore
+	jwtMgr     *security.JWTManager
+	auditSvc   *audit.Service
+	cfg        config.OAuthServerConfig
+	manager    *manage.Manager
+	oauthSrv   *server.Server
+}
+
+func NewServer(
+	db *gorm.DB,
+	rdb *redis.Client,
+	stateStore *security.StateStore,
+	jwtMgr *security.JWTManager,
+	auditSvc *audit.Service,
+	cfg config.OAuthServerConfig,
+) *Server {
+	mgr := manage.NewDefaultManager()
+	codeTTL := time.Duration(cfg.AuthCodeTTLMinutes) * time.Minute
+	if codeTTL <= 0 {
+		codeTTL = 10 * time.Minute
+	}
+	accessTTL := time.Duration(cfg.AccessTokenTTLMinutes) * time.Minute
+	if accessTTL <= 0 {
+		accessTTL = time.Hour
+	}
+	refreshTTL := time.Duration(cfg.RefreshTokenTTLHours) * time.Hour
+	if refreshTTL <= 0 {
+		refreshTTL = 30 * 24 * time.Hour
+	}
+
+	mgr.SetAuthorizeCodeExp(codeTTL)
+	mgr.SetAuthorizeCodeTokenCfg(&manage.Config{
+		AccessTokenExp:    accessTTL,
+		RefreshTokenExp:   refreshTTL,
+		IsGenerateRefresh: true,
+	})
+	mgr.SetClientTokenCfg(&manage.Config{
+		AccessTokenExp:    accessTTL,
+		IsGenerateRefresh: false,
+	})
+	mgr.SetRefreshTokenCfg(&manage.RefreshingConfig{
+		AccessTokenExp:     accessTTL,
+		RefreshTokenExp:    refreshTTL,
+		IsGenerateRefresh:  true,
+		IsResetRefreshTime: true,
+		IsRemoveAccess:     true,
+		IsRemoveRefreshing: true,
+	})
+
+	clientStore := NewMySQLClientStore(db)
+	tokenStore := NewRedisTokenStore(rdb, "openiam:oauth2:token:")
+	mgr.MapClientStorage(clientStore)
+	mgr.MapTokenStorage(tokenStore)
+	mgr.MapAccessGenerate(&JWTAccessGenerator{jwtMgr: jwtMgr, db: db})
+
+	// 支持基于 oauth_clients.redirect_uris 数组的多回调地址校验
+	mgr.SetValidateURIHandler(func(baseURI, redirectURI string) error {
+		if redirectURI == "" {
+			return oautherrors.ErrInvalidRedirectURI
+		}
+		var client models.OAuthClient
+		// 首先尝试精准匹配 baseURI，随后在授权和同意接口中也会基于 ClientRecord 校验完整数组
+		if baseURI == redirectURI {
+			return nil
+		}
+		if err := db.Where("status = ?", "active").Find(&[]models.OAuthClient{}).Error; err == nil {
+			_ = client
+		}
+		// 如果 baseURI 为空或只是首地址，校验同一个客户端是否包含 redirectURI
+		var clients []models.OAuthClient
+		db.Where("status = ?", "active").Find(&clients)
+		for _, c := range clients {
+			for _, u := range c.RedirectURIs {
+				if u == redirectURI {
+					return nil
+				}
+			}
+		}
+		return oautherrors.ErrInvalidRedirectURI
+	})
+
+	srv := server.NewDefaultServer(mgr)
+	srv.SetAllowGetAccessRequest(false)
+	srv.SetClientInfoHandler(server.ClientFormHandler)
+	// 也支持 HTTP Basic Auth 传递 client_id / client_secret
+	srv.SetClientInfoHandler(func(r *http.Request) (string, string, error) {
+		if cid, csec, ok := server.ClientBasicHandler(r); ok == nil && cid != "" {
+			return cid, csec, nil
+		}
+		return server.ClientFormHandler(r)
+	})
+	srv.SetAllowedGrantType(
+		oauth2.AuthorizationCode,
+		oauth2.Refreshing,
+		oauth2.ClientCredentials,
+	)
+
+	s := &Server{
+		db:         db,
+		rdb:        rdb,
+		stateStore: stateStore,
+		jwtMgr:     jwtMgr,
+		auditSvc:   auditSvc,
+		cfg:        cfg,
+		manager:    mgr,
+		oauthSrv:   srv,
+	}
+
+	srv.SetClientAuthorizedHandler(func(clientID string, grant oauth2.GrantType) (bool, error) {
+		cli, err := clientStore.GetByID(context.Background(), clientID)
+		if err != nil {
+			return false, err
+		}
+		rec, ok := cli.(*ClientRecord)
+		if !ok {
+			return false, nil
+		}
+		return rec.AllowsGrantType(string(grant)), nil
+	})
+
+	srv.SetExtensionFieldsHandler(func(ti oauth2.TokenInfo) map[string]interface{} {
+		ext := make(map[string]interface{})
+		scopes := strings.Fields(ti.GetScope())
+		hasOpenID := false
+		for _, sc := range scopes {
+			if sc == "openid" {
+				hasOpenID = true
+				break
+			}
+		}
+		if hasOpenID && ti.GetUserID() != "" {
+			if uid, err := strconv.ParseUint(ti.GetUserID(), 10, 64); err == nil {
+				var user models.User
+				if err := db.First(&user, uid).Error; err == nil {
+					if idToken, err := jwtMgr.GenerateIDToken(
+						user.ID,
+						user.Username,
+						user.Email,
+						user.DisplayName,
+						user.AvatarURL,
+						ti.GetClientID(),
+						accessTTL,
+					); err == nil {
+						ext["id_token"] = idToken
+					}
+				}
+			}
+		}
+		return ext
+	})
+
+	srv.SetResponseErrorHandler(func(ctx context.Context, re *oautherrors.Response) {
+		if re != nil && re.Error != nil && auditSvc != nil {
+			auditSvc.Record(audit.Entry{
+				DomainCode:   rbac.DefaultDomain,
+				Action:       "oauth2.server.error",
+				ResourceType: "oauth_client",
+				Status:       "failed",
+				ErrorMessage: re.Error.Error(),
+			})
+		}
+	})
+
+	return s
+}
+
+// Authorize 处理 GET /oauth2/authorize：校验参数并重定向至前端授权同意页面。
+func (s *Server) Authorize(c *gin.Context) {
+	req, err := s.oauthSrv.ValidationAuthorizeRequest(c.Request)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":             "invalid_request",
+			"error_description": err.Error(),
+		})
+		return
+	}
+
+	var client models.OAuthClient
+	if err := s.db.Where("client_id = ? AND status = ?", req.ClientID, "active").First(&client).Error; err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":             "invalid_client",
+			"error_description": "OAuth 应用不存在或未启用",
+		})
+		return
+	}
+
+	rec := &ClientRecord{Model: client}
+	if !rec.AllowsRedirectURI(req.RedirectURI) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":             "invalid_redirect_uri",
+			"error_description": "redirect_uri 未在该应用白名单中注册",
+		})
+		return
+	}
+	if client.RequirePKCE && req.CodeChallenge == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":             "invalid_request",
+			"error_description": "该应用强制要求启用 PKCE (code_challenge)",
+		})
+		return
+	}
+
+	scopes := strings.Fields(req.Scope)
+	if len(scopes) == 0 {
+		scopes = client.Scopes
+	}
+
+	consentID := uuid.NewString()
+	consentReq := security.OAuthConsentRequest{
+		ID:                  consentID,
+		ClientID:            client.ClientID,
+		ClientName:          client.Name,
+		DomainCode:          client.DomainCode,
+		RedirectURI:         req.RedirectURI,
+		Scopes:              scopes,
+		State:               req.State,
+		CodeChallenge:       req.CodeChallenge,
+		CodeChallengeMethod: string(req.CodeChallengeMethod),
+		CreatedAt:           time.Now().Unix(),
+	}
+	if err := s.stateStore.SaveConsentRequest(c.Request.Context(), consentReq, 10*time.Minute); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "error_description": err.Error()})
+		return
+	}
+
+	consentURL := s.cfg.FrontendConsentURL
+	if consentURL == "" {
+		consentURL = "http://localhost:5173/oauth2/consent"
+	}
+	u, err := url.Parse(consentURL)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "error_description": "invalid frontend_consent_url"})
+		return
+	}
+	q := u.Query()
+	q.Set("request_id", consentID)
+	u.RawQuery = q.Encode()
+
+	// 若请求 Accept: application/json（如 API 客户端或测试），返回 JSON；否则 302 跳转前端同意页
+	if strings.Contains(c.GetHeader("Accept"), "application/json") {
+		c.JSON(http.StatusOK, gin.H{
+			"code": 0,
+			"data": gin.H{
+				"request_id":  consentID,
+				"consent_url": u.String(),
+				"client_name": client.Name,
+				"scopes":      scopes,
+			},
+		})
+		return
+	}
+	c.Redirect(http.StatusFound, u.String())
+}
+
+// GetConsentRequest 供前端授权同意页查询待审批的 OAuth2 应用信息。
+func (s *Server) GetConsentRequest(c *gin.Context) {
+	id := c.Param("id")
+	req, err := s.stateStore.GetConsentRequest(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "授权请求不存在或已过期"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "ok", "data": req})
+}
+
+type ConsentDecision struct {
+	Approved bool `json:"approved"`
+}
+
+// SubmitConsentDecision 处理用户在前端同意页的“允许”或“拒绝”操作，生成授权码或拒绝重定向 URL。
+func (s *Server) SubmitConsentDecision(c *gin.Context) {
+	id := c.Param("id")
+	var body ConsentDecision
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "请求参数错误"})
+		return
+	}
+
+	reqData, err := s.stateStore.GetConsentRequest(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "授权请求不存在或已过期"})
+		return
+	}
+	_ = s.stateStore.DeleteConsentRequest(c.Request.Context(), id)
+
+	userIDVal, _ := c.Get("user_id")
+	userID, _ := userIDVal.(uint64)
+	usernameVal, _ := c.Get("username")
+	username, _ := usernameVal.(string)
+
+	redirectURL, err := url.Parse(reqData.RedirectURI)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "无效的 redirect_uri"})
+		return
+	}
+
+	if !body.Approved {
+		q := redirectURL.Query()
+		q.Set("error", "access_denied")
+		if reqData.State != "" {
+			q.Set("state", reqData.State)
+		}
+		redirectURL.RawQuery = q.Encode()
+		s.auditSvc.RecordFromContext(c, audit.Entry{
+			DomainCode:   reqData.DomainCode,
+			Action:       "oauth2.consent.deny",
+			ResourceType: "oauth_client",
+			ResourceID:   reqData.ClientID,
+			Status:       "success",
+		})
+		c.JSON(http.StatusOK, gin.H{"code": 0, "message": "ok", "data": gin.H{"redirect_uri": redirectURL.String()}})
+		return
+	}
+
+	authReq := &server.AuthorizeRequest{
+		ResponseType:        oauth2.Code,
+		ClientID:            reqData.ClientID,
+		Scope:               strings.Join(reqData.Scopes, " "),
+		RedirectURI:         reqData.RedirectURI,
+		State:               reqData.State,
+		UserID:              fmt.Sprintf("%d", userID),
+		CodeChallenge:       reqData.CodeChallenge,
+		CodeChallengeMethod: oauth2.CodeChallengeMethod(reqData.CodeChallengeMethod),
+	}
+
+	ti, err := s.oauthSrv.GetAuthorizeToken(c.Request.Context(), authReq)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "生成授权码失败: " + err.Error()})
+		return
+	}
+
+	data := s.oauthSrv.GetAuthorizeData(oauth2.Code, ti)
+	finalRedirect, err := s.oauthSrv.GetRedirectURI(authReq, data)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "构建回调地址失败: " + err.Error()})
+		return
+	}
+
+	s.auditSvc.RecordFromContext(c, audit.Entry{
+		ActorID:       userID,
+		ActorUsername: username,
+		DomainCode:    reqData.DomainCode,
+		Action:        "oauth2.consent.approve",
+		ResourceType:  "oauth_client",
+		ResourceID:    reqData.ClientID,
+		After: map[string]interface{}{
+			"scopes": reqData.Scopes,
+		},
+		Status: "success",
+	})
+
+	c.JSON(http.StatusOK, gin.H{
+		"code":    0,
+		"message": "ok",
+		"data": gin.H{
+			"redirect_uri": finalRedirect,
+			"code":         ti.GetCode(),
+		},
+	})
+}
+
+// Token 处理 POST /oauth2/token。
+func (s *Server) Token(c *gin.Context) {
+	if err := s.oauthSrv.HandleTokenRequest(c.Writer, c.Request); err != nil {
+		s.auditSvc.RecordFromContext(c, audit.Entry{
+			DomainCode:   rbac.DefaultDomain,
+			Action:       "oauth2.token.exchange",
+			ResourceType: "oauth_token",
+			Status:       "failed",
+			ErrorMessage: err.Error(),
+		})
+	}
+}
+
+// UserInfo 处理 GET /oauth2/userinfo，校验 OAuth2 Bearer Token 并返回 OIDC 用户信息。
+func (s *Server) UserInfo(c *gin.Context) {
+	ti, err := s.oauthSrv.ValidationBearerToken(c.Request)
+	if err != nil {
+		// 兼容直接使用 OpenIAM 登录颁发的 Access JWT
+		authHeader := c.GetHeader("Authorization")
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			tokenStr := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+			if claims, jwtErr := s.jwtMgr.ParseAccessToken(tokenStr); jwtErr == nil && claims.UserID > 0 {
+				s.writeUserInfo(c, claims.UserID)
+				return
+			}
+		}
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "error_description": err.Error()})
+		return
+	}
+
+	if ti.GetUserID() == "" {
+		c.JSON(http.StatusOK, gin.H{
+			"sub":       ti.GetClientID(),
+			"client_id": ti.GetClientID(),
+		})
+		return
+	}
+	uid, err := strconv.ParseUint(ti.GetUserID(), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token"})
+		return
+	}
+	s.writeUserInfo(c, uid)
+}
+
+func (s *Server) writeUserInfo(c *gin.Context, uid uint64) {
+	var user models.User
+	if err := s.db.First(&user, uid).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user_not_found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"sub":                fmt.Sprintf("%d", user.ID),
+		"preferred_username": user.Username,
+		"name":               user.DisplayName,
+		"email":              user.Email,
+		"picture":            user.AvatarURL,
+	})
+}
+
+// Revoke 处理 POST /oauth2/revoke (RFC 7009)。
+func (s *Server) Revoke(c *gin.Context) {
+	token := c.PostForm("token")
+	if token == "" {
+		var body struct {
+			Token string `json:"token"`
+		}
+		_ = c.ShouldBindJSON(&body)
+		token = body.Token
+	}
+	if token == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "error_description": "missing token"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	_ = s.manager.RemoveAccessToken(ctx, token)
+	_ = s.manager.RemoveRefreshToken(ctx, token)
+	if claims, err := s.jwtMgr.ParseAccessToken(token); err == nil && claims.ID != "" && claims.ExpiresAt != nil {
+		_ = s.stateStore.RevokeAccessToken(ctx, claims.ID, time.Until(claims.ExpiresAt.Time))
+	}
+
+	s.auditSvc.RecordFromContext(c, audit.Entry{
+		DomainCode:   rbac.DefaultDomain,
+		Action:       "oauth2.token.revoke",
+		ResourceType: "oauth_token",
+		Status:       "success",
+	})
+	c.JSON(http.StatusOK, gin.H{"revoked": true})
+}
+
+// Introspect 处理 POST /oauth2/introspect (RFC 7662)。
+func (s *Server) Introspect(c *gin.Context) {
+	token := c.PostForm("token")
+	if token == "" {
+		var body struct {
+			Token string `json:"token"`
+		}
+		_ = c.ShouldBindJSON(&body)
+		token = body.Token
+	}
+	if token == "" {
+		c.JSON(http.StatusOK, gin.H{"active": false})
+		return
+	}
+
+	ctx := c.Request.Context()
+	if ti, err := s.manager.LoadAccessToken(ctx, token); err == nil && ti != nil {
+		exp := ti.GetAccessCreateAt().Add(ti.GetAccessExpiresIn()).Unix()
+		c.JSON(http.StatusOK, gin.H{
+			"active":    true,
+			"client_id": ti.GetClientID(),
+			"sub":       ti.GetUserID(),
+			"scope":     ti.GetScope(),
+			"exp":       exp,
+		})
+		return
+	}
+
+	if claims, err := s.jwtMgr.ParseAccessToken(token); err == nil {
+		revoked, _ := s.stateStore.IsAccessTokenRevoked(ctx, claims.ID)
+		if !revoked {
+			c.JSON(http.StatusOK, gin.H{
+				"active":    true,
+				"client_id": claims.ClientID,
+				"sub":       claims.Subject,
+				"username":  claims.Username,
+				"scope":     claims.Scope,
+				"exp":       claims.ExpiresAt.Unix(),
+			})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"active": false})
+}
+
+// Discovery 处理 GET /.well-known/openid-configuration。
+func (s *Server) Discovery(c *gin.Context) {
+	issuer := strings.TrimRight(s.cfg.Issuer, "/")
+	if issuer == "" {
+		scheme := "http"
+		if c.Request.TLS != nil {
+			scheme = "https"
+		}
+		issuer = scheme + "://" + c.Request.Host
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"issuer":                                issuer,
+		"authorization_endpoint":                issuer + "/oauth2/authorize",
+		"token_endpoint":                        issuer + "/oauth2/token",
+		"userinfo_endpoint":                     issuer + "/oauth2/userinfo",
+		"revocation_endpoint":                   issuer + "/oauth2/revoke",
+		"introspection_endpoint":                issuer + "/oauth2/introspect",
+		"jwks_uri":                              issuer + "/.well-known/jwks.json",
+		"response_types_supported":              []string{"code"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token", "client_credentials"},
+		"subject_types_supported":               []string{"public"},
+		"id_token_signing_alg_values_supported": []string{"RS256"},
+		"scopes_supported":                      []string{"openid", "profile", "email"},
+		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
+		"code_challenge_methods_supported":      []string{"S256", "plain"},
+	})
+}
+
+// JWKS 处理 GET /.well-known/jwks.json。
+func (s *Server) JWKS(c *gin.Context) {
+	c.JSON(http.StatusOK, s.jwtMgr.JWKS())
+}

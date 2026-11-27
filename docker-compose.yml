@@ -1,0 +1,68 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: openiam-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: openiam_root_password
+      MYSQL_DATABASE: openiam
+      MYSQL_USER: openiam
+      MYSQL_PASSWORD: openiam_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - openiam_mysql_data:/var/lib/mysql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-popeniam_root_password"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  redis:
+    image: redis:7-alpine
+    container_name: openiam-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - openiam_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: openiam-backend
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      OPENIAM_MYSQL_DSN: "openiam:openiam_password@tcp(mysql:3306)/openiam?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true"
+      OPENIAM_REDIS_ADDR: "redis:6379"
+      OPENIAM_OAUTH_SERVER_ISSUER: "http://localhost:8080"
+      OPENIAM_OAUTH_SERVER_FRONTEND_CONSENT_URL: "http://localhost:5173/oauth2/consent"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: openiam-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+
+volumes:
+  openiam_mysql_data:
+  openiam_redis_data:

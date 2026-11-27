@@ -1,0 +1,19 @@
+# Binaries & build outputs
+backend/bin/
+backend/*.exe
+backend/*.test
+frontend/dist/
+frontend/node_modules/
+frontend/*.tsbuildinfo
+
+# Env & local configs
+.env
+.env.local
+backend/config.yaml
+backend/keys/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

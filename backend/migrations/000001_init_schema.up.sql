@@ -1,0 +1,76 @@
+CREATE TABLE IF NOT EXISTS domains (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    code VARCHAR(64) NOT NULL,
+    name VARCHAR(128) NOT NULL,
+    description VARCHAR(512) NOT NULL DEFAULT '',
+    status VARCHAR(32) NOT NULL DEFAULT 'active',
+    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    UNIQUE KEY uk_domains_code (code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS users (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(64) NOT NULL,
+    email VARCHAR(128) NOT NULL,
+    display_name VARCHAR(128) NOT NULL DEFAULT '',
+    password_hash VARCHAR(255) NOT NULL DEFAULT '',
+    avatar_url VARCHAR(512) NOT NULL DEFAULT '',
+    status VARCHAR(32) NOT NULL DEFAULT 'active',
+    last_login_at DATETIME(3) NULL,
+    last_login_ip VARCHAR(64) NOT NULL DEFAULT '',
+    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    UNIQUE KEY uk_users_username (username),
+    UNIQUE KEY uk_users_email (email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS roles (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    domain_code VARCHAR(64) NOT NULL,
+    code VARCHAR(64) NOT NULL,
+    name VARCHAR(128) NOT NULL,
+    description VARCHAR(512) NOT NULL DEFAULT '',
+    is_system TINYINT(1) NOT NULL DEFAULT 0,
+    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    UNIQUE KEY uk_roles_domain_code (domain_code, code),
+    KEY idx_roles_domain_code (domain_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS permissions (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    domain_code VARCHAR(64) NOT NULL,
+    code VARCHAR(128) NOT NULL,
+    name VARCHAR(128) NOT NULL,
+    resource VARCHAR(255) NOT NULL,
+    action VARCHAR(64) NOT NULL,
+    description VARCHAR(512) NOT NULL DEFAULT '',
+    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    UNIQUE KEY uk_permissions_domain_code (domain_code, code),
+    KEY idx_permissions_domain_code (domain_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS casbin_rule (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    ptype VARCHAR(100) NULL,
+    v0 VARCHAR(100) NULL,
+    v1 VARCHAR(100) NULL,
+    v2 VARCHAR(100) NULL,
+    v3 VARCHAR(100) NULL,
+    v4 VARCHAR(100) NULL,
+    v5 VARCHAR(100) NULL,
+    UNIQUE KEY idx_casbin_rule (ptype, v0, v1, v2, v3, v4, v5)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS system_version_history (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    app_version VARCHAR(32) NOT NULL,
+    schema_version BIGINT UNSIGNED NOT NULL,
+    action VARCHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    details VARCHAR(1024) NOT NULL DEFAULT '',
+    created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    KEY idx_svh_created_at (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
