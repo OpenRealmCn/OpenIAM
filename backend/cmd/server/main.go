@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	_ "time/tzdata"
 
 	"github.com/openrealm/openiam/internal/audit"
 	"github.com/openrealm/openiam/internal/config"
