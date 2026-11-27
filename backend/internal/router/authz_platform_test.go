@@ -185,7 +185,17 @@ func TestDomainAdminCannotEscalateThroughRoleWorkflow(t *testing.T) {
 	require.Equal(t, http.StatusCreated, domW.Code, domW.Body.String())
 	createRoleAs(t, env, adminToken, "billing", "billing_ops")
 
-	targetID := createUserAs(t, env, adminToken, "p0a_target", "Target@123456", rbac.DefaultDomain, nil)
+	// 目标用户先由超管接入默认域：拿到一个基础角色才有域归属，
+	// 域归属来自服务端角色绑定，不是请求头或请求体说了算。
+	baseRole := createRoleAs(t, env, adminToken, rbac.DefaultDomain, "base_member")
+	w = doJSON(t, env.engine, http.MethodPost, "/api/v1/policies", map[string]string{
+		"role":     baseRole.Code,
+		"domain":   rbac.DefaultDomain,
+		"resource": "users",
+		"action":   "read",
+	}, adminToken)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	targetID := createUserAs(t, env, adminToken, "p0a_target", "Target@123456", rbac.DefaultDomain, []string{baseRole.Code})
 	w = doJSON(t, env.engine, http.MethodPost, fmt.Sprintf("/api/v1/users/%d/roles", targetID), map[string]interface{}{
 		"domain_code": rbac.DefaultDomain,
 		"role_codes":  []string{"billing_ops"},
@@ -224,8 +234,11 @@ func TestDomainAdminCannotEscalateThroughRoleWorkflow(t *testing.T) {
 	}, daToken)
 	assert.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
 
-	// 以上都没有真正落库：目标用户在被拒的分配之后仍然没有任何角色
-	assert.Empty(t, env.enforcer.GetRolesForUserInDomain(targetID, rbac.DefaultDomain))
+	// 以上都没有真正落库：被拒的分配之后，目标用户仍然只有接入时的基础角色
+	rolesAfter := env.enforcer.GetRolesForUserInDomain(targetID, rbac.DefaultDomain)
+	assert.Len(t, rolesAfter, 1)
+	assert.NotContains(t, rolesAfter, "billing_ops")
+	assert.NotContains(t, rolesAfter, "legacy_high")
 }
 
 // 验收 3：域管理员给本域用户委派允许的业务权限 → 成功。
@@ -242,7 +255,9 @@ func TestDomainAdminCanDelegateBusinessPermissions(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
-	memberID := createUserAs(t, env, adminToken, "p0a_member", "Member@123456", rbac.DefaultDomain, nil)
+	// 成员由超管接入默认域时给一个空角色：只建立域归属，不带任何权限。
+	memberRole := createRoleAs(t, env, adminToken, rbac.DefaultDomain, "member_base")
+	memberID := createUserAs(t, env, adminToken, "p0a_member", "Member@123456", rbac.DefaultDomain, []string{memberRole.Code})
 	w = doJSON(t, env.engine, http.MethodPost, fmt.Sprintf("/api/v1/users/%d/roles", memberID), map[string]interface{}{
 		"domain_code": rbac.DefaultDomain,
 		"role_codes":  []string{role.Code},

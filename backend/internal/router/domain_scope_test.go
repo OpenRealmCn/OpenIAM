@@ -392,3 +392,49 @@ func TestManagementPathIsProtected(t *testing.T) {
 		map[string]string{"status": "disabled"}, adminToken)
 	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
 }
+
+// 复审回归（阿评 必须改 1）：域管理员不能靠「先给外域用户绑本域角色」自行制造归属，
+// 再借这个归属改动对方的全局账号（邮箱、状态）。
+func TestDomainAdminCannotClaimForeignUserByRoleAssignment(t *testing.T) {
+	env := setupTestEnv(t, "")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
+
+	createDomainAs(t, env, adminToken, "alpha")
+	createDomainAs(t, env, adminToken, "beta")
+	for _, p := range [][2]string{
+		{"users", "read"}, {"users", "write"},
+		{"roles", "read"}, {"roles", "write"},
+	} {
+		addPolicyAs(t, env, adminToken, "domain_admin", "beta", p[0], p[1])
+	}
+
+	createScopedUser(t, env, adminToken, "da_beta3", "da_beta3@openrealm.local", "DaBeta3@123456", "beta", []string{"domain_admin"})
+	foreign := createScopedUser(t, env, adminToken, "ua_alpha3", "ua_alpha3@openrealm.local", "UaAlpha3@123456", "alpha", []string{"viewer"})
+	daToken, _ := loginAs(t, env.engine, "da_beta3", "DaBeta3@123456")
+
+	// 1) 给外域用户授本域角色：按「越界目标一律 404」回应，且不产生任何绑定
+	w := doJSON(t, env.engine, http.MethodPost, fmt.Sprintf("/api/v1/users/%d/roles", foreign.ID), map[string]interface{}{
+		"domain_code": "beta",
+		"role_codes":  []string{"viewer"},
+	}, daToken, escDomainHeader("beta"))
+	assert.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
+	assert.Empty(t, env.enforcer.GetRolesForUserInDomain(foreign.ID, "beta"))
+
+	// 2) 绑定没写进去，「先绑再改」的后半段照样失败，账号状态不变
+	w = doJSON(t, env.engine, http.MethodPut, fmt.Sprintf("/api/v1/users/%d", foreign.ID),
+		map[string]string{"status": "disabled"}, daToken, escDomainHeader("beta"))
+	assert.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
+	var after models.User
+	require.NoError(t, env.db.First(&after, foreign.ID).Error)
+	assert.Equal(t, "active", after.Status)
+	assert.Equal(t, "ua_alpha3@openrealm.local", after.Email)
+
+	// 3) 还没有任何角色的用户属于「未接入」，域管理员同样不能认领
+	orphan := createScopedUser(t, env, adminToken, "u_orphan3", "u_orphan3@openrealm.local", "Orphan3@123456", "alpha", nil)
+	w = doJSON(t, env.engine, http.MethodPost, fmt.Sprintf("/api/v1/users/%d/roles", orphan.ID), map[string]interface{}{
+		"domain_code": "beta",
+		"role_codes":  []string{"viewer"},
+	}, daToken, escDomainHeader("beta"))
+	assert.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
+	assert.Empty(t, env.enforcer.GetRolesForUserInDomain(orphan.ID, "beta"))
+}

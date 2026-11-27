@@ -229,10 +229,11 @@ func TestMustChangePasswordGateAndRecovery(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, denied.Code, denied.Body.String())
 	assert.Contains(t, denied.Body.String(), "password_change_required")
 
-	// 除改密/退出外的普通接口同样拒绝
+	// GET /auth/me 是唯一放行的读接口：控制台要靠它识别强制改密状态并跳到改密页。
+	// 它只回调用者自己的资料，标记照样返回，不会泄露别人的数据。
 	meW := doJSON(t, env.engine, http.MethodGet, "/api/v1/auth/me", nil, login.AccessToken)
-	assert.Equal(t, http.StatusForbidden, meW.Code)
-	assert.Contains(t, meW.Body.String(), "password_change_required")
+	require.Equal(t, http.StatusOK, meW.Code, meW.Body.String())
+	assert.Contains(t, meW.Body.String(), "\"must_change_password\":true")
 
 	// OAuth 授权码申请拒绝
 	codeW := doJSON(t, env.engine, http.MethodPost, "/api/v1/oauth2/codes", map[string]interface{}{
