@@ -57,7 +57,10 @@ docker compose --profile mysql up -d --build
 
 - 唯一对外主入口（控制台 + API + OIDC 反代）: `http://localhost:5173`（可通过 `OPENIAM_PORT` 修改，例如设为 `80`）
 - 后端服务仅在 Docker 内网监听，不对外暴露端口；前端 Nginx 通过 `OPENIAM_BACKEND_UPSTREAM` 动态转发至后端
-- 默认超级管理员: `admin` / `Admin@123456`
+- 超级管理员账号: 用户名 `admin`，初始口令必须通过环境变量 `OPENIAM_SEED_ADMIN_PASSWORD` 显式设置（docker compose 未设置时将拒绝启动），首次登录后请立即修改；可信代理列表通过 `OPENIAM_TRUSTED_PROXIES` 配置
+- 浏览器端 Refresh Token 通过 HttpOnly Cookie 下发，Access Token 仅保存在内存；非浏览器客户端可在请求头加 `X-Token-Delivery: body` 从响应体获取 Refresh Token
+- 联合登录身份源默认禁止指向内网地址（防 SSRF），自建内网 IdP 需设置 `OPENIAM_OAUTH_ALLOW_PRIVATE_UPSTREAM=true`
+- 完整安全审查结论见 `SECURITY_AUDIT.md`
 
 ### 方式二：本地开发启动
 

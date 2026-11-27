@@ -22,7 +22,7 @@ func ZapLogger(logger *zap.Logger) gin.HandlerFunc {
 				zap.Int("status", status),
 				zap.String("method", c.Request.Method),
 				zap.String("path", path),
-				zap.String("query", query),
+				zap.Bool("has_query", query != ""),
 				zap.String("ip", c.ClientIP()),
 				zap.Duration("latency", latency),
 			)
@@ -39,7 +39,7 @@ func DynamicCORS(getOrigins func() []string) gin.HandlerFunc {
 		allowOrigins := getOrigins()
 		origin := c.GetHeader("Origin")
 		if origin != "" {
-			allowed := len(allowOrigins) == 0
+			allowed := false
 			for _, o := range allowOrigins {
 				if o == "*" || o == origin {
 					allowed = true
@@ -50,12 +50,12 @@ func DynamicCORS(getOrigins func() []string) gin.HandlerFunc {
 				c.Header("Access-Control-Allow-Origin", origin)
 			}
 		} else {
-			c.Header("Access-Control-Allow-Origin", "*")
+			c.Header("Vary", "Origin")
 		}
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-OpenIAM-Domain")
 		c.Header("Access-Control-Expose-Headers", "X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset")
-		c.Header("Access-Control-Allow-Credentials", "true")
+		c.Header("Vary", "Origin")
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)

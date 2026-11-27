@@ -140,7 +140,7 @@ func loginAs(t *testing.T, engine *gin.Engine, username, password string) (acces
 	w := doJSON(t, engine, http.MethodPost, "/api/v1/auth/login", map[string]string{
 		"username": username,
 		"password": password,
-	}, "")
+	}, "", map[string]string{"X-Token-Delivery": "body"})
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	var resp struct {
 		Data struct {
@@ -174,7 +174,7 @@ func TestAuthLifecycleAndLockout(t *testing.T) {
 
 	refW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/refresh", map[string]string{
 		"refresh_token": refresh,
-	}, "")
+	}, "", map[string]string{"X-Token-Delivery": "body"})
 	require.Equal(t, http.StatusOK, refW.Code)
 	var refResp struct {
 		Data struct {
@@ -429,20 +429,21 @@ func TestOpenIAMOAuth2ServerFullFlow(t *testing.T) {
 	require.Equal(t, http.StatusOK, uiW.Code, uiW.Body.String())
 	assert.Contains(t, uiW.Body.String(), `"preferred_username":"admin"`)
 
+	basic := map[string]string{"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte(clientID+":"+clientSecret))}
 	introW := doJSON(t, env.engine, http.MethodPost, "/oauth2/introspect", map[string]string{
 		"token": tokResp.AccessToken,
-	}, "")
+	}, "", basic)
 	require.Equal(t, http.StatusOK, introW.Code)
 	assert.Contains(t, introW.Body.String(), `"active":true`)
 
 	revW := doJSON(t, env.engine, http.MethodPost, "/oauth2/revoke", map[string]string{
 		"token": tokResp.AccessToken,
-	}, "")
+	}, "", basic)
 	require.Equal(t, http.StatusOK, revW.Code)
 
 	introAfterW := doJSON(t, env.engine, http.MethodPost, "/oauth2/introspect", map[string]string{
 		"token": tokResp.AccessToken,
-	}, "")
+	}, "", basic)
 	assert.Contains(t, introAfterW.Body.String(), `"active":false`)
 }
 

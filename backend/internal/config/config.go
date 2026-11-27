@@ -23,6 +23,8 @@ type ServerConfig struct {
 	Host string
 	Port int
 	Mode string
+	// TrustedProxies 为可信反向代理 IP/CIDR 列表，仅来自这些地址的 X-Forwarded-For 才会被采信。
+	TrustedProxies []string
 }
 
 type MySQLConfig struct {
@@ -103,6 +105,7 @@ func Load(envFilePath string) (*BootstrapConfig, error) {
 	cfg.Server.Host = getEnv("OPENIAM_HOST", cfg.Server.Host)
 	cfg.Server.Port = getEnvInt("OPENIAM_PORT", cfg.Server.Port)
 	cfg.Server.Mode = getEnv("OPENIAM_MODE", cfg.Server.Mode)
+	cfg.Server.TrustedProxies = splitList(getEnv("OPENIAM_TRUSTED_PROXIES", "127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"))
 
 	cfg.MySQL.DSN = getEnv("OPENIAM_MYSQL_DSN", cfg.MySQL.DSN)
 	cfg.MySQL.MaxIdleConns = getEnvInt("OPENIAM_MYSQL_MAX_IDLE_CONNS", cfg.MySQL.MaxIdleConns)
@@ -157,6 +160,17 @@ func getEnv(key, fallback string) string {
 		return val
 	}
 	return fallback
+}
+
+func splitList(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func getEnvInt(key string, fallback int) int {

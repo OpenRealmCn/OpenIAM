@@ -83,6 +83,12 @@ func (s *Service) refreshTTL() time.Duration {
 
 // StartLogin 生成 state 与 PKCE 并调用插件生成授权跳转 URL。
 func (s *Service) StartLogin(ctx context.Context, providerName, redirectOverride string) (authURL string, state string, err error) {
+	if vErr := s.validateRedirectOverride(providerName, redirectOverride); vErr != nil {
+		return "", "", vErr
+	}
+	ctx = withUpstreamClient(ctx)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	var provider models.OAuthProvider
 	if err := s.db.Where("name = ? AND enabled = ?", providerName, true).First(&provider).Error; err != nil {
 		return "", "", fmt.Errorf("oauth provider %q not found or disabled", providerName)
@@ -122,6 +128,12 @@ func (s *Service) StartLogin(ctx context.Context, providerName, redirectOverride
 
 // HandleCallback 处理联合登录回调，查找或创建用户并签发 OpenIAM Token。
 func (s *Service) HandleCallback(ctx context.Context, providerName, code, state, redirectOverride, clientIP, userAgent string) (*LoginResult, error) {
+	if vErr := s.validateRedirectOverride(providerName, redirectOverride); vErr != nil {
+		return nil, vErr
+	}
+	ctx = withUpstreamClient(ctx)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	savedState, err := s.stateStore.ConsumeOAuthPluginState(ctx, state)
 	if err != nil {
 		return nil, fmt.Errorf("invalid or expired state: %w", err)
@@ -184,7 +196,7 @@ func (s *Service) HandleCallback(ctx context.Context, providerName, code, state,
 		matchedByEmail := false
 		if extUser.Email != "" {
 			if eErr := s.db.Where("email = ?", extUser.Email).First(&user).Error; eErr == nil {
-				matchedByEmail = true
+				return nil, errors.New("该邮箱已被本地账号占用，出于安全原因不允许按邮箱自动关联，请联系管理员处理")
 			}
 		}
 

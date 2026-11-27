@@ -31,12 +31,36 @@ func AuthMiddleware(jwtMgr *security.JWTManager, stateStore *security.StateStore
 			return
 		}
 
+		// 第三方 OAuth 应用令牌与无用户身份的令牌不得访问管理 API
+		if claims.ClientID != "" || claims.UserID == 0 {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"code":    401,
+				"message": "该令牌不可用于管理接口",
+			})
+			return
+		}
+
 		if stateStore != nil && claims.ID != "" {
 			revoked, err := stateStore.IsAccessTokenRevoked(c.Request.Context(), claims.ID)
-			if err == nil && revoked {
+			if err != nil || revoked {
 				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 					"code":    401,
 					"message": "访问令牌已被注销",
+				})
+				return
+			}
+		}
+
+		if stateStore != nil {
+			issuedMs := claims.IssuedAtMs
+			if issuedMs == 0 && claims.IssuedAt != nil {
+				issuedMs = claims.IssuedAt.UnixMilli()
+			}
+			revokedByUser, rErr := stateStore.IsIssuedBeforeRevocation(c.Request.Context(), claims.UserID, issuedMs)
+			if rErr != nil || revokedByUser {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+					"code":    401,
+					"message": "会话已失效，请重新登录",
 				})
 				return
 			}

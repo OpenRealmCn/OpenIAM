@@ -49,7 +49,7 @@ func RequirePermission(enforcer *rbac.Enforcer, resource, action string) gin.Han
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
 				"code":    500,
-				"message": "权限校验服务异常: " + err.Error(),
+				"message": "权限校验服务异常",
 			})
 			return
 		}

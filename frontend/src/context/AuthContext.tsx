@@ -4,7 +4,7 @@ import {
   clearTokens,
   getAccessToken,
   getCurrentDomain,
-  getRefreshToken,
+  refreshAccessToken,
   setCurrentDomain,
   setTokens,
 } from '../api/client';
@@ -20,7 +20,7 @@ interface AuthContextValue {
   refreshProfile: () => Promise<void>;
   refreshDomains: () => Promise<void>;
   loginWithCredentials: (username: string, password: string) => Promise<void>;
-  completeOAuthLogin: (accessToken: string, refreshToken: string) => Promise<void>;
+  completeOAuthLogin: (accessToken: string) => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -43,7 +43,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const refreshProfile = useCallback(async () => {
-    const token = getAccessToken();
+    const token = getAccessToken() ?? (await refreshAccessToken());
     if (!token) {
       setUser(null);
       setRoles({});
@@ -75,20 +75,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const loginWithCredentials = async (username: string, password: string) => {
     const data = await api.auth.login(username, password);
-    setTokens(data.access_token, data.refresh_token);
+    setTokens(data.access_token);
     setUser(data.user);
     setRoles(data.roles || {});
     await refreshDomains();
   };
 
-  const completeOAuthLogin = async (accessToken: string, refreshToken: string) => {
-    setTokens(accessToken, refreshToken);
+  const completeOAuthLogin = async (accessToken: string) => {
+    setTokens(accessToken);
     await refreshProfile();
   };
 
   const logout = async () => {
     try {
-      await api.auth.logout(getRefreshToken());
+      await api.auth.logout();
     } catch {
       // ignore
     } finally {

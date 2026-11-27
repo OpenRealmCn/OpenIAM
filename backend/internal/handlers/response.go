@@ -46,7 +46,7 @@ func Fail(c *gin.Context, status int, msg string) {
 func ParsePagination(c *gin.Context) (page, size, offset int) {
 	page = 1
 	size = 20
-	if p, err := strconv.Atoi(c.DefaultQuery("page", "1")); err == nil && p > 0 {
+	if p, err := strconv.Atoi(c.DefaultQuery("page", "1")); err == nil && p > 0 && p <= 10000 {
 		page = p
 	}
 	if s, err := strconv.Atoi(c.DefaultQuery("page_size", "20")); err == nil && s > 0 && s <= 200 {

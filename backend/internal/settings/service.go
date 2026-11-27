@@ -25,11 +25,11 @@ const (
 	KeyRateLimitGeneralRate = "ratelimit.general_rate"
 	KeyRateLimitAuthRate    = "ratelimit.auth_rate"
 
-	KeyOAuthServerIssuer                = "oauth_server.issuer"
-	KeyOAuthServerFrontendConsentURL    = "oauth_server.frontend_consent_url"
-	KeyOAuthServerAuthCodeTTLMin        = "oauth_server.auth_code_ttl_minutes"
-	KeyOAuthServerAccessTokenTTLMin     = "oauth_server.access_token_ttl_minutes"
-	KeyOAuthServerRefreshTokenTTLHours  = "oauth_server.refresh_token_ttl_hours"
+	KeyOAuthServerIssuer               = "oauth_server.issuer"
+	KeyOAuthServerFrontendConsentURL   = "oauth_server.frontend_consent_url"
+	KeyOAuthServerAuthCodeTTLMin       = "oauth_server.auth_code_ttl_minutes"
+	KeyOAuthServerAccessTokenTTLMin    = "oauth_server.access_token_ttl_minutes"
+	KeyOAuthServerRefreshTokenTTLHours = "oauth_server.refresh_token_ttl_hours"
 
 	KeyOAuthPluginCallbackBaseURL = "oauth_plugin.callback_base_url"
 
@@ -42,9 +42,9 @@ type RuntimeSettings struct {
 	LockoutMinutes      int
 	AllowPublicRegister bool
 
-	JWTIssuer          string
-	JWTAccessTTL       time.Duration
-	JWTRefreshTTL      time.Duration
+	JWTIssuer     string
+	JWTAccessTTL  time.Duration
+	JWTRefreshTTL time.Duration
 
 	RateLimitEnabled     bool
 	RateLimitGeneralRate string
@@ -378,6 +378,9 @@ func validateSettingValue(key, valueType, raw string) (string, error) {
 		if err != nil || n <= 0 {
 			return "", fmt.Errorf("设置项 %s 必须为正整数", key)
 		}
+		if err := checkIntBounds(key, n); err != nil {
+			return "", err
+		}
 		return strconv.Itoa(n), nil
 	case "bool":
 		b, err := strconv.ParseBool(strings.ToLower(trimmed))
@@ -387,6 +390,13 @@ func validateSettingValue(key, valueType, raw string) (string, error) {
 		return strconv.FormatBool(b), nil
 	case "string_list":
 		parts := splitCSV(trimmed)
+		if key == KeyServerCORSAllowOrigins {
+			for _, p := range parts {
+				if err := validateCORSOrigin(p); err != nil {
+					return "", err
+				}
+			}
+		}
 		return strings.Join(parts, ","), nil
 	default:
 		if key == KeyRateLimitGeneralRate || key == KeyRateLimitAuthRate {
@@ -396,6 +406,9 @@ func validateSettingValue(key, valueType, raw string) (string, error) {
 		}
 		if trimmed == "" {
 			return "", fmt.Errorf("设置项 %s 不能为空", key)
+		}
+		if err := validateURLSetting(key, trimmed); err != nil {
+			return "", err
 		}
 		return trimmed, nil
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -144,6 +145,9 @@ func NewServer(
 		var clients []models.OAuthClient
 		db.Where("status = ?", "active").Find(&clients)
 		for _, c := range clients {
+			if len(c.RedirectURIs) == 0 || c.RedirectURIs[0] != baseURI {
+				continue
+			}
 			for _, u := range c.RedirectURIs {
 				if u == redirectURI {
 					return nil
@@ -278,9 +282,26 @@ func (s *Server) Authorize(c *gin.Context) {
 		return
 	}
 
+	if req.CodeChallenge != "" && req.CodeChallengeMethod != oauth2.CodeChallengeS256 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":             "invalid_request",
+			"error_description": "仅支持 S256 方式的 PKCE (code_challenge_method=S256)",
+		})
+		return
+	}
+
 	scopes := strings.Fields(req.Scope)
 	if len(scopes) == 0 {
 		scopes = client.Scopes
+	}
+	for _, sc := range scopes {
+		if !slices.Contains(client.Scopes, sc) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":             "invalid_scope",
+				"error_description": "请求的 scope 超出该应用已登记的授权范围: " + sc,
+			})
+			return
+		}
 	}
 
 	consentID := uuid.NewString()
@@ -354,12 +375,11 @@ func (s *Server) SubmitConsentDecision(c *gin.Context) {
 		return
 	}
 
-	reqData, err := s.stateStore.GetConsentRequest(c.Request.Context(), id)
+	reqData, err := s.stateStore.ConsumeConsentRequest(c.Request.Context(), id)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"code": 404, "message": "授权请求不存在或已过期"})
 		return
 	}
-	_ = s.stateStore.DeleteConsentRequest(c.Request.Context(), id)
 
 	userIDVal, _ := c.Get("user_id")
 	userID, _ := userIDVal.(uint64)
@@ -477,6 +497,12 @@ func (s *Server) CreateAuthorizationCode(c *gin.Context) {
 	if len(scopes) == 0 {
 		scopes = []string{"openid", "profile", "email"}
 	}
+	for _, sc := range scopes {
+		if !slices.Contains(client.Scopes, sc) {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "请求的 scope 超出该应用已登记的授权范围: " + sc})
+			return
+		}
+	}
 
 	userIDVal, _ := c.Get("user_id")
 	userID, _ := userIDVal.(uint64)
@@ -581,6 +607,10 @@ func (s *Server) writeUserInfo(c *gin.Context, uid uint64) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "user_not_found"})
 		return
 	}
+	if user.Status != "active" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "error_description": "用户已被禁用"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"sub":                fmt.Sprintf("%d", user.ID),
 		"preferred_username": user.Username,
@@ -592,6 +622,10 @@ func (s *Server) writeUserInfo(c *gin.Context, uid uint64) {
 
 // Revoke 处理 POST /oauth2/revoke (RFC 7009)。
 func (s *Server) Revoke(c *gin.Context) {
+	if !s.authenticateClient(c) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client"})
+		return
+	}
 	token := c.PostForm("token")
 	if token == "" {
 		var body struct {
@@ -623,6 +657,10 @@ func (s *Server) Revoke(c *gin.Context) {
 
 // Introspect 处理 POST /oauth2/introspect (RFC 7662)。
 func (s *Server) Introspect(c *gin.Context) {
+	if !s.authenticateClient(c) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client"})
+		return
+	}
 	token := c.PostForm("token")
 	if token == "" {
 		var body struct {
@@ -665,6 +703,24 @@ func (s *Server) Introspect(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"active": false})
+}
+
+// authenticateClient 校验调用方为已登记的机密客户端（HTTP Basic 或表单 client_id/client_secret）。
+func (s *Server) authenticateClient(c *gin.Context) bool {
+	id, secret, ok := c.Request.BasicAuth()
+	if !ok {
+		id = c.PostForm("client_id")
+		secret = c.PostForm("client_secret")
+	}
+	if id == "" || secret == "" {
+		return false
+	}
+	cli, err := s.manager.GetClient(c.Request.Context(), id)
+	if err != nil || cli == nil || cli.IsPublic() {
+		return false
+	}
+	verifier, ok := cli.(oauth2.ClientPasswordVerifier)
+	return ok && verifier.VerifyPassword(secret)
 }
 
 // ApplySettings 热更新 OAuth2 授权码与令牌有效期。
@@ -726,7 +782,7 @@ func (s *Server) Discovery(c *gin.Context) {
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 		"scopes_supported":                      []string{"openid", "profile", "email"},
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
-		"code_challenge_methods_supported":      []string{"S256", "plain"},
+		"code_challenge_methods_supported":      []string{"S256"},
 	})
 }
 

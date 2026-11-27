@@ -3,7 +3,9 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
+	"time"
 	_ "time/tzdata"
 
 	"github.com/openrealm/openiam/internal/audit"
@@ -39,6 +41,9 @@ func main() {
 		}
 	}
 
+	if cfg.Seed.Enabled && cfg.Seed.AdminPassword == "Admin@123456" {
+		logger.Warn("检测到仍在使用默认超级管理员口令，请通过 OPENIAM_SEED_ADMIN_PASSWORD 设置强口令并在首次登录后立即修改")
+	}
 	_, safeMySQLTarget, _ := database.NormalizeMySQLDSN(cfg.MySQL.DSN)
 	logger.Info("bootstrapping OpenIAM",
 		zap.String("app_version", version.AppVersion),
@@ -129,6 +134,7 @@ func main() {
 	}
 
 	auditSvc := audit.NewService(db, logger)
+	oauthplugin.SetAllowPrivateUpstream(os.Getenv("OPENIAM_OAUTH_ALLOW_PRIVATE_UPSTREAM") == "true")
 	pluginReg := oauthplugin.NewDefaultRegistry()
 	pluginSvc := oauthplugin.NewService(
 		db,
@@ -163,7 +169,16 @@ func main() {
 		zap.String("addr", addr),
 		zap.String("app_version", version.AppVersion),
 	)
-	if err := engine.Run(addr); err != nil {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           engine,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+	if err := srv.ListenAndServe(); err != nil {
 		logger.Fatal("server exited with error", zap.Error(err))
 	}
 }

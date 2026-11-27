@@ -11,5 +11,7 @@ FROM alpine:3.20
 WORKDIR /app
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /openiam /app/openiam
+RUN adduser -D -H -u 10001 app
+USER app
 EXPOSE 8080
 ENTRYPOINT ["/app/openiam"]

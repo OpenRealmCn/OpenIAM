@@ -25,9 +25,9 @@ func NewPermissionHandler(db *gorm.DB, enforcer *rbac.Enforcer, auditSvc *audit.
 }
 
 func (h *PermissionHandler) List(c *gin.Context) {
-	domain := strings.TrimSpace(c.Query("domain"))
+	domain, all := scopedDomain(c, h.enforcer)
 	q := h.db.Model(&models.Permission{})
-	if domain != "" && domain != "*" {
+	if !all {
 		q = q.Where("domain_code = ?", domain)
 	}
 	var perms []models.Permission
@@ -56,6 +56,10 @@ func (h *PermissionHandler) Create(c *gin.Context) {
 	domain := strings.TrimSpace(req.DomainCode)
 	if domain == "" {
 		domain = middleware.ResolveDomain(c)
+	}
+
+	if !requireDomainPermission(c, h.enforcer, domain, "permissions", "write") {
+		return
 	}
 
 	var dup int64
@@ -107,6 +111,9 @@ func (h *PermissionHandler) Update(c *gin.Context) {
 		Fail(c, http.StatusNotFound, "权限点不存在")
 		return
 	}
+	if !requireDomainPermission(c, h.enforcer, perm.DomainCode, "permissions", "write") {
+		return
+	}
 	before := perm
 
 	var req updatePermissionReq
@@ -154,6 +161,9 @@ func (h *PermissionHandler) Delete(c *gin.Context) {
 		Fail(c, http.StatusNotFound, "权限点不存在")
 		return
 	}
+	if !requireDomainPermission(c, h.enforcer, perm.DomainCode, "permissions", "write") {
+		return
+	}
 	if err := h.db.Delete(&perm).Error; err != nil {
 		Fail(c, http.StatusInternalServerError, "删除权限点失败")
 		return
@@ -171,7 +181,10 @@ func (h *PermissionHandler) Delete(c *gin.Context) {
 }
 
 func (h *PermissionHandler) ListPolicies(c *gin.Context) {
-	domain := strings.TrimSpace(c.Query("domain"))
+	domain, all := scopedDomain(c, h.enforcer)
+	if all {
+		domain = ""
+	}
 	role := strings.TrimSpace(c.Query("role"))
 	rules, err := h.enforcer.GetPolicies(domain, role)
 	if err != nil {
@@ -194,6 +207,13 @@ func (h *PermissionHandler) AddPolicy(c *gin.Context) {
 		Fail(c, http.StatusBadRequest, "策略参数无效: "+err.Error())
 		return
 	}
+	req.Role = strings.TrimSpace(req.Role)
+	req.Domain = strings.TrimSpace(req.Domain)
+	req.Resource = strings.TrimSpace(req.Resource)
+	req.Action = strings.TrimSpace(req.Action)
+	if !requirePolicyWriteAccess(c, h.enforcer, req.Role, req.Domain, req.Resource, req.Action) {
+		return
+	}
 	added, err := h.enforcer.AddPolicy(req.Role, req.Domain, req.Resource, req.Action)
 	if err != nil {
 		Fail(c, http.StatusInternalServerError, "添加策略失败: "+err.Error())
@@ -214,6 +234,13 @@ func (h *PermissionHandler) RemovePolicy(c *gin.Context) {
 	var req policyReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, http.StatusBadRequest, "策略参数无效: "+err.Error())
+		return
+	}
+	req.Role = strings.TrimSpace(req.Role)
+	req.Domain = strings.TrimSpace(req.Domain)
+	req.Resource = strings.TrimSpace(req.Resource)
+	req.Action = strings.TrimSpace(req.Action)
+	if !requirePolicyWriteAccess(c, h.enforcer, req.Role, req.Domain, req.Resource, req.Action) {
 		return
 	}
 	removed, err := h.enforcer.RemovePolicy(req.Role, req.Domain, req.Resource, req.Action)
@@ -244,6 +271,10 @@ func (h *PermissionHandler) CheckPolicy(c *gin.Context) {
 	var req checkPolicyReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, http.StatusBadRequest, "参数无效: "+err.Error())
+		return
+	}
+	// 查询他人权限需要在目标域拥有 permissions:read；查询自身权限不受限
+	if req.UserID != CurrentUserID(c) && !requireDomainPermission(c, h.enforcer, req.Domain, "permissions", "read") {
 		return
 	}
 	allowed, err := h.enforcer.Enforce(req.UserID, req.Domain, req.Resource, req.Action)

@@ -16,13 +16,14 @@ import (
 )
 
 type UserHandler struct {
-	db       *gorm.DB
-	enforcer *rbac.Enforcer
-	auditSvc *audit.Service
+	stateStore *security.StateStore
+	db         *gorm.DB
+	enforcer   *rbac.Enforcer
+	auditSvc   *audit.Service
 }
 
-func NewUserHandler(db *gorm.DB, enforcer *rbac.Enforcer, auditSvc *audit.Service) *UserHandler {
-	return &UserHandler{db: db, enforcer: enforcer, auditSvc: auditSvc}
+func NewUserHandler(db *gorm.DB, enforcer *rbac.Enforcer, auditSvc *audit.Service, stateStore *security.StateStore) *UserHandler {
+	return &UserHandler{db: db, enforcer: enforcer, auditSvc: auditSvc, stateStore: stateStore}
 }
 
 type userWithRoles struct {
@@ -56,6 +57,7 @@ func (h *UserHandler) List(c *gin.Context) {
 	items := make([]userWithRoles, 0, len(users))
 	for _, u := range users {
 		roles, _ := h.enforcer.GetAllUserRoles(u.ID)
+		roles = visibleRoles(c, h.enforcer, roles)
 		items = append(items, userWithRoles{User: u, Roles: roles})
 	}
 
@@ -74,14 +76,15 @@ func (h *UserHandler) Get(c *gin.Context) {
 		return
 	}
 	roles, _ := h.enforcer.GetAllUserRoles(user.ID)
+	roles = visibleRoles(c, h.enforcer, roles)
 	OK(c, userWithRoles{User: user, Roles: roles})
 }
 
 type createUserReq struct {
-	Username    string   `json:"username" binding:"required,min=3,max=64"`
+	Username    string   `json:"username" binding:"required,min=3,max=64,excludes=@"`
 	Email       string   `json:"email" binding:"required,email"`
 	DisplayName string   `json:"display_name"`
-	Password    string   `json:"password" binding:"required,min=6"`
+	Password    string   `json:"password" binding:"required,min=8,max=72"`
 	Status      string   `json:"status"`
 	DomainCode  string   `json:"domain_code"`
 	RoleCodes   []string `json:"role_codes"`
@@ -91,6 +94,23 @@ func (h *UserHandler) Create(c *gin.Context) {
 	var req createUserReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+
+	roleDomain := strings.TrimSpace(req.DomainCode)
+	if roleDomain == "" {
+		roleDomain = middleware.ResolveDomain(c)
+	}
+	if len(req.RoleCodes) > 0 {
+		if !requireDomainPermission(c, h.enforcer, roleDomain, "roles", "write") {
+			return
+		}
+		if rejectSuperAdminGrant(c, h.enforcer, req.RoleCodes) {
+			return
+		}
+	}
+	if req.Status != "" && req.Status != "active" && req.Status != "disabled" {
+		Fail(c, http.StatusBadRequest, "无效的用户状态")
 		return
 	}
 
@@ -123,7 +143,7 @@ func (h *UserHandler) Create(c *gin.Context) {
 		Status:       status,
 	}
 	if err := h.db.Create(&user).Error; err != nil {
-		Fail(c, http.StatusInternalServerError, "创建用户失败: "+err.Error())
+		Fail(c, http.StatusInternalServerError, "创建用户失败")
 		return
 	}
 
@@ -169,6 +189,9 @@ func (h *UserHandler) Update(c *gin.Context) {
 		Fail(c, http.StatusNotFound, "用户不存在")
 		return
 	}
+	if protectSuperAdminTarget(c, h.enforcer, id) {
+		return
+	}
 	before := user
 
 	var req updateUserReq
@@ -187,11 +210,15 @@ func (h *UserHandler) Update(c *gin.Context) {
 		user.AvatarURL = strings.TrimSpace(req.AvatarURL)
 	}
 	if req.Status != "" {
+		if req.Status != "active" && req.Status != "disabled" {
+			Fail(c, http.StatusBadRequest, "无效的用户状态")
+			return
+		}
 		user.Status = req.Status
 	}
 
 	if err := h.db.Save(&user).Error; err != nil {
-		Fail(c, http.StatusInternalServerError, "更新用户失败: "+err.Error())
+		Fail(c, http.StatusInternalServerError, "更新用户失败")
 		return
 	}
 
@@ -203,6 +230,9 @@ func (h *UserHandler) Update(c *gin.Context) {
 		After:        user,
 		Status:       "success",
 	})
+	if before.Status == "active" && user.Status != "active" {
+		_ = h.stateStore.RevokeUserTokens(c.Request.Context(), user.ID)
+	}
 	OK(c, user)
 }
 
@@ -222,6 +252,9 @@ func (h *UserHandler) Delete(c *gin.Context) {
 		return
 	}
 
+	if protectSuperAdminTarget(c, h.enforcer, id) {
+		return
+	}
 	if err := h.db.Delete(&user).Error; err != nil {
 		Fail(c, http.StatusInternalServerError, "删除用户失败")
 		return
@@ -236,11 +269,12 @@ func (h *UserHandler) Delete(c *gin.Context) {
 		Before:       user,
 		Status:       "success",
 	})
+	_ = h.stateStore.RevokeUserTokens(c.Request.Context(), id)
 	OK(c, gin.H{"deleted": true})
 }
 
 type resetPasswordReq struct {
-	NewPassword string `json:"new_password" binding:"required,min=6"`
+	NewPassword string `json:"new_password" binding:"required,min=8,max=72"`
 }
 
 func (h *UserHandler) ResetPassword(c *gin.Context) {
@@ -251,12 +285,15 @@ func (h *UserHandler) ResetPassword(c *gin.Context) {
 	}
 	var req resetPasswordReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "新密码至少 6 位")
+		Fail(c, http.StatusBadRequest, "新密码需为 8~72 位")
 		return
 	}
 	var user models.User
 	if err := h.db.First(&user, id).Error; err != nil {
 		Fail(c, http.StatusNotFound, "用户不存在")
+		return
+	}
+	if protectSuperAdminTarget(c, h.enforcer, id) {
 		return
 	}
 	hash, err := security.HashPassword(req.NewPassword)
@@ -276,6 +313,10 @@ func (h *UserHandler) ResetPassword(c *gin.Context) {
 		After:        map[string]interface{}{"username": user.Username},
 		Status:       "success",
 	})
+	if err := h.stateStore.RevokeUserTokens(c.Request.Context(), user.ID); err != nil {
+		Fail(c, http.StatusInternalServerError, "密码已重置，但撤销旧会话失败，请重试")
+		return
+	}
 	OK(c, gin.H{"reset": true})
 }
 
@@ -287,6 +328,10 @@ func (h *UserHandler) GetRoles(c *gin.Context) {
 	}
 	domain := strings.TrimSpace(c.Query("domain"))
 	if domain != "" {
+		if domain != middleware.ResolveDomain(c) && !isSuperAdmin(h.enforcer, CurrentUserID(c)) {
+			Fail(c, http.StatusForbidden, "无权查看其他域的角色")
+			return
+		}
 		roles := h.enforcer.GetRolesForUserInDomain(id, domain)
 		OK(c, gin.H{"domain": domain, "roles": roles})
 		return
@@ -296,7 +341,7 @@ func (h *UserHandler) GetRoles(c *gin.Context) {
 		Fail(c, http.StatusInternalServerError, "查询角色失败")
 		return
 	}
-	OK(c, all)
+	OK(c, visibleRoles(c, h.enforcer, all))
 }
 
 type assignRolesReq struct {
@@ -321,6 +366,17 @@ func (h *UserHandler) AssignRoles(c *gin.Context) {
 	var req assignRolesReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		return
+	}
+
+	req.DomainCode = strings.TrimSpace(req.DomainCode)
+	if !requireDomainPermission(c, h.enforcer, req.DomainCode, "roles", "write") {
+		return
+	}
+	if rejectSuperAdminGrant(c, h.enforcer, req.RoleCodes) {
+		return
+	}
+	if protectSuperAdminTarget(c, h.enforcer, id) {
 		return
 	}
 
@@ -368,10 +424,17 @@ func (h *UserHandler) RevokeRole(c *gin.Context) {
 		domain = middleware.ResolveDomain(c)
 	}
 
+	if !requireDomainPermission(c, h.enforcer, domain, "roles", "write") {
+		return
+	}
+	if protectSuperAdminTarget(c, h.enforcer, id) {
+		return
+	}
+
 	beforeRoles := h.enforcer.GetRolesForUserInDomain(id, domain)
 	_, err = h.enforcer.DeleteRoleForUserInDomain(id, roleCode, domain)
 	if err != nil {
-		Fail(c, http.StatusInternalServerError, "移除角色失败: "+err.Error())
+		Fail(c, http.StatusInternalServerError, "移除角色失败")
 		return
 	}
 	afterRoles := h.enforcer.GetRolesForUserInDomain(id, domain)

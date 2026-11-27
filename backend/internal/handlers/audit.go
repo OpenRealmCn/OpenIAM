@@ -7,15 +7,17 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/openrealm/openiam/internal/models"
+	"github.com/openrealm/openiam/internal/rbac"
 	"gorm.io/gorm"
 )
 
 type AuditHandler struct {
-	db *gorm.DB
+	db       *gorm.DB
+	enforcer *rbac.Enforcer
 }
 
-func NewAuditHandler(db *gorm.DB) *AuditHandler {
-	return &AuditHandler{db: db}
+func NewAuditHandler(db *gorm.DB, enforcer *rbac.Enforcer) *AuditHandler {
+	return &AuditHandler{db: db, enforcer: enforcer}
 }
 
 func (h *AuditHandler) List(c *gin.Context) {
@@ -31,7 +33,8 @@ func (h *AuditHandler) List(c *gin.Context) {
 	if resType := strings.TrimSpace(c.Query("resource_type")); resType != "" {
 		q = q.Where("resource_type = ?", resType)
 	}
-	if domain := strings.TrimSpace(c.Query("domain")); domain != "" && domain != "*" {
+	// 非超级管理员只能查看请求域内的审计日志
+	if domain, all := scopedDomain(c, h.enforcer); !all {
 		q = q.Where("domain_code = ?", domain)
 	}
 	if status := strings.TrimSpace(c.Query("status")); status != "" {
@@ -59,49 +62,50 @@ func (h *AuditHandler) List(c *gin.Context) {
 	OK(c, PagedResult{Items: logs, Total: total, Page: page, Size: size})
 }
 
+type dayBucket struct {
+	Date      string `json:"date"`
+	AuthCount int    `json:"auth_count"`
+	RBACCount int    `json:"rbac_count"`
+	FailCount int    `json:"fail_count"`
+}
+
+// Stats 使用数据库聚合计数统计近 7 天趋势，不再把记录整体读入内存；非超级管理员仅统计请求域。
 func (h *AuditHandler) Stats(c *gin.Context) {
 	now := time.Now()
-	since := now.AddDate(0, 0, -6).Truncate(24 * time.Hour)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	domain, all := scopedDomain(c, h.enforcer)
 
-	var recent []models.AuditLog
-	h.db.Select("id, action, resource_type, status, created_at").Where("created_at >= ?", since).Find(&recent)
-
-	type dayBucket struct {
-		Date      string `json:"date"`
-		AuthCount int    `json:"auth_count"`
-		RBACCount int    `json:"rbac_count"`
-		FailCount int    `json:"fail_count"`
+	base := func() *gorm.DB {
+		q := h.db.Model(&models.AuditLog{})
+		if !all {
+			q = q.Where("domain_code = ?", domain)
+		}
+		return q
 	}
+
 	buckets := make([]dayBucket, 7)
-	idxMap := make(map[string]int, 7)
 	for i := 0; i < 7; i++ {
-		d := since.AddDate(0, 0, i).Format("2006-01-02")
-		buckets[i] = dayBucket{Date: d}
-		idxMap[d] = i
-	}
-
-	for _, item := range recent {
-		d := item.CreatedAt.Format("2006-01-02")
-		idx, ok := idxMap[d]
-		if !ok {
-			continue
+		start := today.AddDate(0, 0, i-6)
+		end := start.AddDate(0, 0, 1)
+		day := func() *gorm.DB {
+			return base().Where("created_at >= ? AND created_at < ?", start, end)
 		}
-		if item.Status != "success" {
-			buckets[idx].FailCount++
-		}
-		if strings.HasPrefix(item.Action, "auth.") || strings.HasPrefix(item.Action, "oauth2.") {
-			buckets[idx].AuthCount++
-		}
-		if strings.HasPrefix(item.Action, "rbac.") {
-			buckets[idx].RBACCount++
-		}
+		b := dayBucket{Date: start.Format("2006-01-02")}
+		var n int64
+		day().Where("(action LIKE ? OR action LIKE ?)", "auth.%", "oauth2.%").Count(&n)
+		b.AuthCount = int(n)
+		day().Where("action LIKE ?", "rbac.%").Count(&n)
+		b.RBACCount = int(n)
+		day().Where("status <> ?", "success").Count(&n)
+		b.FailCount = int(n)
+		buckets[i] = b
 	}
 
 	var totalCount int64
-	h.db.Model(&models.AuditLog{}).Count(&totalCount)
+	base().Count(&totalCount)
 
 	OK(c, gin.H{
-		"total":      totalCount,
-		"daily_7d":   buckets,
+		"total":    totalCount,
+		"daily_7d": buckets,
 	})
 }

@@ -79,7 +79,7 @@ func EnsureDefaults(db *gorm.DB, enforcer *rbac.Enforcer, cfg config.SeedConfig)
 
 		// domain_admin 拥有常见读/写管理权限
 		for _, p := range defaultPerms {
-			if p.Resource != "domains" || p.Action == "read" {
+			if !((p.Resource == "domains" || p.Resource == "settings" || p.Resource == "oauth_providers") && p.Action != "read") {
 				_, _ = enforcer.AddPolicy("domain_admin", rbac.DefaultDomain, p.Resource, p.Action)
 			}
 		}

@@ -11,17 +11,19 @@ import (
 	"github.com/openrealm/openiam/internal/audit"
 	"github.com/openrealm/openiam/internal/middleware"
 	"github.com/openrealm/openiam/internal/models"
+	"github.com/openrealm/openiam/internal/rbac"
 	"github.com/openrealm/openiam/internal/security"
 	"gorm.io/gorm"
 )
 
 type OAuthClientHandler struct {
+	enforcer *rbac.Enforcer
 	db       *gorm.DB
 	auditSvc *audit.Service
 }
 
-func NewOAuthClientHandler(db *gorm.DB, auditSvc *audit.Service) *OAuthClientHandler {
-	return &OAuthClientHandler{db: db, auditSvc: auditSvc}
+func NewOAuthClientHandler(db *gorm.DB, auditSvc *audit.Service, enforcer *rbac.Enforcer) *OAuthClientHandler {
+	return &OAuthClientHandler{db: db, auditSvc: auditSvc, enforcer: enforcer}
 }
 
 func generateClientCredential(prefix string, byteLen int) string {
@@ -31,9 +33,9 @@ func generateClientCredential(prefix string, byteLen int) string {
 }
 
 func (h *OAuthClientHandler) List(c *gin.Context) {
-	domain := strings.TrimSpace(c.Query("domain"))
+	domain, all := scopedDomain(c, h.enforcer)
 	q := h.db.Model(&models.OAuthClient{})
-	if domain != "" && domain != "*" {
+	if !all {
 		q = q.Where("domain_code = ?", domain)
 	}
 	var clients []models.OAuthClient
@@ -65,6 +67,16 @@ func (h *OAuthClientHandler) Create(c *gin.Context) {
 	domain := strings.TrimSpace(req.DomainCode)
 	if domain == "" {
 		domain = middleware.ResolveDomain(c)
+	}
+	if c.GetBool("self_service") {
+		domain = "openiam"
+		if msg := validateSelfServiceClient(req.GrantTypes, req.Scopes, req.RedirectURIs); msg != "" {
+			Fail(c, http.StatusBadRequest, msg)
+			return
+		}
+	}
+	if !c.GetBool("self_service") && !requireDomainPermission(c, h.enforcer, domain, "oauth_clients", "write") {
+		return
 	}
 	grantTypes := req.GrantTypes
 	if len(grantTypes) == 0 {
@@ -152,6 +164,9 @@ func (h *OAuthClientHandler) Update(c *gin.Context) {
 		Fail(c, http.StatusNotFound, "OAuth 应用不存在")
 		return
 	}
+	if !c.GetBool("self_service") && !requireDomainPermission(c, h.enforcer, client.DomainCode, "oauth_clients", "write") {
+		return
+	}
 	before := client
 
 	var req updateOAuthClientReq
@@ -164,6 +179,12 @@ func (h *OAuthClientHandler) Update(c *gin.Context) {
 	}
 	if req.Description != "" {
 		client.Description = strings.TrimSpace(req.Description)
+	}
+	if c.GetBool("self_service") {
+		if msg := validateSelfServiceClient(req.GrantTypes, req.Scopes, req.RedirectURIs); msg != "" {
+			Fail(c, http.StatusBadRequest, msg)
+			return
+		}
 	}
 	if len(req.RedirectURIs) > 0 {
 		client.RedirectURIs = models.StringSlice(req.RedirectURIs)
@@ -212,6 +233,9 @@ func (h *OAuthClientHandler) RotateSecret(c *gin.Context) {
 		Fail(c, http.StatusNotFound, "OAuth 应用不存在")
 		return
 	}
+	if !c.GetBool("self_service") && !requireDomainPermission(c, h.enforcer, client.DomainCode, "oauth_clients", "write") {
+		return
+	}
 	if !client.IsConfidential {
 		Fail(c, http.StatusBadRequest, "Public 客户端无需密钥")
 		return
@@ -252,6 +276,9 @@ func (h *OAuthClientHandler) Delete(c *gin.Context) {
 		Fail(c, http.StatusNotFound, "OAuth 应用不存在")
 		return
 	}
+	if !c.GetBool("self_service") && !requireDomainPermission(c, h.enforcer, client.DomainCode, "oauth_clients", "write") {
+		return
+	}
 	if err := h.db.Delete(&client).Error; err != nil {
 		Fail(c, http.StatusInternalServerError, "删除 OAuth 应用失败")
 		return
@@ -281,6 +308,7 @@ func (h *OAuthClientHandler) ListMine(c *gin.Context) {
 
 // CreateMine 允许拥有 oauth_clients:create_own 权限的普通用户创建自己的 OAuth 应用。
 func (h *OAuthClientHandler) CreateMine(c *gin.Context) {
+	c.Set("self_service", true)
 	h.Create(c)
 }
 
@@ -296,6 +324,7 @@ func (h *OAuthClientHandler) UpdateMine(c *gin.Context) {
 		Fail(c, http.StatusNotFound, "应用不存在或无权操作")
 		return
 	}
+	c.Set("self_service", true)
 	h.Update(c)
 }
 
@@ -311,6 +340,7 @@ func (h *OAuthClientHandler) RotateSecretMine(c *gin.Context) {
 		Fail(c, http.StatusNotFound, "应用不存在或无权操作")
 		return
 	}
+	c.Set("self_service", true)
 	h.RotateSecret(c)
 }
 
@@ -326,5 +356,6 @@ func (h *OAuthClientHandler) DeleteMine(c *gin.Context) {
 		Fail(c, http.StatusNotFound, "应用不存在或无权操作")
 		return
 	}
+	c.Set("self_service", true)
 	h.Delete(c)
 }

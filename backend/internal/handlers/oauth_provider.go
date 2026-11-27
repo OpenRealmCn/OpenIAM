@@ -71,6 +71,10 @@ func (h *OAuthProviderHandler) Create(c *gin.Context) {
 		Fail(c, http.StatusBadRequest, "未知的插件类型: "+req.PluginType)
 		return
 	}
+	if err := oauthplugin.ValidateExtraConfig(req.ExtraConfig); err != nil {
+		Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	name := strings.TrimSpace(req.Name)
 	var dup int64
 	h.db.Model(&models.OAuthProvider{}).Where("name = ?", name).Count(&dup)
@@ -138,6 +142,10 @@ func (h *OAuthProviderHandler) Update(c *gin.Context) {
 		return
 	}
 
+	if err := oauthplugin.ValidateExtraConfig(req.ExtraConfig); err != nil {
+		Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	p.PluginType = req.PluginType
 	p.DisplayName = strings.TrimSpace(req.DisplayName)
 	p.ClientID = strings.TrimSpace(req.ClientID)

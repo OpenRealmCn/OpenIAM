@@ -20,21 +20,22 @@ import (
 
 // AccessClaims 为 OpenIAM 颁发的标准 Access Token 声明。
 type AccessClaims struct {
-	UserID   uint64 `json:"uid"`
-	Username string `json:"username"`
-	Email    string `json:"email"`
-	Scope    string `json:"scope,omitempty"`
-	ClientID string `json:"client_id,omitempty"`
+	UserID     uint64 `json:"uid"`
+	Username   string `json:"username"`
+	Email      string `json:"email"`
+	Scope      string `json:"scope,omitempty"`
+	ClientID   string `json:"client_id,omitempty"`
+	IssuedAtMs int64  `json:"iat_ms,omitempty"`
 	jwt.RegisteredClaims
 }
 
 // IDTokenClaims 为 OIDC 标准 ID Token 声明。
 type IDTokenClaims struct {
-	Username          string `json:"preferred_username"`
-	Email             string `json:"email"`
-	Name              string `json:"name,omitempty"`
-	Picture           string `json:"picture,omitempty"`
-	AuthorizedParty   string `json:"azp,omitempty"`
+	Username        string `json:"preferred_username"`
+	Email           string `json:"email"`
+	Name            string `json:"name,omitempty"`
+	Picture         string `json:"picture,omitempty"`
+	AuthorizedParty string `json:"azp,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -166,11 +167,12 @@ func (m *JWTManager) GenerateAccessToken(userID uint64, username, email, scope, 
 	jti = uuid.NewString()
 
 	claims := AccessClaims{
-		UserID:   userID,
-		Username: username,
-		Email:    email,
-		Scope:    scope,
-		ClientID: clientID,
+		UserID:     userID,
+		Username:   username,
+		Email:      email,
+		Scope:      scope,
+		ClientID:   clientID,
+		IssuedAtMs: now.UnixMilli(),
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    issuer,
 			Subject:   fmt.Sprintf("%d", userID),

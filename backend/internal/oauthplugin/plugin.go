@@ -142,8 +142,8 @@ func extraString(cfg models.JSONMap, key, fallback string) string {
 }
 
 func fetchJSON(ctx context.Context, client *http.Client, req *http.Request, out interface{}) (map[string]interface{}, error) {
-	if client == nil {
-		client = http.DefaultClient
+	if client == nil || client == http.DefaultClient {
+		client = upstreamClient
 	}
 	req = req.WithContext(ctx)
 	resp, err := client.Do(req)

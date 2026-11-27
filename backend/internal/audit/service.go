@@ -101,15 +101,6 @@ func (s *Service) Record(entry Entry) {
 	}
 }
 
-var sensitiveKeys = map[string]bool{
-	"password":           true,
-	"password_hash":      true,
-	"client_secret":      true,
-	"client_secret_hash": true,
-	"access_token":       true,
-	"refresh_token":      true,
-}
-
 func toSanitizedJSONMap(v interface{}) models.JSONMap {
 	if v == nil {
 		return nil
@@ -133,10 +124,11 @@ func toSanitizedJSONMap(v interface{}) models.JSONMap {
 
 func sanitizeMap(m map[string]interface{}) {
 	for k, val := range m {
-		if sensitiveKeys[k] {
+		if isSensitiveKey(k) {
 			m[k] = "***REDACTED***"
 			continue
 		}
+		sanitizeValue(val)
 		if sub, ok := val.(map[string]interface{}); ok {
 			sanitizeMap(sub)
 		}

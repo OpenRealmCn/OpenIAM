@@ -1,6 +1,8 @@
 package router
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/openrealm/openiam/internal/audit"
 	"github.com/openrealm/openiam/internal/config"
@@ -72,6 +74,14 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 
 	r := gin.New()
 	r.Use(gin.Recovery())
+	if err := r.SetTrustedProxies(deps.Config.Server.TrustedProxies); err != nil {
+		return nil, err
+	}
+	// 限制请求体最大为 1 MiB，防止超大请求耗尽内存
+	r.Use(func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+		c.Next()
+	})
 	r.Use(middleware.ZapLogger(deps.Logger))
 	r.Use(middleware.DynamicCORS(func() []string {
 		return deps.SettingsSvc.Snapshot().CORSAllowOrigins
@@ -89,13 +99,13 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 		deps.PluginSvc,
 		deps.SettingsSvc,
 	)
-	userH := handlers.NewUserHandler(deps.DB, deps.Enforcer, deps.AuditSvc)
-	domainH := handlers.NewDomainHandler(deps.DB, deps.AuditSvc)
+	userH := handlers.NewUserHandler(deps.DB, deps.Enforcer, deps.AuditSvc, deps.StateStore)
+	domainH := handlers.NewDomainHandler(deps.DB, deps.AuditSvc, deps.Enforcer)
 	roleH := handlers.NewRoleHandler(deps.DB, deps.Enforcer, deps.AuditSvc)
 	permH := handlers.NewPermissionHandler(deps.DB, deps.Enforcer, deps.AuditSvc)
-	oauthClientH := handlers.NewOAuthClientHandler(deps.DB, deps.AuditSvc)
+	oauthClientH := handlers.NewOAuthClientHandler(deps.DB, deps.AuditSvc, deps.Enforcer)
 	oauthProviderH := handlers.NewOAuthProviderHandler(deps.DB, deps.PluginSvc.Registry(), deps.AuditSvc)
-	auditH := handlers.NewAuditHandler(deps.DB)
+	auditH := handlers.NewAuditHandler(deps.DB, deps.Enforcer)
 	systemH := handlers.NewSystemHandler(deps.DB, deps.Redis)
 	settingsH := handlers.NewSettingsHandler(deps.SettingsSvc, deps.AuditSvc)
 

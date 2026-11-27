@@ -23,6 +23,7 @@ type OAuthPluginState struct {
 type RefreshTokenRecord struct {
 	UserID   uint64 `json:"user_id"`
 	Username string `json:"username"`
+	IssuedAt int64  `json:"issued_at"`
 }
 
 type OAuthConsentRequest struct {
@@ -63,8 +64,29 @@ func (s *StateStore) key(parts ...string) string {
 	return k
 }
 
+// userRevocationTTL 为「用户令牌失效时间点」在 Redis 中的保留时长，需长于任何刷新令牌的有效期。
+const userRevocationTTL = 366 * 24 * time.Hour
+
+// RevokeUserTokens 记录当前时刻为该用户的令牌失效时间点：此前签发的所有 Access Token 与 Refresh Token 都将失效。
+func (s *StateStore) RevokeUserTokens(ctx context.Context, userID uint64) error {
+	return s.rdb.Set(ctx, s.key("user_revoked_after", fmt.Sprintf("%d", userID)), time.Now().UnixMilli(), userRevocationTTL).Err()
+}
+
+// IsIssuedBeforeRevocation 判断（毫秒时间戳表示的）签发时间是否早于或等于该用户的令牌失效时间点。
+func (s *StateStore) IsIssuedBeforeRevocation(ctx context.Context, userID uint64, issuedAtMs int64) (bool, error) {
+	after, err := s.rdb.Get(ctx, s.key("user_revoked_after", fmt.Sprintf("%d", userID))).Int64()
+	if errors.Is(err, redis.Nil) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return issuedAtMs <= after, nil
+}
+
 // SaveRefreshToken 保存 Refresh Token 会话记录。
 func (s *StateStore) SaveRefreshToken(ctx context.Context, token string, rec RefreshTokenRecord, ttl time.Duration) error {
+	rec.IssuedAt = time.Now().UnixMilli()
 	b, err := json.Marshal(rec)
 	if err != nil {
 		return err
@@ -179,6 +201,22 @@ func (s *StateStore) SaveConsentRequest(ctx context.Context, req OAuthConsentReq
 
 func (s *StateStore) GetConsentRequest(ctx context.Context, id string) (*OAuthConsentRequest, error) {
 	val, err := s.rdb.Get(ctx, s.key("oauth_consent", id)).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, ErrStateNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	var req OAuthConsentRequest
+	if err := json.Unmarshal([]byte(val), &req); err != nil {
+		return nil, fmt.Errorf("decode consent request: %w", err)
+	}
+	return &req, nil
+}
+
+// ConsumeConsentRequest 原子性取出并删除授权同意请求，防止同一请求被重放。
+func (s *StateStore) ConsumeConsentRequest(ctx context.Context, id string) (*OAuthConsentRequest, error) {
+	val, err := s.rdb.GetDel(ctx, s.key("oauth_consent", id)).Result()
 	if errors.Is(err, redis.Nil) {
 		return nil, ErrStateNotFound
 	}

@@ -13,17 +13,32 @@ import (
 )
 
 type DomainHandler struct {
+	enforcer *rbac.Enforcer
 	db       *gorm.DB
 	auditSvc *audit.Service
 }
 
-func NewDomainHandler(db *gorm.DB, auditSvc *audit.Service) *DomainHandler {
-	return &DomainHandler{db: db, auditSvc: auditSvc}
+func NewDomainHandler(db *gorm.DB, auditSvc *audit.Service, enforcer *rbac.Enforcer) *DomainHandler {
+	return &DomainHandler{db: db, auditSvc: auditSvc, enforcer: enforcer}
 }
 
 func (h *DomainHandler) List(c *gin.Context) {
 	var domains []models.Domain
-	if err := h.db.Order("id ASC").Find(&domains).Error; err != nil {
+	q := h.db.Order("id ASC")
+	if uid := CurrentUserID(c); !isSuperAdmin(h.enforcer, uid) {
+		// 非超级管理员只能看到自己持有角色的域
+		roles, _ := h.enforcer.GetAllUserRoles(uid)
+		codes := make([]string, 0, len(roles))
+		for code := range roles {
+			codes = append(codes, code)
+		}
+		if len(codes) == 0 {
+			OK(c, []models.Domain{})
+			return
+		}
+		q = q.Where("code IN ?", codes)
+	}
+	if err := q.Find(&domains).Error; err != nil {
 		Fail(c, http.StatusInternalServerError, "查询域列表失败")
 		return
 	}

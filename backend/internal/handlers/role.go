@@ -31,9 +31,9 @@ type roleDetail struct {
 }
 
 func (h *RoleHandler) List(c *gin.Context) {
-	domain := strings.TrimSpace(c.Query("domain"))
+	domain, all := scopedDomain(c, h.enforcer)
 	q := h.db.Model(&models.Role{})
-	if domain != "" && domain != "*" {
+	if !all {
 		q = q.Where("domain_code = ?", domain)
 	}
 	var roles []models.Role
@@ -73,6 +73,9 @@ func (h *RoleHandler) Create(c *gin.Context) {
 		domain = middleware.ResolveDomain(c)
 	}
 	code := strings.TrimSpace(req.Code)
+	if !requireDomainPermission(c, h.enforcer, domain, "roles", "write") {
+		return
+	}
 
 	var dup int64
 	h.db.Model(&models.Role{}).Where("domain_code = ? AND code = ?", domain, code).Count(&dup)
@@ -118,6 +121,9 @@ func (h *RoleHandler) Update(c *gin.Context) {
 	var role models.Role
 	if err := h.db.First(&role, id).Error; err != nil {
 		Fail(c, http.StatusNotFound, "角色不存在")
+		return
+	}
+	if !requireRoleMutation(c, h.enforcer, role) {
 		return
 	}
 	before := role
@@ -166,6 +172,10 @@ func (h *RoleHandler) Delete(c *gin.Context) {
 		return
 	}
 
+	if !requireRoleMutation(c, h.enforcer, role) {
+		return
+	}
+
 	beforePolicies, _ := h.enforcer.GetPolicies(role.DomainCode, role.Code)
 	beforeMembers, _ := h.enforcer.GetUsersForRoleInDomain(role.Code, role.DomainCode)
 
@@ -202,6 +212,9 @@ func (h *RoleHandler) GetPermissions(c *gin.Context) {
 		Fail(c, http.StatusNotFound, "角色不存在")
 		return
 	}
+	if !requireDomainPermission(c, h.enforcer, role.DomainCode, "roles", "read") {
+		return
+	}
 	policies, err := h.enforcer.GetPolicies(role.DomainCode, role.Code)
 	if err != nil {
 		Fail(c, http.StatusInternalServerError, "获取角色权限失败")
@@ -235,6 +248,15 @@ func (h *RoleHandler) SetPermissions(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
+	}
+
+	if !requireRoleMutation(c, h.enforcer, role) {
+		return
+	}
+	for _, p := range req.Policies {
+		if !validatePolicyScope(c, h.enforcer, role.Code, strings.TrimSpace(p.Resource), strings.TrimSpace(p.Action)) {
+			return
+		}
 	}
 
 	beforePolicies, _ := h.enforcer.GetPolicies(role.DomainCode, role.Code)

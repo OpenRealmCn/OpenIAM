@@ -63,7 +63,7 @@ func (c *ClientRecord) AllowsRedirectURI(uri string) bool {
 
 func (c *ClientRecord) AllowsGrantType(gt string) bool {
 	if len(c.Model.GrantTypes) == 0 {
-		return true
+		return false
 	}
 	for _, g := range c.Model.GrantTypes {
 		if g == gt {

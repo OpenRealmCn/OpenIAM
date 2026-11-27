@@ -1,27 +1,28 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
 
-const TOKEN_KEY = 'openiam_access_token';
-const REFRESH_KEY = 'openiam_refresh_token';
 const DOMAIN_KEY = 'openiam_current_domain';
+const LEGACY_TOKEN_KEYS = ['openiam_access_token', 'openiam_refresh_token'];
+
+// Access Token 仅保存在内存中；Refresh Token 由服务端以 HttpOnly Cookie 下发，脚本无法读取，可降低 XSS 窃取风险。
+let accessToken: string | null = null;
+
+// 清理旧版本遗留在 localStorage 中的令牌
+try {
+  LEGACY_TOKEN_KEYS.forEach((k) => localStorage.removeItem(k));
+} catch {
+  // 忽略存储不可用的情况
+}
 
 export function getAccessToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY);
+  return accessToken;
 }
 
-export function getRefreshToken(): string | null {
-  return localStorage.getItem(REFRESH_KEY);
-}
-
-export function setTokens(access: string, refresh: string) {
-  localStorage.setItem(TOKEN_KEY, access);
-  if (refresh) {
-    localStorage.setItem(REFRESH_KEY, refresh);
-  }
+export function setTokens(access: string) {
+  accessToken = access;
 }
 
 export function clearTokens() {
-  localStorage.removeItem(TOKEN_KEY);
-  localStorage.removeItem(REFRESH_KEY);
+  accessToken = null;
 }
 
 export function getCurrentDomain(): string {
@@ -50,35 +51,37 @@ http.interceptors.request.use((config: InternalAxiosRequestConfig) => {
 
 let refreshingPromise: Promise<string | null> | null = null;
 
+// 凭 HttpOnly Cookie 中的 Refresh Token 换取新的 Access Token（并发请求共用同一次刷新）。
+export function refreshAccessToken(): Promise<string | null> {
+  if (!refreshingPromise) {
+    refreshingPromise = axios
+      .post(`${API_BASE_URL}/auth/refresh`, {}, { timeout: 15000 })
+      .then((res) => {
+        const token = res.data.data.access_token as string;
+        setTokens(token);
+        return token;
+      })
+      .catch(() => {
+        clearTokens();
+        return null;
+      })
+      .finally(() => {
+        refreshingPromise = null;
+      });
+  }
+  return refreshingPromise;
+}
+
 http.interceptors.response.use(
   (resp) => resp,
   async (error: AxiosError<{ message?: string }>) => {
     const original = error.config as (InternalAxiosRequestConfig & { _retry?: boolean }) | undefined;
-    if (error.response?.status === 401 && original && !original._retry && !original.url?.includes('/auth/refresh')) {
+    if (error.response?.status === 401 && original && !original._retry && !original.url?.includes('/auth/refresh') && !original.url?.includes('/auth/login')) {
       original._retry = true;
-      const refresh = getRefreshToken();
-      if (refresh) {
-        if (!refreshingPromise) {
-          refreshingPromise = axios
-            .post(`${API_BASE_URL}/auth/refresh`, { refresh_token: refresh })
-            .then((res) => {
-              const { access_token, refresh_token } = res.data.data;
-              setTokens(access_token, refresh_token);
-              return access_token as string;
-            })
-            .catch(() => {
-              clearTokens();
-              return null;
-            })
-            .finally(() => {
-              refreshingPromise = null;
-            });
-        }
-        const newToken = await refreshingPromise;
-        if (newToken) {
-          original.headers.Authorization = `Bearer ${newToken}`;
-          return http(original);
-        }
+      const newToken = await refreshAccessToken();
+      if (newToken) {
+        original.headers.Authorization = `Bearer ${newToken}`;
+        return http(original);
       }
     }
     const msg = error.response?.data?.message || error.message || '请求失败';
@@ -92,8 +95,8 @@ export const api = {
       http.post('/auth/login', { username, password }).then((r) => r.data.data),
     register: (payload: { username: string; email: string; password: string; display_name?: string }) =>
       http.post('/auth/register', payload).then((r) => r.data.data),
-    logout: (refresh_token: string | null) =>
-      http.post('/auth/logout', { refresh_token }).then((r) => r.data.data),
+    logout: () =>
+      http.post('/auth/logout', {}).then((r) => r.data.data),
     me: () => http.get('/auth/me').then((r) => r.data.data),
     changePassword: (old_password: string, new_password: string) =>
       http.post('/auth/change-password', { old_password, new_password }).then((r) => r.data.data),

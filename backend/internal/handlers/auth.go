@@ -97,6 +97,12 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
+	// 以规范用户名检查锁定状态，防止通过邮箱登录绕过按用户名的失败计数
+	if locked, ttl, err := h.stateStore.IsLoginLocked(ctx, user.Username); err == nil && locked {
+		Fail(c, http.StatusTooManyRequests, fmt.Sprintf("连续登录失败次数过多，账号已锁定，请 %d 秒后重试", int(ttl.Seconds())))
+		return
+	}
+
 	if user.Status != "active" {
 		h.auditSvc.RecordFromContext(c, audit.Entry{
 			ActorID:       user.ID,
@@ -108,12 +114,12 @@ func (h *AuthHandler) Login(c *gin.Context) {
 			Status:        "failed",
 			ErrorMessage:  "user disabled",
 		})
-		Fail(c, http.StatusForbidden, "账号已被禁用")
+		Fail(c, http.StatusUnauthorized, "用户名或密码错误")
 		return
 	}
 
 	if !security.VerifyPassword(user.PasswordHash, req.Password) {
-		count, locked, _ := h.stateStore.RecordLoginFailure(ctx, username, snap.MaxLoginFailures, time.Duration(snap.LockoutMinutes)*time.Minute)
+		count, locked, _ := h.stateStore.RecordLoginFailure(ctx, user.Username, snap.MaxLoginFailures, time.Duration(snap.LockoutMinutes)*time.Minute)
 		h.auditSvc.RecordFromContext(c, audit.Entry{
 			ActorID:       user.ID,
 			ActorUsername: user.Username,
@@ -134,6 +140,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}
 
 	_ = h.stateStore.ClearLoginFailures(ctx, username)
+	_ = h.stateStore.ClearLoginFailures(ctx, user.Username)
 	now := time.Now()
 	_ = h.db.Model(&user).Updates(map[string]interface{}{
 		"last_login_at": &now,
@@ -167,7 +174,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	OK(c, gin.H{
 		"access_token":  accessToken,
-		"refresh_token": refreshToken,
+		"refresh_token": h.deliverRefresh(c, refreshToken, snap.JWTRefreshTTL),
 		"expires_in":    int64(h.jwtMgr.AccessTTL().Seconds()),
 		"user":          user,
 		"roles":         rolesMap,
@@ -175,9 +182,9 @@ func (h *AuthHandler) Login(c *gin.Context) {
 }
 
 type registerReq struct {
-	Username    string `json:"username" binding:"required,min=3,max=64"`
+	Username    string `json:"username" binding:"required,min=3,max=64,excludes=@"`
 	Email       string `json:"email" binding:"required,email"`
-	Password    string `json:"password" binding:"required,min=6"`
+	Password    string `json:"password" binding:"required,min=8,max=72"`
 	DisplayName string `json:"display_name"`
 }
 
@@ -217,7 +224,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		Status:       "active",
 	}
 	if err := h.db.Create(&user).Error; err != nil {
-		Fail(c, http.StatusInternalServerError, "创建用户失败: "+err.Error())
+		Fail(c, http.StatusInternalServerError, "创建用户失败")
 		return
 	}
 	_, _ = h.enforcer.AddRoleForUserInDomain(user.ID, "viewer", rbac.DefaultDomain)
@@ -242,18 +249,24 @@ type refreshReq struct {
 
 func (h *AuthHandler) Refresh(c *gin.Context) {
 	var req refreshReq
-	if err := c.ShouldBindJSON(&req); err != nil {
+	_ = c.ShouldBindJSON(&req)
+	token := readRefreshToken(c, req.RefreshToken)
+	if token == "" {
 		Fail(c, http.StatusBadRequest, "缺少 refresh_token")
 		return
 	}
 	ctx := c.Request.Context()
-	rec, err := h.stateStore.ConsumeRefreshToken(ctx, req.RefreshToken)
+	rec, err := h.stateStore.ConsumeRefreshToken(ctx, token)
 	if err != nil {
 		Fail(c, http.StatusUnauthorized, "Refresh Token 无效或已过期")
 		return
 	}
 
 	var user models.User
+	if revoked, rErr := h.stateStore.IsIssuedBeforeRevocation(ctx, rec.UserID, rec.IssuedAt); rErr != nil || revoked {
+		Fail(c, http.StatusUnauthorized, "Refresh Token 无效或已过期")
+		return
+	}
 	if err := h.db.First(&user, rec.UserID).Error; err != nil || user.Status != "active" {
 		Fail(c, http.StatusUnauthorized, "用户不存在或已被禁用")
 		return
@@ -275,7 +288,7 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 
 	OK(c, gin.H{
 		"access_token":  accessToken,
-		"refresh_token": newRefresh,
+		"refresh_token": h.deliverRefresh(c, newRefresh, h.settingsSvc.Snapshot().JWTRefreshTTL),
 		"expires_in":    int64(h.jwtMgr.AccessTTL().Seconds()),
 	})
 }
@@ -286,6 +299,10 @@ type logoutReq struct {
 
 func (h *AuthHandler) Logout(c *gin.Context) {
 	var req logoutReq
+	if ck := readRefreshToken(c, ""); ck != "" {
+		_ = h.stateStore.DeleteRefreshToken(c.Request.Context(), ck)
+	}
+	clearRefreshCookie(c)
 	_ = c.ShouldBindJSON(&req)
 
 	ctx := c.Request.Context()
@@ -320,7 +337,12 @@ func (h *AuthHandler) Me(c *gin.Context) {
 	if domain == "" {
 		domain = rbac.DefaultDomain
 	}
-	policies, _ := h.enforcer.GetPolicies(domain, "")
+	policies := []rbac.PolicyRule{}
+	for _, rc := range rolesMap[domain] {
+		if p, pErr := h.enforcer.GetPolicies(domain, rc); pErr == nil {
+			policies = append(policies, p...)
+		}
+	}
 	var identities []models.UserIdentity
 	h.db.Where("user_id = ?", uid).Find(&identities)
 
@@ -334,13 +356,13 @@ func (h *AuthHandler) Me(c *gin.Context) {
 
 type changePasswordReq struct {
 	OldPassword string `json:"old_password" binding:"required"`
-	NewPassword string `json:"new_password" binding:"required,min=6"`
+	NewPassword string `json:"new_password" binding:"required,min=8,max=72"`
 }
 
 func (h *AuthHandler) ChangePassword(c *gin.Context) {
 	var req changePasswordReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数无效: 新密码至少 6 位")
+		Fail(c, http.StatusBadRequest, "参数无效: 新密码需为 8~72 位")
 		return
 	}
 	uid := CurrentUserID(c)
@@ -370,7 +392,11 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		ResourceID:   fmt.Sprintf("%d", user.ID),
 		Status:       "success",
 	})
-	OK(c, gin.H{"changed": true})
+	if err := h.stateStore.RevokeUserTokens(c.Request.Context(), user.ID); err != nil {
+		Fail(c, http.StatusInternalServerError, "密码已修改，但撤销旧会话失败，请重新登录后重试")
+		return
+	}
+	OK(c, gin.H{"changed": true, "relogin_required": true})
 }
 
 // ListPublicProviders 公开返回已启用的外部 OAuth 联合登录列表，供登录页渲染按钮。
@@ -448,7 +474,7 @@ func (h *AuthHandler) OAuthCallback(c *gin.Context) {
 	rolesMap, _ := h.enforcer.GetAllUserRoles(result.User.ID)
 	OK(c, gin.H{
 		"access_token":  result.AccessToken,
-		"refresh_token": result.RefreshToken,
+		"refresh_token": h.deliverRefresh(c, result.RefreshToken, h.settingsSvc.Snapshot().JWTRefreshTTL),
 		"expires_in":    result.ExpiresIn,
 		"user":          result.User,
 		"roles":         rolesMap,
