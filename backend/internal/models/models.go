@@ -88,6 +88,8 @@ type Domain struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+func (Domain) TableName() string { return "domains" }
+
 // User 代表平台身份主体。
 type User struct {
 	ID           uint64     `gorm:"primaryKey" json:"id"`
@@ -103,6 +105,8 @@ type User struct {
 	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
+func (User) TableName() string { return "users" }
+
 // Role 代表域内角色，权限关系由 Casbin 管理。
 type Role struct {
 	ID          uint64    `gorm:"primaryKey" json:"id"`
@@ -114,6 +118,8 @@ type Role struct {
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
+
+func (Role) TableName() string { return "roles" }
 
 // Permission 代表域内资源权限点元数据，与 Casbin 策略 p(role, domain, resource, action) 对应。
 type Permission struct {
@@ -127,6 +133,8 @@ type Permission struct {
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
+
+func (Permission) TableName() string { return "permissions" }
 
 // OAuthClient 代表接入 OpenIAM 的第三方或 OpenRealm 内部 OAuth 2.0 / OIDC 应用。
 type OAuthClient struct {
@@ -147,6 +155,8 @@ type OAuthClient struct {
 	UpdatedAt        time.Time   `json:"updated_at"`
 }
 
+func (OAuthClient) TableName() string { return "oauth_clients" }
+
 // OAuthProvider 代表一个配置好的外部 OAuth2/OIDC 联合登录提供方实例。
 type OAuthProvider struct {
 	ID           uint64    `gorm:"primaryKey" json:"id"`
@@ -163,6 +173,8 @@ type OAuthProvider struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+func (OAuthProvider) TableName() string { return "oauth_providers" }
+
 // UserIdentity 将 OpenIAM 本地用户与外部 OAuth 联合登录身份绑定。
 type UserIdentity struct {
 	ID               uint64    `gorm:"primaryKey" json:"id"`
@@ -175,6 +187,8 @@ type UserIdentity struct {
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
 }
+
+func (UserIdentity) TableName() string { return "user_identities" }
 
 // AuditLog 记录认证事件及所有用户/域/角色/权限/OAuth 管理操作前后快照。
 type AuditLog struct {
@@ -193,6 +207,8 @@ type AuditLog struct {
 	ErrorMessage  string    `gorm:"size:512;not null;default:''" json:"error_message"`
 	CreatedAt     time.Time `gorm:"index" json:"created_at"`
 }
+
+func (AuditLog) TableName() string { return "audit_logs" }
 
 // SystemVersionHistory 记录应用启动检查与数据库迁移历史。
 type SystemVersionHistory struct {

@@ -3,33 +3,53 @@ import { zhCN as coreZhCN } from '@mui/material/locale';
 import { zhCN as dataGridZhCN } from '@mui/x-data-grid/locales';
 import { zhCN as pickersZhCN } from '@mui/x-date-pickers/locales';
 import type {} from '@mui/x-data-grid/themeAugmentation';
+import {
+  DEFAULT_BORDER_RADIUS,
+  MOTION_SPEED_SCALE,
+  MotionSpeed,
+  THEME_PRESETS,
+  ThemePresetKey,
+} from '../store/themeStore';
 
-export type ThemePresetKey = 'cloudBlue' | 'indigo' | 'emerald' | 'violet' | 'amber';
-
-export interface ThemePreset {
-  key: ThemePresetKey;
-  label: string;
-  lightMain: string;
-  darkMain: string;
-  accent: string;
+export interface BuildThemeOptions {
+  mode: PaletteMode;
+  preset: ThemePresetKey;
+  customColor?: string;
+  borderRadius?: number;
+  motionSpeed?: MotionSpeed;
 }
 
-export const THEME_PRESETS: ThemePreset[] = [
-  { key: 'cloudBlue', label: '云澈蓝', lightMain: '#1976D2', darkMain: '#60A5FA', accent: '#0284C7' },
-  { key: 'indigo', label: '深邃靛', lightMain: '#4F46E5', darkMain: '#818CF8', accent: '#6366F1' },
-  { key: 'emerald', label: '松石绿', lightMain: '#059669', darkMain: '#34D399', accent: '#10B981' },
-  { key: 'violet', label: '极光紫', lightMain: '#7C3AED', darkMain: '#A78BFA', accent: '#8B5CF6' },
-  { key: 'amber', label: '琥珀金', lightMain: '#D97706', darkMain: '#FBBF24', accent: '#F59E0B' },
-];
-
-export function getThemePreset(key: ThemePresetKey): ThemePreset {
-  return THEME_PRESETS.find((p) => p.key === key) || THEME_PRESETS[0];
-}
-
-export function buildOpenIAMTheme(mode: PaletteMode, presetKey: ThemePresetKey = 'cloudBlue') {
+function resolvePrimaryColors(mode: PaletteMode, preset: ThemePresetKey, customColor?: string) {
   const isDark = mode === 'dark';
-  const preset = getThemePreset(presetKey);
-  const primaryMain = isDark ? preset.darkMain : preset.lightMain;
+  if (preset === 'custom' && customColor && /^#[0-9a-fA-F]{6}$/.test(customColor)) {
+    return { primaryMain: customColor, secondaryMain: customColor };
+  }
+  const found = THEME_PRESETS.find((p) => p.key === preset) || THEME_PRESETS[0];
+  return {
+    primaryMain: isDark ? found.darkMain : found.lightMain,
+    secondaryMain: found.accent,
+  };
+}
+
+export function buildOpenIAMTheme({
+  mode,
+  preset,
+  customColor,
+  borderRadius = DEFAULT_BORDER_RADIUS,
+  motionSpeed = 'normal',
+}: BuildThemeOptions) {
+  const isDark = mode === 'dark';
+  const { primaryMain, secondaryMain } = resolvePrimaryColors(mode, preset, customColor);
+  const scale = MOTION_SPEED_SCALE[motionSpeed] ?? 1;
+
+  const baseRadius = Math.max(0, Math.min(20, borderRadius));
+  const controlRadius = Math.max(0, baseRadius - 2);
+  const chipRadius = Math.max(0, baseRadius - 2);
+  const cardRadius = Math.max(0, baseRadius + 4);
+  const dialogRadius = Math.max(0, baseRadius + 6);
+
+  const transitionMs = Math.round(160 * scale);
+  const transitionCSS = scale === 0 ? 'none' : `all ${transitionMs}ms cubic-bezier(0.22, 1, 0.36, 1)`;
 
   const surfaceBg = isDark ? '#0F1216' : '#F4F6F9';
   const paperBg = isDark ? '#161B22' : '#FFFFFF';
@@ -39,12 +59,8 @@ export function buildOpenIAMTheme(mode: PaletteMode, presetKey: ThemePresetKey =
     {
       palette: {
         mode,
-        primary: {
-          main: primaryMain,
-        },
-        secondary: {
-          main: preset.accent,
-        },
+        primary: { main: primaryMain },
+        secondary: { main: secondaryMain },
         background: {
           default: surfaceBg,
           paper: paperBg,
@@ -56,7 +72,18 @@ export function buildOpenIAMTheme(mode: PaletteMode, presetKey: ThemePresetKey =
         info: { main: '#0EA5E9' },
       },
       shape: {
-        borderRadius: 12,
+        borderRadius: baseRadius,
+      },
+      transitions: {
+        duration: {
+          shortest: Math.round(150 * scale),
+          shorter: Math.round(200 * scale),
+          short: Math.round(250 * scale),
+          standard: Math.round(300 * scale),
+          complex: Math.round(375 * scale),
+          enteringScreen: Math.round(225 * scale),
+          leavingScreen: Math.round(195 * scale),
+        },
       },
       typography: {
         fontFamily: '"Inter", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
@@ -94,14 +121,14 @@ export function buildOpenIAMTheme(mode: PaletteMode, presetKey: ThemePresetKey =
           },
           styleOverrides: {
             root: {
-              borderRadius: 10,
+              borderRadius: controlRadius,
               paddingLeft: 16,
               paddingRight: 16,
-              transition: 'all 0.16s ease',
+              transition: transitionCSS,
             },
             containedPrimary: {
               '&:hover': {
-                boxShadow: `0 6px 18px ${alpha(primaryMain, 0.32)}`,
+                boxShadow: `0 6px 18px ${alpha(primaryMain, 0.28)}`,
               },
             },
           },
@@ -112,13 +139,13 @@ export function buildOpenIAMTheme(mode: PaletteMode, presetKey: ThemePresetKey =
           },
           styleOverrides: {
             root: {
-              borderRadius: 16,
+              borderRadius: cardRadius,
               border: `1px solid ${subtleBorder}`,
               backgroundColor: paperBg,
               boxShadow: isDark
                 ? '0 1px 2px rgba(0, 0, 0, 0.28)'
                 : '0 1px 3px rgba(15, 23, 42, 0.04)',
-              transition: 'border-color 0.18s ease, box-shadow 0.18s ease',
+              transition: transitionCSS,
             },
           },
         },
@@ -132,7 +159,7 @@ export function buildOpenIAMTheme(mode: PaletteMode, presetKey: ThemePresetKey =
         MuiDialog: {
           styleOverrides: {
             paper: {
-              borderRadius: 18,
+              borderRadius: dialogRadius,
               border: `1px solid ${subtleBorder}`,
               boxShadow: isDark
                 ? '0 24px 60px rgba(0,0,0,0.65)'
@@ -143,7 +170,8 @@ export function buildOpenIAMTheme(mode: PaletteMode, presetKey: ThemePresetKey =
         MuiOutlinedInput: {
           styleOverrides: {
             root: {
-              borderRadius: 10,
+              borderRadius: controlRadius,
+              transition: transitionCSS,
               '&:hover .MuiOutlinedInput-notchedOutline': {
                 borderColor: alpha(primaryMain, 0.5),
               },
@@ -153,7 +181,7 @@ export function buildOpenIAMTheme(mode: PaletteMode, presetKey: ThemePresetKey =
         MuiChip: {
           styleOverrides: {
             root: {
-              borderRadius: 8,
+              borderRadius: chipRadius,
               fontWeight: 500,
             },
           },
@@ -163,7 +191,7 @@ export function buildOpenIAMTheme(mode: PaletteMode, presetKey: ThemePresetKey =
             root: {
               textTransform: 'none',
               fontWeight: 600,
-              minHeight: 46,
+              minHeight: 44,
             },
           },
         },
@@ -171,7 +199,7 @@ export function buildOpenIAMTheme(mode: PaletteMode, presetKey: ThemePresetKey =
           styleOverrides: {
             root: {
               border: `1px solid ${subtleBorder}`,
-              borderRadius: 16,
+              borderRadius: cardRadius,
               backgroundColor: paperBg,
               overflow: 'hidden',
               '--DataGrid-containerBackground': isDark ? '#1B222C' : '#F8FAFC',
@@ -191,6 +219,9 @@ export function buildOpenIAMTheme(mode: PaletteMode, presetKey: ThemePresetKey =
               },
               '& .MuiDataGrid-cell:focus, & .MuiDataGrid-columnHeader:focus': {
                 outline: 'none',
+              },
+              '& .MuiDataGrid-row': {
+                transition: transitionCSS,
               },
               '& .MuiDataGrid-row:hover': {
                 backgroundColor: alpha(primaryMain, isDark ? 0.08 : 0.04),

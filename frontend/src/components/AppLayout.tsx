@@ -17,7 +17,6 @@ import {
   ListItemText,
   Menu,
   MenuItem,
-  Popover,
   Select,
   Stack,
   TextField,
@@ -30,7 +29,6 @@ import {
   Apps as AppsIcon,
   Brightness4 as DarkIcon,
   Brightness7 as LightIcon,
-  Check as CheckIcon,
   Dashboard as DashboardIcon,
   Domain as DomainIcon,
   Gavel as PolicyIcon,
@@ -48,9 +46,11 @@ import {
 } from '@mui/icons-material';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { THEME_PRESETS, ThemePresetKey } from '../theme/theme';
+import { useThemeStore } from '../store/themeStore';
+import { PageTransition } from './PageTransition';
+import { ThemeDrawer } from './ThemeDrawer';
 
-const DRAWER_WIDTH = 248;
+const DRAWER_WIDTH = 244;
 
 interface NavItem {
   label: string;
@@ -61,52 +61,47 @@ interface NavItem {
 
 const navSections: { title: string; items: NavItem[] }[] = [
   {
-    title: '概览',
-    items: [{ label: '安全仪表盘', path: '/', keywords: 'dashboard overview 统计 图表', icon: <DashboardIcon fontSize="small" /> }],
+    title: '总览',
+    items: [{ label: '概览', path: '/', keywords: 'dashboard overview 首页 统计 图表', icon: <DashboardIcon fontSize="small" /> }],
   },
   {
-    title: '身份与访问控制',
+    title: '访问控制',
     items: [
-      { label: '用户管理', path: '/users', keywords: 'users 账号 密码 角色', icon: <PeopleIcon fontSize="small" /> },
-      { label: '域 / 租户管理', path: '/domains', keywords: 'domains tenant 多租户 业务域', icon: <DomainIcon fontSize="small" /> },
-      { label: '角色管理', path: '/roles', keywords: 'roles rbac 权限分配', icon: <RoleIcon fontSize="small" /> },
-      { label: '权限与 Casbin 策略', path: '/permissions', keywords: 'permissions casbin policy tree 权限树', icon: <PolicyIcon fontSize="small" /> },
+      { label: '用户', path: '/users', keywords: 'users 账号 密码 角色', icon: <PeopleIcon fontSize="small" /> },
+      { label: '角色', path: '/roles', keywords: 'roles rbac 角色管理', icon: <RoleIcon fontSize="small" /> },
+      { label: '权限', path: '/permissions', keywords: 'permissions policy tree 权限 策略', icon: <PolicyIcon fontSize="small" /> },
+      { label: '业务域', path: '/domains', keywords: 'domains tenant 多租户 工作空间', icon: <DomainIcon fontSize="small" /> },
     ],
   },
   {
-    title: 'OAuth 联合与开放能力',
+    title: '应用与登录',
     items: [
-      { label: 'OAuth 应用接入', path: '/oauth-apps', keywords: 'oauth client oidc sso 应用', icon: <AppsIcon fontSize="small" /> },
-      { label: '联合登录插件', path: '/identity-providers', keywords: 'idp github google feishu wecom 插件', icon: <ProviderIcon fontSize="small" /> },
+      { label: '应用管理', path: '/oauth-apps', keywords: 'oauth client oidc sso 应用', icon: <AppsIcon fontSize="small" /> },
+      { label: '第三方登录', path: '/identity-providers', keywords: 'idp sso github google feishu wecom 联合登录', icon: <ProviderIcon fontSize="small" /> },
     ],
   },
   {
-    title: '审计与系统运维',
+    title: '系统',
     items: [
-      { label: '安全审计日志', path: '/audit-logs', keywords: 'audit logs 快照 记录', icon: <AuditIcon fontSize="small" /> },
-      { label: '系统设置', path: '/system-settings', keywords: 'settings config jwt ratelimit cors 配置', icon: <SettingsIcon fontSize="small" /> },
-      { label: '版本与数据库升级', path: '/system-version', keywords: 'version migration schema 升级', icon: <VersionIcon fontSize="small" /> },
+      { label: '审计日志', path: '/audit-logs', keywords: 'audit logs 登录记录 变更记录', icon: <AuditIcon fontSize="small" /> },
+      { label: '系统设置', path: '/system-settings', keywords: 'settings config jwt ratelimit cors 设置', icon: <SettingsIcon fontSize="small" /> },
+      { label: '版本信息', path: '/system-version', keywords: 'version migration 数据库 版本', icon: <VersionIcon fontSize="small" /> },
     ],
   },
 ];
 
-interface AppLayoutProps {
-  mode: 'light' | 'dark';
-  preset: ThemePresetKey;
-  onToggleMode: () => void;
-  onChangePreset: (preset: ThemePresetKey) => void;
-}
-
-export const AppLayout: React.FC<AppLayoutProps> = ({ mode, preset, onToggleMode, onChangePreset }) => {
+export const AppLayout: React.FC = () => {
   const theme = useTheme();
+  const toggleColorMode = useThemeStore((s) => s.toggleColorMode);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
-  const [paletteAnchor, setPaletteAnchor] = useState<null | HTMLElement>(null);
+  const [themeDrawerOpen, setThemeDrawerOpen] = useState(false);
   const { user, domains, currentDomain, switchDomain, logout } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
 
   const allNavItems = useMemo(() => navSections.flatMap((s) => s.items), []);
+  const radius = Number(theme.shape.borderRadius);
 
   const handleLogout = async () => {
     setAnchorEl(null);
@@ -123,19 +118,19 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ mode, preset, onToggleMode
         bgcolor: 'background.default',
       }}
     >
-      {/* 品牌区（Cloudreve v4 轻盈无割裂侧栏头部） */}
+      {/* 品牌标识区 */}
       <Box sx={{ px: 2.5, py: 2, display: 'flex', alignItems: 'center', gap: 1.5 }}>
         <Box
           sx={{
-            width: 38,
-            height: 38,
-            borderRadius: 2.5,
+            width: 36,
+            height: 36,
+            borderRadius: `${Math.max(4, radius)}px`,
             background: `linear-gradient(135deg, ${theme.palette.primary.main} 0%, ${theme.palette.secondary.main} 100%)`,
             color: '#fff',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            boxShadow: `0 4px 12px ${alpha(theme.palette.primary.main, 0.3)}`,
+            boxShadow: `0 4px 12px ${alpha(theme.palette.primary.main, 0.28)}`,
           }}
         >
           <ShieldIcon fontSize="small" />
@@ -145,12 +140,12 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ mode, preset, onToggleMode
             OpenIAM
           </Typography>
           <Typography variant="caption" color="text.secondary">
-            OpenRealm 身份控制中心
+            身份与访问管理
           </Typography>
         </Box>
       </Box>
 
-      {/* 导航菜单（柔和胶囊选中态） */}
+      {/* 导航菜单 */}
       <Box sx={{ flex: 1, overflowY: 'auto', px: 1.5, py: 1 }}>
         {navSections.map((sec) => (
           <Box key={sec.title} sx={{ mb: 2 }}>
@@ -173,20 +168,19 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ mode, preset, onToggleMode
                       setMobileOpen(false);
                     }}
                     sx={{
-                      borderRadius: 2.5,
+                      borderRadius: `${radius}px`,
                       mb: 0.4,
-                      py: 0.95,
+                      py: 0.9,
                       px: 1.5,
-                      transition: 'all 0.16s ease',
                       color: selected ? 'primary.main' : 'text.primary',
                       '& .MuiListItemIcon-root': {
                         minWidth: 34,
                         color: selected ? 'primary.main' : 'text.secondary',
                       },
                       '&.Mui-selected': {
-                        bgcolor: alpha(theme.palette.primary.main, mode === 'dark' ? 0.16 : 0.1),
+                        bgcolor: alpha(theme.palette.primary.main, theme.palette.mode === 'dark' ? 0.16 : 0.1),
                         '&:hover': {
-                          bgcolor: alpha(theme.palette.primary.main, mode === 'dark' ? 0.22 : 0.14),
+                          bgcolor: alpha(theme.palette.primary.main, theme.palette.mode === 'dark' ? 0.22 : 0.14),
                         },
                       },
                       '&:hover': {
@@ -210,25 +204,25 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ mode, preset, onToggleMode
         ))}
       </Box>
 
-      {/* 底部状态胶囊 */}
+      {/* 底部域状态 */}
       <Box sx={{ p: 2 }}>
         <Box
           sx={{
-            p: 1.5,
-            borderRadius: 3,
+            p: 1.4,
+            borderRadius: `${radius + 2}px`,
             bgcolor: 'background.paper',
             border: 1,
             borderColor: 'divider',
           }}
         >
           <Typography variant="caption" color="text.secondary" display="block">
-            当前业务域上下文
+            当前业务域
           </Typography>
-          <Stack direction="row" alignItems="center" justifyContent="space-between" mt={0.5}>
+          <Stack direction="row" alignItems="center" justifyContent="space-between" mt={0.4}>
             <Typography variant="body2" fontWeight={700} color="primary.main">
               {currentDomain}
             </Typography>
-            <Chip size="small" label="MUI X" color="primary" variant="outlined" sx={{ height: 20, fontSize: '0.68rem' }} />
+            <Chip size="small" label="已连接" color="success" variant="outlined" sx={{ height: 20, fontSize: '0.68rem' }} />
           </Stack>
         </Box>
       </Box>
@@ -237,7 +231,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ mode, preset, onToggleMode
 
   return (
     <Box sx={{ display: 'flex', minHeight: '100vh', bgcolor: 'background.default' }}>
-      {/* Cloudreve v4 风格毛玻璃顶栏 */}
+      {/* 顶部导航栏 */}
       <AppBar
         position="fixed"
         elevation={0}
@@ -245,18 +239,18 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ mode, preset, onToggleMode
         sx={{
           width: { md: `calc(100% - ${DRAWER_WIDTH}px)` },
           ml: { md: `${DRAWER_WIDTH}px` },
-          bgcolor: alpha(theme.palette.background.default, 0.8),
+          bgcolor: alpha(theme.palette.background.default, 0.82),
           backdropFilter: 'blur(14px)',
           borderBottom: 1,
           borderColor: 'divider',
         }}
       >
-        <Toolbar sx={{ gap: 1.5, minHeight: '62px !important' }}>
+        <Toolbar sx={{ gap: 1.5, minHeight: '60px !important' }}>
           <IconButton edge="start" onClick={() => setMobileOpen(!mobileOpen)} sx={{ display: { md: 'none' } }}>
             <MenuIcon />
           </IconButton>
 
-          {/* 全局快捷搜索框（类 Cloudreve v4 顶部圆角搜索条） */}
+          {/* 全局快捷搜索 */}
           <Autocomplete
             size="small"
             options={allNavItems}
@@ -271,11 +265,11 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ mode, preset, onToggleMode
             onChange={(_, val) => {
               if (val) navigate(val.path);
             }}
-            sx={{ width: { xs: 170, sm: 260, lg: 320 } }}
+            sx={{ width: { xs: 165, sm: 245, lg: 300 } }}
             renderInput={(params) => (
               <TextField
                 {...params}
-                placeholder="快捷搜索功能模块..."
+                placeholder="搜索页面..."
                 InputProps={{
                   ...params.InputProps,
                   startAdornment: (
@@ -286,9 +280,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ mode, preset, onToggleMode
                 }}
                 sx={{
                   '& .MuiOutlinedInput-root': {
-                    borderRadius: 999,
                     bgcolor: 'background.paper',
-                    height: 38,
+                    height: 36,
                   },
                 }}
               />
@@ -296,14 +289,13 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ mode, preset, onToggleMode
           />
 
           {/* 业务域选择器 */}
-          <FormControl size="small" sx={{ minWidth: { xs: 110, sm: 175 } }}>
+          <FormControl size="small" sx={{ minWidth: { xs: 110, sm: 170 } }}>
             <Select
               value={currentDomain}
               onChange={(e) => switchDomain(e.target.value)}
               sx={{
                 fontSize: '0.84rem',
-                height: 38,
-                borderRadius: 999,
+                height: 36,
                 bgcolor: 'background.paper',
               }}
             >
@@ -321,64 +313,26 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ mode, preset, onToggleMode
 
           <Box sx={{ flexGrow: 1 }} />
 
-          {/* Cloudreve 风格主题色调色板 */}
-          <Tooltip title="切换主题色">
-            <IconButton onClick={(e) => setPaletteAnchor(e.currentTarget)} size="small">
+          {/* 外观与主题抽屉触发器 */}
+          <Tooltip title="外观与主题设置">
+            <IconButton onClick={() => setThemeDrawerOpen(true)} size="small">
               <PaletteIcon fontSize="small" color="primary" />
             </IconButton>
           </Tooltip>
-          <Popover
-            open={Boolean(paletteAnchor)}
-            anchorEl={paletteAnchor}
-            onClose={() => setPaletteAnchor(null)}
-            anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-            transformOrigin={{ vertical: 'top', horizontal: 'right' }}
-            PaperProps={{ sx: { p: 2, borderRadius: 3, border: 1, borderColor: 'divider' } }}
-          >
-            <Typography variant="caption" color="text.secondary" fontWeight={700} display="block" mb={1.2}>
-              主题预设配色
-            </Typography>
-            <Stack direction="row" spacing={1}>
-              {THEME_PRESETS.map((p) => {
-                const active = preset === p.key;
-                const swatch = mode === 'dark' ? p.darkMain : p.lightMain;
-                return (
-                  <Tooltip key={p.key} title={p.label}>
-                    <IconButton
-                      size="small"
-                      onClick={() => {
-                        onChangePreset(p.key);
-                        setPaletteAnchor(null);
-                      }}
-                      sx={{
-                        width: 30,
-                        height: 30,
-                        bgcolor: swatch,
-                        color: '#fff',
-                        '&:hover': { bgcolor: swatch, opacity: 0.9 },
-                      }}
-                    >
-                      {active && <CheckIcon sx={{ fontSize: 16 }} />}
-                    </IconButton>
-                  </Tooltip>
-                );
-              })}
-            </Stack>
-          </Popover>
 
-          <Tooltip title={mode === 'light' ? '切换深色模式' : '切换浅色模式'}>
-            <IconButton onClick={onToggleMode} size="small">
-              {mode === 'light' ? <DarkIcon fontSize="small" /> : <LightIcon fontSize="small" />}
+          <Tooltip title={theme.palette.mode === 'light' ? '切换深色模式' : '切换浅色模式'}>
+            <IconButton onClick={() => toggleColorMode(theme.palette.mode)} size="small">
+              {theme.palette.mode === 'light' ? <DarkIcon fontSize="small" /> : <LightIcon fontSize="small" />}
             </IconButton>
           </Tooltip>
 
           <IconButton onClick={(e) => setAnchorEl(e.currentTarget)} sx={{ p: 0.5 }}>
             <Avatar
               sx={{
-                width: 34,
-                height: 34,
+                width: 32,
+                height: 32,
                 bgcolor: 'primary.main',
-                fontSize: '0.875rem',
+                fontSize: '0.85rem',
                 fontWeight: 700,
               }}
             >
@@ -389,7 +343,7 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ mode, preset, onToggleMode
             anchorEl={anchorEl}
             open={Boolean(anchorEl)}
             onClose={() => setAnchorEl(null)}
-            PaperProps={{ sx: { minWidth: 200, borderRadius: 3, border: 1, borderColor: 'divider' } }}
+            PaperProps={{ sx: { minWidth: 200, border: 1, borderColor: 'divider' } }}
           >
             <Box sx={{ px: 2, py: 1.2 }}>
               <Typography variant="subtitle2">{user?.display_name || user?.username}</Typography>
@@ -439,19 +393,23 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ mode, preset, onToggleMode
         </Drawer>
       </Box>
 
-      {/* 主内容区域 */}
+      {/* 主内容区域（带路由过渡动画） */}
       <Box
         component="main"
         sx={{
           flexGrow: 1,
           p: { xs: 2, sm: 3 },
           width: { md: `calc(100% - ${DRAWER_WIDTH}px)` },
-          mt: '62px',
+          mt: '60px',
           maxWidth: '100%',
         }}
       >
-        <Outlet />
+        <PageTransition key={location.pathname}>
+          <Outlet />
+        </PageTransition>
       </Box>
+
+      <ThemeDrawer open={themeDrawerOpen} onClose={() => setThemeDrawerOpen(false)} />
     </Box>
   );
 };

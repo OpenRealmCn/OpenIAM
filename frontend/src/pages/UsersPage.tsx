@@ -217,9 +217,9 @@ export const UsersPage: React.FC = () => {
     <Box>
       <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems="center" mb={2.5} spacing={2}>
         <Box>
-          <Typography variant="h5">用户管理</Typography>
+          <Typography variant="h5">用户</Typography>
           <Typography variant="body2" color="text.secondary">
-            共 {total} 位用户 · 支持按 OpenRealm 业务域分配多角色（变更均记入审计日志）
+            共 {total} 位用户，支持按业务域分配角色
           </Typography>
         </Box>
         <Stack direction="row" spacing={1.5}>
@@ -320,7 +320,7 @@ export const UsersPage: React.FC = () => {
               </Select>
             </FormControl>
 
-            <Typography variant="subtitle2">勾选要授予的角色（Casbin g(user, role, domain)）：</Typography>
+            <Typography variant="subtitle2">选择要授予的角色：</Typography>
             {domainRoles.length === 0 ? (
               <Alert severity="info">该域下暂无自定义角色，可前往“角色管理”创建。</Alert>
             ) : (
@@ -350,7 +350,7 @@ export const UsersPage: React.FC = () => {
         <DialogActions>
           <Button onClick={() => setRoleDialogUser(null)}>取消</Button>
           <Button variant="contained" onClick={handleSaveRoles}>
-            保存并记录审计
+            保存
           </Button>
         </DialogActions>
       </Dialog>

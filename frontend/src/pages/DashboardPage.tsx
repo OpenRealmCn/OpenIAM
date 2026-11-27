@@ -61,37 +61,37 @@ export const DashboardPage: React.FC = () => {
 
   const statCards = [
     {
-      label: '平台用户',
+      label: '用户',
       value: dashboard?.counts.users ?? '-',
-      sub: '已注册身份主体',
+      sub: '已注册账号',
       color: theme.palette.primary.main,
       icon: <PeopleIcon />,
     },
     {
-      label: '业务域 / 租户',
+      label: '业务域',
       value: dashboard?.counts.domains ?? '-',
-      sub: '多域策略隔离',
+      sub: '独立权限空间',
       color: theme.palette.secondary.main,
       icon: <DomainIcon />,
     },
     {
-      label: 'RBAC 角色',
+      label: '角色',
       value: dashboard?.counts.roles ?? '-',
-      sub: `${dashboard?.counts.permissions ?? 0} 个权限点`,
+      sub: `${dashboard?.counts.permissions ?? 0} 项权限`,
       color: theme.palette.success.main,
       icon: <RoleIcon />,
     },
     {
-      label: 'OAuth 接入应用',
+      label: '接入应用',
       value: dashboard?.counts.oauth_clients ?? '-',
-      sub: `${dashboard?.counts.active_providers ?? 0} 个联合登录源`,
+      sub: `${dashboard?.counts.active_providers ?? 0} 个第三方登录`,
       color: theme.palette.warning.main,
       icon: <AppsIcon />,
     },
     {
-      label: '安全审计记录',
+      label: '审计日志',
       value: dashboard?.counts.audit_logs ?? '-',
-      sub: '登录与 RBAC 快照',
+      sub: '累计记录数',
       color: theme.palette.info.main,
       icon: <AuditIcon />,
     },
@@ -108,9 +108,9 @@ export const DashboardPage: React.FC = () => {
     <Box>
       <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} mb={3} spacing={1}>
         <Box>
-          <Typography variant="h5">安全仪表盘</Typography>
+          <Typography variant="h5">概览</Typography>
           <Typography variant="body2" color="text.secondary" mt={0.3}>
-            OpenRealm 私有身份中心运行态势、多域 RBAC 与审计趋势概览
+            账号、权限与登录活动统计
           </Typography>
         </Box>
         {dashboard?.version && (
@@ -118,7 +118,7 @@ export const DashboardPage: React.FC = () => {
             icon={<VersionIcon />}
             color={dashboard.version.up_to_date ? 'success' : 'warning'}
             variant="outlined"
-            label={`OpenIAM v${dashboard.version.app_version} · Schema v${dashboard.version.current_schema_version}`}
+            label={`v${dashboard.version.app_version} · DB v${dashboard.version.current_schema_version}`}
           />
         )}
       </Stack>
@@ -129,7 +129,7 @@ export const DashboardPage: React.FC = () => {
         </Alert>
       )}
 
-      {/* Cloudreve v4 风格现代概览卡片 */}
+      {/* 核心指标概览 */}
       <Grid container spacing={2} mb={3}>
         {statCards.map((item) => (
           <Grid key={item.label} size={{ xs: 12, sm: 6, md: 2.4 }}>
@@ -179,9 +179,9 @@ export const DashboardPage: React.FC = () => {
         <Grid size={{ xs: 12, lg: 8 }}>
           <Card sx={{ height: '100%' }}>
             <CardContent sx={{ p: 2.8 }}>
-              <Typography variant="h6">近 7 日认证与 RBAC 审计事件分布</Typography>
+              <Typography variant="h6">近 7 天活动统计</Typography>
               <Typography variant="caption" color="text.secondary" display="block" mb={2}>
-                由 MUI X Charts 实时渲染 · 包含账密/OAuth 认证、角色/权限变更及失败拦截
+                登录认证、权限变更及失败拦截趋势
               </Typography>
               {dailyStats.length > 0 ? (
                 <BarChart
@@ -204,9 +204,9 @@ export const DashboardPage: React.FC = () => {
         <Grid size={{ xs: 12, lg: 4 }}>
           <Card sx={{ height: '100%' }}>
             <CardContent sx={{ p: 2.8 }}>
-              <Typography variant="h6">平台身份资源构成</Typography>
+              <Typography variant="h6">资源分布</Typography>
               <Typography variant="caption" color="text.secondary" display="block" mb={1.5}>
-                用户、角色、权限点与 OAuth 应用占比
+                用户、角色、权限与应用数量占比
               </Typography>
               {pieData.length > 0 ? (
                 <PieChart

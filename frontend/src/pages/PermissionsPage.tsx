@@ -68,7 +68,7 @@ export const PermissionsPage: React.FC = () => {
     setCheckForm((prev) => ({ ...prev, domain: currentDomain }));
   }, [loadData, currentDomain]);
 
-  // 按角色分组构建 MUI X TreeView 数据结构（域 -> 角色 -> Casbin 策略）
+  // 按角色分组构建权限拓扑树（域 -> 角色 -> 访问策略）
   const rolePolicyTree = useMemo(() => {
     const grouped: Record<string, PolicyRule[]> = {};
     for (const rule of policies) {
@@ -158,13 +158,13 @@ export const PermissionsPage: React.FC = () => {
     <Box>
       <Stack direction="row" justifyContent="space-between" alignItems="center" mb={2.5}>
         <Box>
-          <Typography variant="h5">权限点目录与 Casbin 策略 ({currentDomain})</Typography>
+          <Typography variant="h5">权限 ({currentDomain})</Typography>
           <Typography variant="body2" color="text.secondary">
-            基于 Casbin RBAC with Domains 模型实时校验，并通过 MUI X TreeView & DataGrid 可视化呈现
+            配置权限项、查看角色授权关系并测试权限
           </Typography>
         </Box>
         <Button variant="contained" startIcon={<AddIcon />} onClick={() => setCreateOpen(true)}>
-          新增权限点
+          新建权限
         </Button>
       </Stack>
 
@@ -178,7 +178,7 @@ export const PermissionsPage: React.FC = () => {
       <Card sx={{ mb: 2.5 }}>
         <CardContent>
           <Typography variant="subtitle1" fontWeight={600} mb={1.5}>
-            Casbin 实时权限仿真校验
+            权限测试
           </Typography>
           <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems="center">
             <TextField
@@ -210,7 +210,7 @@ export const PermissionsPage: React.FC = () => {
               sx={{ width: { xs: '100%', md: 140 } }}
             />
             <Button variant="contained" startIcon={<CheckIcon />} onClick={handleCheck}>
-              执行校验
+              测试
             </Button>
             {checkResult && (
               <Chip
@@ -226,18 +226,18 @@ export const PermissionsPage: React.FC = () => {
         </CardContent>
       </Card>
 
-      {/* MUI X TreeView 多域 RBAC 权限层级树 */}
+      {/* 多域 RBAC 权限层级树 */}
       <Card sx={{ mb: 2.5 }}>
         <CardContent>
           <Stack direction="row" spacing={1} alignItems="center" mb={1.5}>
             <TreeIcon color="primary" fontSize="small" />
             <Typography variant="subtitle1" fontWeight={600}>
-              域权限拓扑树（MUI X Tree View）
+              权限树
             </Typography>
           </Stack>
           {rolePolicyTree.length === 0 ? (
             <Typography variant="body2" color="text.secondary">
-              当前域暂无已绑定的 Casbin 策略。
+              当前域暂无已绑定的访问策略。
             </Typography>
           ) : (
             <SimpleTreeView defaultExpandedItems={[`domain:${currentDomain}`, ...rolePolicyTree.slice(0, 2).map(([r]) => `role:${r}`)]}>
@@ -266,7 +266,7 @@ export const PermissionsPage: React.FC = () => {
       <Grid container spacing={2.5}>
         <Grid size={{ xs: 12, lg: 6 }}>
           <Typography variant="subtitle1" fontWeight={600} mb={1}>
-            权限点目录
+            权限列表
           </Typography>
           <Box sx={{ height: 440 }}>
             <DataGrid
@@ -281,7 +281,7 @@ export const PermissionsPage: React.FC = () => {
         </Grid>
         <Grid size={{ xs: 12, lg: 6 }}>
           <Typography variant="subtitle1" fontWeight={600} mb={1}>
-            生效中的 Casbin 策略 (casbin_rule)
+            角色授权策略
           </Typography>
           <Box sx={{ height: 440 }}>
             <DataGrid

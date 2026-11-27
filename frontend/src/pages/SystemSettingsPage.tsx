@@ -107,7 +107,7 @@ export const SystemSettingsPage: React.FC = () => {
         nextDraft[s.setting_key] = s.value;
       }
       setDraft(nextDraft);
-      setSuccess(`已成功保存 ${Object.keys(changed).length} 项配置至数据库并热生效（已记入审计日志）`);
+      setSuccess(`已保存 ${Object.keys(changed).length} 项系统设置并立即生效`);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -131,7 +131,7 @@ export const SystemSettingsPage: React.FC = () => {
             {dirtyCount > 0 && <Chip size="small" color="warning" label={`${dirtyCount} 项未保存`} />}
           </Stack>
           <Typography variant="body2" color="text.secondary" mt={0.5}>
-            所有配置均持久化存储在 MySQL system_settings 表中，保存后立即热生效，本地仅需配置数据库与 Redis 地址
+            调整安全策略、登录限制与 OAuth 参数，保存后立即生效
           </Typography>
         </Box>
         <Stack direction="row" spacing={1.5}>
@@ -144,7 +144,7 @@ export const SystemSettingsPage: React.FC = () => {
             onClick={handleSave}
             disabled={loading || saving || dirtyCount === 0}
           >
-            {saving ? '保存中...' : '保存并热生效'}
+            {saving ? '保存中...' : '保存更改'}
           </Button>
         </Stack>
       </Stack>

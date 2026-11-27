@@ -106,7 +106,7 @@ export const RolesPage: React.FC = () => {
     { field: 'name', headerName: '角色名称', width: 160 },
     {
       field: 'permissions',
-      headerName: '关联 Casbin 策略数',
+      headerName: '关联策略数',
       width: 170,
       renderCell: (p) => <Chip size="small" label={`${(p.row.permissions || []).length} 条策略`} color="primary" variant="outlined" />,
     },
@@ -142,9 +142,9 @@ export const RolesPage: React.FC = () => {
     <Box>
       <Stack direction="row" justifyContent="space-between" alignItems="center" mb={2.5}>
         <Box>
-          <Typography variant="h5">角色管理 ({currentDomain})</Typography>
+          <Typography variant="h5">角色 ({currentDomain})</Typography>
           <Typography variant="body2" color="text.secondary">
-            管理域内角色并配置 Casbin 权限策略，每次权限变更均会生成前后状态审计快照
+            管理角色与对应权限，变更自动记入审计日志
           </Typography>
         </Box>
         <Button variant="contained" startIcon={<AddIcon />} onClick={() => setCreateOpen(true)}>
@@ -271,7 +271,7 @@ export const RolesPage: React.FC = () => {
         <DialogActions>
           <Button onClick={() => setEditingRole(null)}>取消</Button>
           <Button variant="contained" onClick={handleSavePermissions}>
-            保存策略并记录审计
+            保存
           </Button>
         </DialogActions>
       </Dialog>

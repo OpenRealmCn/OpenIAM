@@ -98,9 +98,9 @@ export const DomainsPage: React.FC = () => {
     <Box>
       <Stack direction="row" justifyContent="space-between" alignItems="center" mb={2.5}>
         <Box>
-          <Typography variant="h5">OpenRealm 域 / 租户管理</Typography>
+          <Typography variant="h5">业务域</Typography>
           <Typography variant="body2" color="text.secondary">
-            每个 OpenRealm 子应用或租户拥有独立的 Casbin 角色与权限策略隔离空间
+            按业务系统或团队隔离角色与权限
           </Typography>
         </Box>
         <Button variant="contained" startIcon={<AddIcon />} onClick={() => setOpen(true)}>

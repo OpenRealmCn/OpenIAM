@@ -145,10 +145,10 @@ export const IdentityProvidersPage: React.FC = () => {
   return (
     <Box>
       <Typography variant="h5" mb={0.5}>
-        OAuth 联合登录插件中心
+        第三方登录
       </Typography>
       <Typography variant="body2" color="text.secondary" mb={3}>
-        基于 Go OAuthProviderPlugin 插件接口注册外部身份源，支持动态表单配置与自动建号
+        配置 GitHub、Google、飞书、企业微信或通用 OIDC 登录方式
       </Typography>
 
       {error && (
@@ -158,7 +158,7 @@ export const IdentityProvidersPage: React.FC = () => {
       )}
 
       <Typography variant="subtitle1" fontWeight={600} mb={1.5}>
-        已配置的联合登录实例 ({providers.length})
+        已配置的登录方式 ({providers.length})
       </Typography>
       <Grid container spacing={2} mb={4}>
         {providers.length === 0 ? (
@@ -201,7 +201,7 @@ export const IdentityProvidersPage: React.FC = () => {
       </Grid>
 
       <Typography variant="subtitle1" fontWeight={600} mb={1.5}>
-        已注册插件适配器 ({plugins.length})
+        添加登录方式 ({plugins.length})
       </Typography>
       <Grid container spacing={2}>
         {plugins.map((plug) => (
@@ -217,7 +217,7 @@ export const IdentityProvidersPage: React.FC = () => {
                 <Typography variant="body2" color="text.secondary" mb={1.5}>
                   {plug.description}
                 </Typography>
-                <Chip size="small" variant="outlined" label={`插件类型: ${plug.type}`} />
+                <Chip size="small" variant="outlined" label={`类型: ${plug.type}`} />
               </CardContent>
               <CardActions>
                 <Button size="small" startIcon={<AddIcon />} onClick={() => openCreateForPlugin(plug)}>

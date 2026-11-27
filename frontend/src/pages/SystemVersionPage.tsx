@@ -48,10 +48,10 @@ export const SystemVersionPage: React.FC = () => {
   return (
     <Box>
       <Typography variant="h5" mb={0.5}>
-        数据库版本检查与迁移历史
+        版本信息
       </Typography>
       <Typography variant="body2" color="text.secondary" mb={3}>
-        基于 golang-migrate 内嵌 SQL 版本管理，每次启动自动执行版本比对并持久化记录
+        查看系统版本与数据库升级记录
       </Typography>
 
       {error && (
@@ -66,7 +66,7 @@ export const SystemVersionPage: React.FC = () => {
             <Card>
               <CardContent>
                 <Typography variant="caption" color="text.secondary">
-                  OpenIAM 程序版本
+                  系统版本
                 </Typography>
                 <Typography variant="h5" mt={0.5}>
                   v{status.app_version}
@@ -78,7 +78,7 @@ export const SystemVersionPage: React.FC = () => {
             <Card>
               <CardContent>
                 <Typography variant="caption" color="text.secondary">
-                  当前数据库 Schema
+                  当前数据库版本
                 </Typography>
                 <Typography variant="h5" mt={0.5}>
                   v{status.current_schema_version}
@@ -90,7 +90,7 @@ export const SystemVersionPage: React.FC = () => {
             <Card>
               <CardContent>
                 <Typography variant="caption" color="text.secondary">
-                  程序期望 Schema
+                  目标数据库版本
                 </Typography>
                 <Typography variant="h5" mt={0.5}>
                   v{status.expected_schema_version}

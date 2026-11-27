@@ -111,10 +111,10 @@ export const AuditLogsPage: React.FC = () => {
     <LocalizationProvider dateAdapter={AdapterDayjs} adapterLocale="zh-cn">
       <Box>
         <Typography variant="h5" mb={0.5}>
-          安全审计日志
+          审计日志
         </Typography>
         <Typography variant="body2" color="text.secondary" mb={2.5}>
-          全量追踪认证事件（账密/OAuth/授权审批）及用户、角色、权限、策略管理操作前后状态快照（共 {total} 条）
+          查看登录记录与用户、角色、权限变更历史（共 {total} 条）
         </Typography>
 
         {error && (

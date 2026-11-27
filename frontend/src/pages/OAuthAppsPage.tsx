@@ -39,7 +39,7 @@ export const OAuthAppsPage: React.FC = () => {
   const [form, setForm] = useState({
     name: '',
     description: '',
-    redirect_uris_text: 'http://localhost:3000/callback',
+    redirect_uris_text: '',
     scopes_text: 'openid profile email',
     require_pkce: true,
     is_confidential: true,
@@ -173,13 +173,13 @@ export const OAuthAppsPage: React.FC = () => {
     <Box>
       <Stack direction="row" justifyContent="space-between" alignItems="center" mb={2.5}>
         <Box>
-          <Typography variant="h5">OpenIAM OAuth 2.0 / OIDC 应用接入</Typography>
+          <Typography variant="h5">应用管理</Typography>
           <Typography variant="body2" color="text.secondary">
-            创建并管理接入 OpenIAM 授权服务端的子系统与第三方应用
+            创建 OAuth 2.0 / OIDC 应用，让外部系统接入 OpenIAM 登录
           </Typography>
         </Box>
         <Button variant="contained" startIcon={<AddIcon />} onClick={() => setCreateOpen(true)}>
-          创建 OAuth 应用
+          创建应用
         </Button>
       </Stack>
 
@@ -235,6 +235,7 @@ export const OAuthAppsPage: React.FC = () => {
             />
             <TextField
               label="回调地址白名单（每行一个 URL）"
+              placeholder="https://app.example.com/callback"
               size="small"
               multiline
               rows={3}

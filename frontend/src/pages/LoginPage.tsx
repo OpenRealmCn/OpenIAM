@@ -105,7 +105,6 @@ export const LoginPage: React.FC = () => {
         sx={{
           width: '100%',
           maxWidth: 430,
-          borderRadius: 4,
           bgcolor: alpha(theme.palette.background.paper, 0.92),
           backdropFilter: 'blur(16px)',
           boxShadow:
@@ -248,7 +247,7 @@ export const LoginPage: React.FC = () => {
           )}
 
           <Typography variant="caption" color="text.secondary" display="block" textAlign="center" mt={2.5}>
-            默认初始管理员: admin / Admin@123456
+            © {new Date().getFullYear()} OpenRealm · OpenIAM
           </Typography>
         </CardContent>
       </Card>
