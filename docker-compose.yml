@@ -42,6 +42,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        GOPROXY: "${OPENIAM_GOPROXY:-https://goproxy.cn,direct}"
     container_name: openiam-backend
     restart: unless-stopped
     expose:
@@ -69,6 +71,8 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        NPM_REGISTRY: "${OPENIAM_NPM_REGISTRY:-https://registry.npmmirror.com}"
     container_name: openiam-frontend
     restart: unless-stopped
     depends_on:
