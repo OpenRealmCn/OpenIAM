@@ -17,6 +17,11 @@ export default defineConfig(({ mode }) => {
         '/oauth2': {
           target: backendTarget,
           changeOrigin: true,
+          bypass(req) {
+            if (req.url?.startsWith('/oauth2/consent')) {
+              return '/index.html';
+            }
+          },
         },
         '/.well-known': {
           target: backendTarget,
