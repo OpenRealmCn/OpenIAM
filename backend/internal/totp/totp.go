@@ -70,18 +70,26 @@ func GenerateCode(secret string, at time.Time) (string, error) {
 
 // VerifyCode 校验 TOTP 动态口令（容许前后各 1 个 30 秒时间窗口漂移）。
 func VerifyCode(secret, code string, now time.Time) bool {
+	_, ok := VerifyCodeStep(secret, code, now)
+	return ok
+}
+
+// VerifyCodeStep 的判定与 VerifyCode 一致，但额外返回命中的时间步（Unix 秒 / 30）。
+// 调用方必须把该时间步与「已用过的最大时间步」比较并前移水位：同一串动态码在其
+// 有效的 90 秒窗口内可以被重复提交，只有记录用过的步长才能挡住重放。
+func VerifyCodeStep(secret, code string, now time.Time) (int64, bool) {
 	code = strings.TrimSpace(code)
 	if len(code) != DefaultDigits {
-		return false
+		return 0, false
 	}
 	for _, offset := range []int64{-1, 0, 1} {
 		t := now.Add(time.Duration(offset*DefaultPeriod) * time.Second)
 		expected, err := GenerateCode(secret, t)
 		if err == nil && subtle.ConstantTimeCompare([]byte(expected), []byte(code)) == 1 {
-			return true
+			return t.Unix() / DefaultPeriod, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 // GenerateRecoveryCodes 生成 10 组 8 位一次性备用恢复码以及其 SHA-256 哈希数组。

@@ -2,6 +2,8 @@ package settings
 
 import (
 	"fmt"
+	"log"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/openrealm/openiam/internal/clientip"
 	"github.com/openrealm/openiam/internal/models"
+	"github.com/openrealm/openiam/internal/security"
 	"github.com/ulule/limiter/v3"
 	"gorm.io/gorm"
 )
@@ -35,10 +38,20 @@ const (
 
 	KeyOAuthPluginCallbackBaseURL = "oauth_plugin.callback_base_url"
 
+
+
 	KeyServerCORSAllowOrigins     = "server.cors_allow_origins"
 	KeyServerClientIPMethod       = "server.client_ip_method"
 	KeyServerClientIPCustomHeader = "server.client_ip_custom_header"
 	KeyServerTrustedProxies       = "server.trusted_proxies"
+	KeyEnvironment                = "server.environment"
+
+	// 通行密钥（WebAuthn）：RP ID 与允许来源只来自服务端配置，绝不采信请求头里的 Origin，
+	// 也不再拿 Host 兜底。
+	KeyWebAuthnRPID           = "webauthn.rp_id"
+	KeyWebAuthnAllowedOrigins = "webauthn.allowed_origins"
+
+
 
 	// 站点品牌与首页公告
 	KeySiteName                = "site.name"
@@ -61,6 +74,8 @@ const (
 	KeySMTPFromEmail  = "smtp.from_email"
 	KeySMTPEncryption = "smtp.encryption"
 
+
+
 	// 验证码频控、成本与降级
 	KeyOTPCooldownSeconds     = "otp.cooldown_seconds"
 	KeyOTPMaxPerHourTarget    = "otp.max_per_hour_target"
@@ -81,6 +96,12 @@ const (
 	KeyCaptchaProtectLogin    = "captcha.protect_login"
 	KeyCaptchaProtectRegister = "captcha.protect_register"
 	KeyCaptchaProtectOTP      = "captcha.protect_otp"
+
+
+	// KeySMTPAllowInsecurePlaintext 只有显式开启、且非生产环境时，才允许 SMTP 明文发送。
+	KeySMTPAllowInsecurePlaintext = "smtp.allow_insecure_plaintext"
+
+
 )
 
 // RuntimeSettings 为从数据库加载并缓存在内存中的强类型运行时配置快照。
@@ -106,10 +127,17 @@ type RuntimeSettings struct {
 
 	OAuthPluginCallbackBaseURL string
 
+
+
 	CORSAllowOrigins     []string
 	ClientIPMethod       string
 	ClientIPCustomHeader string
 	TrustedProxies       []string
+
+	WebAuthnRPID           string
+	WebAuthnAllowedOrigins []string
+
+
 
 	SiteName                string
 	SiteSubtitle            string
@@ -130,6 +158,8 @@ type RuntimeSettings struct {
 	SMTPFromEmail  string
 	SMTPEncryption string
 
+
+
 	OTPCooldownSeconds     int
 	OTPMaxPerHourTarget    int
 	OTPMaxPerIPHour        int
@@ -147,6 +177,15 @@ type RuntimeSettings struct {
 	CaptchaProtectLogin    bool
 	CaptchaProtectRegister bool
 	CaptchaProtectOTP      bool
+
+
+
+	SMTPAllowInsecurePlaintext bool
+
+	// Environment 取值为 production / staging / development，用于判断能否启用不安全选项。
+	Environment string
+
+
 }
 
 type settingSpec struct {
@@ -294,6 +333,38 @@ var defaultSpecs = []settingSpec{
 		ValueType:   "string_list",
 		Label:       "允许跨域来源（CORS）",
 		Description: "允许访问平台接口的前端域名列表，多个地址以英文逗号分隔。",
+	},
+	{
+		Key:         KeyWebAuthnRPID,
+		Category:    "webauthn",
+		DefaultVal:  "localhost",
+		ValueType:   "string",
+		Label:       "通行密钥 RP ID",
+		Description: "WebAuthn 依赖方标识（写入通行密钥的域名，通常是主域名，例如 example.com）。",
+	},
+	{
+		Key:         KeyWebAuthnAllowedOrigins,
+		Category:    "webauthn",
+		DefaultVal:  "http://localhost:5173",
+		ValueType:   "string_list",
+		Label:       "通行密钥允许来源",
+		Description: "允许注册与使用通行密钥的来源白名单，多个地址以英文逗号分隔；不在名单内的请求一律拒绝。",
+	},
+	{
+		Key:         KeySMTPAllowInsecurePlaintext,
+		Category:    "smtp",
+		DefaultVal:  "false",
+		ValueType:   "bool",
+		Label:       "允许 SMTP 明文发送（仅限非生产环境）",
+		Description: "默认关闭。关闭时若服务器不提供 STARTTLS，发信会直接失败而不是降级成明文。",
+	},
+	{
+		Key:         KeyEnvironment,
+		Category:    "server",
+		DefaultVal:  "production",
+		ValueType:   "string",
+		Label:       "运行环境",
+		Description: "production / staging / development。非 production 才允许开启不安全选项（如 SMTP 明文）。",
 	},
 	{
 		Key:         KeyServerClientIPMethod,
@@ -643,6 +714,14 @@ func (s *Service) Reload() error {
 	for _, r := range rows {
 		kv[r.SettingKey] = r.Value
 	}
+	// 库里的 SMTP 授权码是 AES-GCM 密文：读取时解密；历史上未加密的明文按原样使用，便于平滑升级。
+	if raw := strings.TrimSpace(kv[KeySMTPPassword]); raw != "" {
+		plain, decErr := s.secretCipher().Decrypt(raw)
+		if decErr != nil {
+			return fmt.Errorf("解密 SMTP 授权码失败: %w", decErr)
+		}
+		kv[KeySMTPPassword] = plain
+	}
 
 	snap := RuntimeSettings{
 		MaxLoginFailures:              parseInt(kv[KeySecurityMaxLoginFailures], 5),
@@ -662,9 +741,17 @@ func (s *Service) Reload() error {
 		OAuthServerRefreshTokenTTL:    time.Duration(parseInt(kv[KeyOAuthServerRefreshTokenTTLHours], 720)) * time.Hour,
 		OAuthPluginCallbackBaseURL:    fallbackStr(kv[KeyOAuthPluginCallbackBaseURL], "http://localhost:5173/oauth/callback"),
 		CORSAllowOrigins:              splitCSV(fallbackStr(kv[KeyServerCORSAllowOrigins], "http://localhost:5173,http://127.0.0.1:5173")),
+
+
 		ClientIPMethod:                clientip.NormalizeMethod(fallbackStr(kv[KeyServerClientIPMethod], clientip.MethodXForwardedFor)),
 		ClientIPCustomHeader:          strings.TrimSpace(kv[KeyServerClientIPCustomHeader]),
 		TrustedProxies:                splitCSV(fallbackStr(kv[KeyServerTrustedProxies], strings.Join(clientip.DefaultTrustedProxies, ","))),
+
+
+		WebAuthnRPID:                  strings.TrimSpace(kv[KeyWebAuthnRPID]),
+		WebAuthnAllowedOrigins:        splitCSV(kv[KeyWebAuthnAllowedOrigins]),
+
+
 		SiteName:                      fallbackStr(kv[KeySiteName], "OpenIAM"),
 		SiteSubtitle:                  strings.TrimSpace(kv[KeySiteSubtitle]),
 		SiteLogoURL:                   fallbackStr(kv[KeySiteLogoURL], "/logo.png"),
@@ -682,6 +769,8 @@ func (s *Service) Reload() error {
 		SMTPFromName:                  fallbackStr(kv[KeySMTPFromName], "OpenIAM"),
 		SMTPFromEmail:                 strings.TrimSpace(kv[KeySMTPFromEmail]),
 		SMTPEncryption:                fallbackStr(kv[KeySMTPEncryption], "starttls"),
+
+
 		OTPCooldownSeconds:            parseInt(kv[KeyOTPCooldownSeconds], 60),
 		OTPMaxPerHourTarget:           parseInt(kv[KeyOTPMaxPerHourTarget], 5),
 		OTPMaxPerIPHour:               parseInt(kv[KeyOTPMaxPerIPHour], 20),
@@ -697,6 +786,12 @@ func (s *Service) Reload() error {
 		CaptchaProtectLogin:           parseBool(kv[KeyCaptchaProtectLogin], false),
 		CaptchaProtectRegister:        parseBool(kv[KeyCaptchaProtectRegister], false),
 		CaptchaProtectOTP:             parseBool(kv[KeyCaptchaProtectOTP], false),
+
+
+		SMTPAllowInsecurePlaintext:    parseBool(kv[KeySMTPAllowInsecurePlaintext], false),
+		Environment:                   fallbackStr(kv[KeyEnvironment], "production"),
+
+
 	}
 
 	s.mu.Lock()
@@ -769,6 +864,15 @@ func (s *Service) UpdateBatch(updates map[string]string, actorID uint64) (before
 			} else {
 				before[k] = item.Value
 				after[k] = normVal
+			}
+			if IsSecretKey(k) {
+				// 敏感凭据加密后落库，库里不再保存明文；接口层仍按脱敏规则返回。
+				enc, encErr := s.secretCipher().Encrypt(normVal)
+				if encErr != nil {
+					return nil, nil, fmt.Errorf("加密设置项 %s 失败: %w", k, encErr)
+				}
+				validated[k] = enc
+				continue
 			}
 			validated[k] = normVal
 		}
@@ -882,4 +986,24 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+// secretCipher 返回用于加密敏感设置项（目前是 SMTP 授权码）的 AES-256-GCM 加密器。
+// 密钥优先取 OPENIAM_ENCRYPTION_KEY，其次复用现成的 OPENIAM_JWT_SECRET；两者都没有时用兜底常量，
+// 兜底常量只能保证「库里不是明文」，生产部署必须显式配置密钥。
+func (s *Service) secretCipher() *security.SecretCipher {
+	material := strings.TrimSpace(os.Getenv("OPENIAM_ENCRYPTION_KEY"))
+	if material == "" {
+		material = strings.TrimSpace(os.Getenv("OPENIAM_JWT_SECRET"))
+	}
+	if material == "" {
+		log.Printf("[settings] 未配置 OPENIAM_ENCRYPTION_KEY / OPENIAM_JWT_SECRET，敏感设置使用兜底密钥加密，生产环境必须显式配置")
+		material = "openiam-default-setting-encryption-key"
+	}
+	c, err := security.NewSecretCipher([]byte(material))
+	if err != nil {
+		log.Printf("[settings] 初始化敏感设置加密器失败: %v", err)
+		return nil
+	}
+	return c
 }

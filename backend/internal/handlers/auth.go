@@ -399,6 +399,12 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 		Fail(c, http.StatusUnauthorized, "用户不存在或已被禁用")
 		return
 	}
+	// 库里的「凭据有效起点」是权威判定：改密 / 重置之后，此前签发的 refresh token 一律失效，
+	// 即使 Redis 里的失效时间点已经丢失（重启、淘汰）也不能放行。
+	if tokensRevokedAfter(user, rec.IssuedAt) {
+		Fail(c, http.StatusUnauthorized, "Refresh Token 已失效，请重新登录")
+		return
+	}
 	if user.MustChangePassword {
 		// 强制改密期间不允许续期会话，必须重新登录并先完成改密。
 		c.JSON(http.StatusForbidden, gin.H{
@@ -578,10 +584,12 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		Fail(c, http.StatusInternalServerError, "密码加密失败")
 		return
 	}
-	// 改密成功即清除强制改密标记，并在下方吊销该用户此前签发的所有会话。
+	// 改密成功即清除强制改密标记，并把「凭据有效起点」推到当前时刻：
+	// 凭据有效起点与口令哈希在同一条 UPDATE 里落库，旧刷新令牌从这一刻起再也换不出新令牌。
 	if err := h.db.Model(&user).Updates(map[string]interface{}{
 		"password_hash":        hash,
 		"must_change_password": false,
+		"tokens_valid_after":   time.Now().UnixMilli(),
 	}).Error; err != nil {
 		Fail(c, http.StatusInternalServerError, "修改密码失败")
 		return
@@ -778,8 +786,21 @@ func (h *AuthHandler) VerifyMFA(c *gin.Context) {
 			Fail(c, http.StatusBadRequest, "未启用 TOTP 验证器")
 			return
 		}
-		if !totp.VerifyCode(row.Secret, code, time.Now()) {
+		step, stepOK := totp.VerifyCodeStep(row.Secret, code, time.Now())
+		if !stepOK {
 			h.mfaFailed(c, req.MFAToken, user.ID, "验证器动态码不正确")
+			return
+		}
+		// 同一时间步的动态码只能用一次：把水位原子前移，重放同一串码时 0 行受影响直接拒绝。
+		res := h.db.Model(&models.UserTOTP{}).
+			Where("user_id = ? AND last_used_step < ?", row.UserID, step).
+			Update("last_used_step", step)
+		if res.Error != nil {
+			Fail(c, http.StatusInternalServerError, "二步验证状态异常，请稍后再试")
+			return
+		}
+		if res.RowsAffected == 0 {
+			h.mfaFailed(c, req.MFAToken, user.ID, "该动态码已被使用，请等待下一个口令")
 			return
 		}
 	case "recovery_code":

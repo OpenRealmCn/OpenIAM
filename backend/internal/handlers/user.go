@@ -254,7 +254,7 @@ func (h *UserHandler) Update(c *gin.Context) {
 		Status:       "success",
 	})
 	if before.Status == "active" && user.Status != "active" {
-		if err := h.stateStore.RevokeUserTokens(c.Request.Context(), user.ID); err != nil {
+		if err := revokeUserSessions(c.Request.Context(), h.db, h.stateStore, user.ID); err != nil {
 			Fail(c, http.StatusInternalServerError, "用户已禁用，但撤销旧会话失败，请重试")
 			return
 		}
@@ -379,7 +379,7 @@ func (h *UserHandler) ResetPassword(c *gin.Context) {
 		After:        map[string]interface{}{"username": user.Username},
 		Status:       "success",
 	})
-	if err := h.stateStore.RevokeUserTokens(c.Request.Context(), user.ID); err != nil {
+	if err := revokeUserSessions(c.Request.Context(), h.db, h.stateStore, user.ID); err != nil {
 		Fail(c, http.StatusInternalServerError, "密码已重置，但撤销旧会话失败，请重试")
 		return
 	}
