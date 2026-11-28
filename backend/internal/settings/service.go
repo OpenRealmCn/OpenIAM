@@ -44,10 +44,7 @@ const (
 	KeyServerClientIPMethod       = "server.client_ip_method"
 	KeyServerClientIPCustomHeader = "server.client_ip_custom_header"
 	KeyServerTrustedProxies       = "server.trusted_proxies"
-
-
-	KeyServerCORSAllowOrigins = "server.cors_allow_origins"
-	KeyEnvironment            = "server.environment"
+	KeyEnvironment                = "server.environment"
 
 	// 通行密钥（WebAuthn）：RP ID 与允许来源只来自服务端配置，绝不采信请求头里的 Origin，
 	// 也不再拿 Host 兜底。
@@ -136,9 +133,6 @@ type RuntimeSettings struct {
 	ClientIPMethod       string
 	ClientIPCustomHeader string
 	TrustedProxies       []string
-
-
-	CORSAllowOrigins []string
 
 	WebAuthnRPID           string
 	WebAuthnAllowedOrigins []string
