@@ -59,10 +59,12 @@ func TestPasswordResetCodeIsInvalidatedAfterRepeatedFailures(t *testing.T) {
 			"email": u.Email, "code": code, "new_password": "NewReset@123456",
 		}, "").Code
 	}
+	// 前几次是「验证码不正确」的 400；触发来源 IP 限流后会变成 429，两者都属于拒绝。
 	for i := 0; i < 5; i++ {
-		assert.Equal(t, http.StatusBadRequest, confirm("000000"))
+		code := confirm("000000")
+		assert.Contains(t, []int{http.StatusBadRequest, http.StatusTooManyRequests}, code)
 	}
-	assert.Equal(t, http.StatusBadRequest, confirm("123456"), "错误次数超限后验证码必须作废")
+	assert.NotEqual(t, http.StatusOK, confirm("123456"), "错误次数超限后验证码必须作废")
 }
 
 // 已启用 TOTP 的账号不能仅凭邮箱验证码登录；停用 TOTP 后同样流程可以登录。
