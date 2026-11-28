@@ -27,7 +27,7 @@ const MotionBox = motion.create(Box);
 type CallbackResponse = LoginResponse & { bound?: boolean; provider?: string };
 
 const PROVIDER_ERRORS: Record<string, string> = {
-  access_denied: '您已取消授权，未完成登录',
+  access_denied: '你已取消授权，未完成登录',
   temporarily_unavailable: '第三方登录服务暂时不可用，请稍后重试',
   server_error: '第三方登录服务出错，请稍后重试',
 };
@@ -239,7 +239,7 @@ export const OAuthCallbackPage: React.FC = () => {
               ? successHeadline
               : phase === 'error'
                 ? '请查看下方提示信息或返回重新发起登录'
-                : '安全引擎正在核验您的外部身份凭证'}
+                : '正在核验这次登录'}
           </Typography>
         </Box>
 
