@@ -51,6 +51,39 @@ import { createPasskeyCredential, isWebAuthnSupported } from '../utils/webauthn'
 const TAB_KEYS = ['basic', 'security', 'oauth'] as const;
 type TabKey = (typeof TAB_KEYS)[number];
 
+const ALLOWED_AVATAR_EXT_RE = /\.(png|ico|jpg)$/i;
+
+function validateAvatarInput(raw: string, isAdmin: boolean): string {
+  const val = raw.trim();
+  if (!val) return '';
+  if (val.length > 512) return '头像地址长度不能超过 512 个字符';
+  if (val.startsWith('/')) {
+    if (!isAdmin) {
+      return '非管理员禁止使用站内路径，请填写以 .png、.ico 或 .jpg 结尾的外部图片链接';
+    }
+    if (val.startsWith('//') || val.includes('..')) {
+      return '头像站内路径格式无效';
+    }
+    const cleanPath = val.split(/[?#]/)[0];
+    if (!ALLOWED_AVATAR_EXT_RE.test(cleanPath)) {
+      return '头像仅支持 .png、.ico、.jpg 格式的图片地址';
+    }
+    return '';
+  }
+  try {
+    const u = new URL(val);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      return '头像地址必须是有效的 http(s) 图片链接';
+    }
+    if (!ALLOWED_AVATAR_EXT_RE.test(u.pathname)) {
+      return '头像仅支持 .png、.ico、.jpg 格式的图片地址';
+    }
+    return '';
+  } catch {
+    return '头像地址必须是有效的 http(s) 图片链接';
+  }
+}
+
 export const ProfilePage: React.FC = () => {
   const theme = useTheme();
   const navigate = useNavigate();
@@ -147,6 +180,11 @@ export const ProfilePage: React.FC = () => {
     e.preventDefault();
     setError('');
     setSuccess('');
+    const avatarErr = validateAvatarInput(avatarUrl, isAdmin);
+    if (avatarErr) {
+      setError(avatarErr);
+      return;
+    }
     setSavingProfile(true);
     try {
       await api.auth.updateProfile({
@@ -358,7 +396,7 @@ export const ProfilePage: React.FC = () => {
               <Stack spacing={2.5}>
                 <Stack direction="row" spacing={2} alignItems="center">
                   <Avatar
-                    src={avatarUrl || undefined}
+                    src={avatarUrl && !validateAvatarInput(avatarUrl, isAdmin) ? avatarUrl.trim() : undefined}
                     sx={{ width: 52, height: 52, bgcolor: 'primary.main', fontWeight: 700 }}
                   >
                     {(displayName || user?.username || 'U').slice(0, 1).toUpperCase()}
@@ -368,7 +406,9 @@ export const ProfilePage: React.FC = () => {
                       头像预览
                     </Typography>
                     <Typography variant="caption" color="text.secondary">
-                      支持站内路径（如 /logo.png）或外部 https 图片链接，留空将显示首字母头像
+                      {isAdmin
+                        ? '仅支持 .png、.ico、.jpg 格式的站内路径（如 /logo.png）或外部 http(s) 图片链接，留空将显示首字母头像'
+                        : '仅支持 .png、.ico、.jpg 格式的外部 http(s) 图片链接，留空将显示首字母头像'}
                     </Typography>
                   </Box>
                 </Stack>

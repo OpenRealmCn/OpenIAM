@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -23,15 +24,64 @@ type updateProfileReq struct {
 	AvatarURL   string `json:"avatar_url"`
 }
 
-func isValidAvatarURL(raw string) bool {
-	if raw == "" {
+func hasAllowedAvatarExt(p string) bool {
+	switch strings.ToLower(path.Ext(p)) {
+	case ".png", ".ico", ".jpg":
 		return true
+	default:
+		return false
 	}
-	if strings.HasPrefix(raw, "/") && !strings.HasPrefix(raw, "//") {
-		return true
+}
+
+func validateAvatarURL(raw string, isAdmin bool) string {
+	if raw == "" {
+		return ""
+	}
+	if len(raw) > 512 {
+		return "头像地址长度不能超过 512 个字符"
+	}
+	if strings.HasPrefix(raw, "/") {
+		if !isAdmin {
+			return "非管理员禁止使用站内路径，请填写以 .png、.ico 或 .jpg 结尾的外部图片链接"
+		}
+		if strings.HasPrefix(raw, "//") {
+			return "头像地址格式无效"
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme != "" || u.Host != "" || strings.Contains(u.Path, "..") {
+			return "头像站内路径格式无效"
+		}
+		if !hasAllowedAvatarExt(u.Path) {
+			return "头像仅支持 .png、.ico、.jpg 格式的图片地址"
+		}
+		return ""
 	}
 	u, err := url.Parse(raw)
-	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "头像地址必须是有效的 http(s) 图片链接"
+	}
+	if !hasAllowedAvatarExt(u.Path) {
+		return "头像仅支持 .png、.ico、.jpg 格式的图片地址"
+	}
+	return ""
+}
+
+func (h *AuthHandler) isAdminUser(uid uint64) bool {
+	if h.enforcer.IsSuperAdmin(uid) {
+		return true
+	}
+	rolesMap, err := h.enforcer.GetAllUserRoles(uid)
+	if err != nil {
+		return false
+	}
+	for _, roleList := range rolesMap {
+		for _, r := range roleList {
+			if r == "super_admin" || r == "domain_admin" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // UpdateProfile 允许当前登录用户更新显示名称与头像 URL。
@@ -47,12 +97,11 @@ func (h *AuthHandler) UpdateProfile(c *gin.Context) {
 		Fail(c, http.StatusBadRequest, "显示名称不能超过 128 个字符")
 		return
 	}
-	if len(avatarURL) > 512 || !isValidAvatarURL(avatarURL) {
-		Fail(c, http.StatusBadRequest, "头像地址必须是站内路径或有效的 http(s) 地址")
+	uid := CurrentUserID(c)
+	if errMsg := validateAvatarURL(avatarURL, h.isAdminUser(uid)); errMsg != "" {
+		Fail(c, http.StatusBadRequest, errMsg)
 		return
 	}
-
-	uid := CurrentUserID(c)
 	var user models.User
 	if err := h.db.First(&user, uid).Error; err != nil {
 		Fail(c, http.StatusNotFound, "用户不存在")

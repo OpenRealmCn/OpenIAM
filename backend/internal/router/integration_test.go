@@ -631,19 +631,46 @@ func TestProfilePasskeySiteAndSMTPSettings(t *testing.T) {
 	assert.Contains(t, memberMeW.Body.String(), `"is_admin":false`)
 	assert.Contains(t, memberMeW.Body.String(), `"has_password":true`)
 
-	// 5. 个人资料更新与非法头像协议拦截
+	// 5. 个人资料更新与头像后缀/站内路径限制
 	badAvatarW := doJSON(t, env.engine, http.MethodPut, "/api/v1/auth/me", map[string]string{
 		"display_name": "普通成员",
 		"avatar_url":   "javascript:alert(1)",
 	}, memberToken)
 	assert.Equal(t, http.StatusBadRequest, badAvatarW.Code)
 
+	// 非管理员禁止使用站内路径
+	relAvatarW := doJSON(t, env.engine, http.MethodPut, "/api/v1/auth/me", map[string]string{
+		"display_name": "普通成员",
+		"avatar_url":   "/logo.png",
+	}, memberToken)
+	assert.Equal(t, http.StatusBadRequest, relAvatarW.Code)
+
+	// 仅允许 .png / .ico / .jpg 后缀
+	badExtW := doJSON(t, env.engine, http.MethodPut, "/api/v1/auth/me", map[string]string{
+		"display_name": "普通成员",
+		"avatar_url":   "https://cdn.example.com/avatar.svg",
+	}, memberToken)
+	assert.Equal(t, http.StatusBadRequest, badExtW.Code)
+
 	okProfileW := doJSON(t, env.engine, http.MethodPut, "/api/v1/auth/me", map[string]string{
 		"display_name": "普通成员A",
-		"avatar_url":   "/logo.png",
+		"avatar_url":   "https://cdn.example.com/avatar.png",
 	}, memberToken)
 	require.Equal(t, http.StatusOK, okProfileW.Code, okProfileW.Body.String())
 	assert.Contains(t, okProfileW.Body.String(), "普通成员A")
+
+	// 管理员允许使用合法扩展名的站内路径，但禁止非图片站内路径（如 /index.html）
+	adminBadRelW := doJSON(t, env.engine, http.MethodPut, "/api/v1/auth/me", map[string]string{
+		"display_name": "管理员",
+		"avatar_url":   "/index.html",
+	}, adminToken)
+	assert.Equal(t, http.StatusBadRequest, adminBadRelW.Code)
+
+	adminOkRelW := doJSON(t, env.engine, http.MethodPut, "/api/v1/auth/me", map[string]string{
+		"display_name": "超级管理员",
+		"avatar_url":   "/logo.png",
+	}, adminToken)
+	require.Equal(t, http.StatusOK, adminOkRelW.Code, adminOkRelW.Body.String())
 
 	// 6. 通行密钥列表与注册 Challenge 生成
 	pkListW := doJSON(t, env.engine, http.MethodGet, "/api/v1/auth/passkeys", nil, memberToken)

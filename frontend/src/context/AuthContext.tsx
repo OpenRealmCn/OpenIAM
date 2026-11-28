@@ -113,10 +113,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return forced;
   };
 
-  const completeOAuthLogin = async (accessToken: string) => {
-    setTokens(accessToken);
-    await refreshProfile();
-  };
+  const completeOAuthLogin = useCallback(
+    async (accessToken: string) => {
+      setTokens(accessToken);
+      await refreshProfile();
+    },
+    [refreshProfile],
+  );
 
   const logout = async () => {
     try {

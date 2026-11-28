@@ -7,8 +7,6 @@ import {
   Autocomplete,
   Avatar,
   Box,
-  Button,
-  Chip,
   Divider,
   Drawer,
   FormControl,
@@ -276,80 +274,88 @@ export const AppLayout: React.FC = () => {
         ))}
       </Box>
 
-      {/* 底部用户信息与快捷操作（确保移动端也能一键进入个人中心或退出登录） */}
-      <Box sx={{ p: 1.8 }}>
+      {/* 底部极简状态与用户操作栏 */}
+      <Divider />
+      <Box sx={{ px: 1.25, py: 1 }}>
         {isAdmin && (
-          <Box
-            sx={{
-              p: 1.2,
-              mb: 1.2,
-              borderRadius: `${radius + 2}px`,
-              bgcolor: 'background.paper',
-              border: 1,
-              borderColor: 'divider',
-            }}
+          <Stack
+            direction="row"
+            alignItems="center"
+            justifyContent="space-between"
+            sx={{ px: 1, pb: 0.75 }}
           >
-            <Typography variant="caption" color="text.secondary" display="block">
-              当前业务域
-            </Typography>
-            <Stack direction="row" alignItems="center" justifyContent="space-between" mt={0.3}>
-              <Typography variant="body2" fontWeight={700} color="primary.main" noWrap>
-                {currentDomain}
+            <Stack direction="row" spacing={0.75} alignItems="center" sx={{ minWidth: 0 }}>
+              <Box
+                sx={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: '50%',
+                  bgcolor: 'success.main',
+                  flexShrink: 0,
+                }}
+              />
+              <Typography variant="caption" color="text.secondary" noWrap>
+                域 · <Box component="span" sx={{ color: 'text.primary', fontWeight: 600 }}>{currentDomain}</Box>
               </Typography>
-              <Chip size="small" label="已连接" color="success" variant="outlined" sx={{ height: 20, fontSize: '0.68rem' }} />
             </Stack>
-          </Box>
+          </Stack>
         )}
 
-        <Box
-          sx={{
-            p: 1.2,
-            borderRadius: `${radius + 2}px`,
-            bgcolor: 'background.paper',
-            border: 1,
-            borderColor: 'divider',
-          }}
-        >
-          <Stack direction="row" spacing={1.2} alignItems="center" mb={1}>
-            <Avatar
-              src={user?.avatar_url || undefined}
-              sx={{ width: 32, height: 32, bgcolor: 'primary.main', fontSize: '0.82rem', fontWeight: 700 }}
-            >
-              {initialChar}
-            </Avatar>
-            <Box sx={{ minWidth: 0, flex: 1 }}>
-              <Typography variant="body2" fontWeight={600} noWrap>
-                {user?.display_name || user?.username}
-              </Typography>
-              <Typography variant="caption" color="text.secondary" noWrap display="block">
-                {user?.email}
-              </Typography>
-            </Box>
-          </Stack>
-          <Stack direction="row" spacing={1}>
-            <Button
-              size="small"
-              variant="outlined"
-              fullWidth
-              startIcon={<ProfileIcon fontSize="small" />}
+        <Stack direction="row" spacing={0.5} alignItems="center">
+          <Tooltip title="进入个人中心">
+            <Box
               onClick={handleGoProfile}
-              sx={{ py: 0.4, fontSize: '0.75rem' }}
+              sx={{
+                flex: 1,
+                minWidth: 0,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1,
+                px: 1,
+                py: 0.75,
+                borderRadius: `${radius}px`,
+                cursor: 'pointer',
+                transition: 'background-color 0.15s ease',
+                '&:hover': {
+                  bgcolor: alpha(theme.palette.text.primary, 0.05),
+                },
+              }}
             >
-              个人中心
-            </Button>
-            <Button
+              <Avatar
+                src={user?.avatar_url || undefined}
+                sx={{ width: 28, height: 28, bgcolor: 'primary.main', fontSize: '0.78rem', fontWeight: 700, flexShrink: 0 }}
+              >
+                {initialChar}
+              </Avatar>
+              <Box sx={{ minWidth: 0, flex: 1 }}>
+                <Typography variant="body2" fontWeight={600} lineHeight={1.25} noWrap>
+                  {user?.display_name || user?.username}
+                </Typography>
+                <Typography variant="caption" color="text.secondary" lineHeight={1.2} noWrap display="block">
+                  {user?.email}
+                </Typography>
+              </Box>
+            </Box>
+          </Tooltip>
+
+          <Tooltip title="退出登录">
+            <IconButton
               size="small"
-              color="error"
-              variant="outlined"
-              fullWidth
-              startIcon={<LogoutIcon fontSize="small" />}
               onClick={handleLogout}
-              sx={{ py: 0.4, fontSize: '0.75rem' }}
+              aria-label="退出登录"
+              sx={{
+                color: 'text.secondary',
+                flexShrink: 0,
+                '&:hover': {
+                  color: 'error.main',
+                  bgcolor: alpha(theme.palette.error.main, 0.08),
+                },
+              }}
             >
-              退出
-            </Button>
-          </Stack>
-        </Box>
+              <LogoutIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        </Stack>
       </Box>
     </Box>
   );
