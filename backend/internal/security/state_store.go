@@ -259,43 +259,110 @@ type PasswordResetRecord struct {
 	Code   string `json:"code"`
 }
 
-// SavePasswordResetCode 保存 6 位一次性重置密码验证码。
+var (
+	// ErrPasswordResetCodeMismatch 表示验证码不正确（本次校验已计入失败次数）。
+	ErrPasswordResetCodeMismatch = errors.New("验证码不正确")
+	// ErrPasswordResetTooManyAttempts 表示同一账号连续错误次数达到上限，验证码已被作废。
+	ErrPasswordResetTooManyAttempts = errors.New("验证码错误次数过多，验证码已失效，请重新获取")
+)
+
+// passwordResetConsumeScript 在一次 Redis 执行里完成「读取 → 比对 → 计数 → 删除」：
+//   - 验证码不存在：返回 -1（已被并发请求消费或已过期）
+//   - 验证码不匹配：INCR 失败计数（首次设置有效期），达到上限则作废验证码并返回 -2
+//   - 验证码匹配：删除验证码、记录与失败计数，返回 1 和记录内容
+//
+// 因为整个判断在 Redis 内部一次完成，并发请求里只有一个能消费成功；
+// 错误计数不会被「读 → 比对 → 删」之间的窗口绕过，输错也不会提前把验证码删掉。
+var passwordResetConsumeScript = redis.NewScript(`
+local codeKey = KEYS[1]
+local attemptKey = KEYS[2]
+local recordKey = KEYS[3]
+local provided = ARGV[1]
+local maxAttempts = tonumber(ARGV[2])
+local ttlMs = tonumber(ARGV[3])
+
+local stored = redis.call('GET', codeKey)
+if not stored then
+  return {-1, ''}
+end
+if stored ~= provided then
+  local attempts = redis.call('INCR', attemptKey)
+  if attempts == 1 then
+    redis.call('PEXPIRE', attemptKey, ttlMs)
+  end
+  if maxAttempts > 0 and attempts >= maxAttempts then
+    redis.call('DEL', codeKey, recordKey, attemptKey)
+    return {-2, ''}
+  end
+  return {0, ''}
+end
+local rec = redis.call('GET', recordKey)
+redis.call('DEL', codeKey, recordKey, attemptKey)
+if not rec then
+  return {-1, ''}
+end
+return {1, rec}
+`)
+
+// ConsumePasswordResetCode 原子校验并一次性消费重置密码验证码。
+// 校验、失败计数与删除都在同一段 Lua 里执行：并发请求只有一个能成功，
+// 同一账号连续错误达到 maxAttempts 次立即作废验证码并要求重新发起。
+// 任何 Redis 执行失败都会返回错误，绝不吞掉——「删不掉」必须让整个流程失败。
+func (s *StateStore) ConsumePasswordResetCode(ctx context.Context, email, code string, maxAttempts int) (*PasswordResetRecord, error) {
+	codeKey := s.key("pwd_reset", email, "code")
+	attemptKey := s.key("pwd_reset", email, "attempts")
+	recordKey := s.key("pwd_reset", email)
+	const attemptTTL = 10 * time.Minute
+
+	res, err := passwordResetConsumeScript.Run(ctx, s.rdb, []string{codeKey, attemptKey, recordKey},
+		code, maxAttempts, attemptTTL.Milliseconds()).Result()
+	if err != nil {
+		return nil, fmt.Errorf("校验验证码失败: %w", err)
+	}
+	fields, ok := res.([]interface{})
+	if !ok || len(fields) != 2 {
+		return nil, fmt.Errorf("校验验证码失败: 返回格式异常 %T", res)
+	}
+	status, ok := fields[0].(int64)
+	if !ok {
+		return nil, fmt.Errorf("校验验证码失败: 状态码格式异常 %T", fields[0])
+	}
+	switch status {
+	case -1:
+		return nil, ErrStateNotFound
+	case -2:
+		return nil, ErrPasswordResetTooManyAttempts
+	case 0:
+		return nil, ErrPasswordResetCodeMismatch
+	}
+	raw, ok := fields[1].(string)
+	if !ok {
+		return nil, fmt.Errorf("校验验证码失败: 记录格式异常 %T", fields[1])
+	}
+	var rec PasswordResetRecord
+	if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// SavePasswordResetCode 保存 6 位一次性重置密码验证码，同时重置该账号的失败计数。
 func (s *StateStore) SavePasswordResetCode(ctx context.Context, email string, rec PasswordResetRecord, ttl time.Duration) error {
 	b, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
-	return s.rdb.Set(ctx, s.key("pwd_reset", email), string(b), ttl).Err()
-}
-
-// ConsumePasswordResetCode 校验并原子消费重置密码验证码。
-func (s *StateStore) ConsumePasswordResetCode(ctx context.Context, email, code string) (*PasswordResetRecord, error) {
-	k := s.key("pwd_reset", email)
-	val, err := s.rdb.Get(ctx, k).Result()
-	if errors.Is(err, redis.Nil) {
-		return nil, ErrStateNotFound
+	if err := s.rdb.Set(ctx, s.key("pwd_reset", email), string(b), ttl).Err(); err != nil {
+		return err
 	}
-	if err != nil {
-		return nil, err
+	if err := s.rdb.Set(ctx, s.key("pwd_reset", email, "code"), rec.Code, ttl).Err(); err != nil {
+		return err
 	}
-	var rec PasswordResetRecord
-	if err := json.Unmarshal([]byte(val), &rec); err != nil {
-		return nil, err
+	// 新验证码重新计数：不清零会让正常用户的历史错误次数继续累计。
+	if err := s.rdb.Del(ctx, s.key("pwd_reset", email, "attempts")).Err(); err != nil {
+		return err
 	}
-	if rec.Code != code {
-		fails, fErr := s.IncrFailure(ctx, "pwd_reset", email, 10*time.Minute)
-		if fErr != nil || fails >= 5 {
-			_ = s.rdb.Del(ctx, k).Err()
-			_ = s.ClearFailures(ctx, "pwd_reset", email)
-			return nil, errors.New("验证码错误次数过多，请重新获取")
-		}
-		return nil, errors.New("验证码不正确")
-	}
-	if n, dErr := s.rdb.Del(ctx, k).Result(); dErr != nil || n == 0 {
-		return nil, ErrStateNotFound
-	}
-	_ = s.ClearFailures(ctx, "pwd_reset", email)
-	return &rec, nil
+	return nil
 }
 
 // RevokeSession 在 Redis 标记指定会话 ID 已下线。

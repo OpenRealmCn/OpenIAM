@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"log"
 	"mime"
 	"net"
 	"net/mail"
@@ -116,12 +117,26 @@ func (s *Service) SendMail(ctx context.Context, to, subject, htmlBody string) er
 	}
 	defer func() { _ = client.Close() }()
 
-	if enc == "starttls" || enc == "" {
-		if ok, _ := client.Extension("STARTTLS"); ok {
-			if err := client.StartTLS(tlsConfig); err != nil {
-				return fmt.Errorf("STARTTLS 握手失败: %w", err)
-			}
+	// 加密策略严格化：声明 STARTTLS（含默认值）就必须真正升级成功，服务器不支持时中止发送，
+	// 绝不再静默降级成明文。只有显式开启 allow_insecure_plaintext 且非生产环境才允许明文。
+	allowPlaintext := snap.SMTPAllowInsecurePlaintext && !strings.EqualFold(strings.TrimSpace(snap.Environment), "production")
+	switch enc {
+	case "starttls", "":
+		if ok, _ := client.Extension("STARTTLS"); !ok {
+			return errors.New("SMTP 服务器未提供 STARTTLS 扩展，已中止发送（如确需明文，请显式开启 smtp.allow_insecure_plaintext 且仅在非生产环境使用）")
 		}
+		if err := client.StartTLS(tlsConfig); err != nil {
+			return fmt.Errorf("STARTTLS 握手失败: %w", err)
+		}
+	case "none", "plaintext", "insecure":
+		if !allowPlaintext {
+			return errors.New("拒绝以明文方式发送邮件：请启用 STARTTLS，或在非生产环境显式开启 smtp.allow_insecure_plaintext")
+		}
+		log.Printf("[mailer] 警告：正在以明文方式向 %s 发送邮件（allow_insecure_plaintext=true，环境=%s）", snap.SMTPHost, snap.Environment)
+	case "tls", "ssl":
+		// 隐式 TLS 已在拨号阶段完成，无需再次升级。
+	default:
+		return fmt.Errorf("不支持的 SMTP 加密方式: %s", snap.SMTPEncryption)
 	}
 
 	if snap.SMTPUsername != "" {

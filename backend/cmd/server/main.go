@@ -133,6 +133,16 @@ func main() {
 		logger.Fatal("failed to initialize Casbin RBAC enforcer", zap.Error(err))
 	}
 
+	// 初始口令保护：本函数此前只是定义、从未被调用，导致「release 模式拒绝弱初始口令」实际没生效。
+	// 现在在初始化管理员之前强制检查：release 模式下弱口令直接拒绝启动，其它模式只告警。
+	if cfg.Seed.Enabled && isWeakSeedPassword(cfg.Seed.AdminPassword) {
+		if cfg.Server.Mode == "release" {
+			logger.Fatal("refusing to start: OPENIAM_SEED_ADMIN_PASSWORD is empty or a publicly known default password",
+				zap.String("mode", cfg.Server.Mode))
+		}
+		logger.Warn("seed admin password is empty or a publicly known default password; set OPENIAM_SEED_ADMIN_PASSWORD before production")
+	}
+
 	if err := seed.EnsureDefaults(db, enforcer, cfg.Seed, stateStore); err != nil {
 		logger.Fatal("failed to seed default data", zap.Error(err))
 	}

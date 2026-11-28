@@ -51,7 +51,7 @@
 5. 令牌失效范围扩大到 OAuth2 服务端：`userinfo` 与 `introspect` 同样检查用户级失效时间点，Redis 异常时按已失效处理；禁用或删除用户时撤销失败会返回错误，不再被忽略。
 6. CORS：仅对白名单内的具体来源返回 `Access-Control-Allow-Credentials`，预检允许 `X-Token-Delivery`，前端请求带 `withCredentials`。控制台与 API 不同源时 Refresh Cookie 才能工作；`SameSite=Strict` 在跨站部署下仍可能被浏览器拦截，推荐同源反代部署。
 7. 口令长度按 UTF-8 字节数校验（新增 `maxbytes` 规则，覆盖注册、改密、管理员创建与重置、个人资料改密），含中文或 emoji 的口令超过 72 字节时返回 400。
-8. 默认口令：`.env.example` 中该项留空；release 模式下口令为空或为公开默认值时后端拒绝启动，非 release 模式只告警；compose 不再用 `:?` 强制变量，`docker compose down` 等命令不受影响。
+8. 默认口令：`.env.example` 中该项留空；release 模式下口令为空或为公开默认值时后端拒绝启动，非 release 模式只告警；compose 不再用 `:?` 强制变量，`docker compose down` 等命令不受影响。注意：该检查在第三轮才真正接进启动流程——此前 `isWeakSeedPassword` 只是定义、从未被调用，现已由 `backend/cmd/server/main.go` 在初始化管理员之前强制调用。
 9. 联合登录邮箱冲突：被拒绝的尝试写入审计日志，提示用户先登录再在个人中心绑定；已删除不再使用的邮箱关联分支。
 
 新增回归测试集中在 `review_fix_test.go`，覆盖第 1、2、4、6、7 项。第 3 项（跨客户端回调地址）、第 5 项（OAuth2 令牌失效）、第 8 项（启动拒绝）没有专门测试。
@@ -88,3 +88,22 @@
 - 前端必须经由 HTTPS 反代访问生产环境，Cookie 才会带 `Secure` 属性；nginx 已传递 `X-Forwarded-Proto`，上游代理需保证该头正确。
 - 已有身份源配置中若使用 http 或内网地址，保存时会被拒绝，需要改用 https 或显式开启内网开关。
 - 联合登录的回调地址需要在「系统设置」的 CORS 来源或回调前缀中登记。
+
+## 第三轮修复（2026-11-28）
+
+本轮改动集中在「凭据生命周期」与「配置可信来源」两条主线，改动文件与验证方式如下。
+
+1. 旧刷新令牌绕过改密：`users` 新增 `tokens_valid_after`（迁移 `000006_user_tokens_valid_after`），改密 / 重置密码 / 禁用账号时与口令哈希同事务写入；`/oauth2/token` 的 refresh grant 与 `/api/v1/auth/refresh` 都按「签发时间 ≤ 凭据有效起点」拒绝，返回 `invalid_grant`。Redis 里的失效时间点丢失时，库里的时间戳仍然生效。
+2. 找回密码验证码：改为 `INCR` 计数 + `GETDEL` 单次原子消费，同一验证码并发提交只有一个能成功；同账号连续 5 次输错立即作废验证码并清空计数；任何 Redis 写失败都会让流程失败，不再吞错误。
+3. 通行密钥可信来源：RP ID 与允许来源改由 `webauthn.rp_id` / `webauthn.allowed_origins` 配置（支持环境变量），请求 `Origin` 必须在白名单内，否则返回 400 并记录 `auth.passkey.origin_rejected` 安全事件；删除「拿 Host 兜底」与「把请求 Origin 加进白名单」的逻辑。
+4. 通行密钥必须用户验证：注册与登录的 WebAuthn 选项均设 `userVerification=required`，服务端在注册与登录阶段复核 UV 标志位，缺失即拒绝。
+5. 外部身份绑定：state 中新增发起绑定的会话 JTI、会话签发时间与用户凭据有效起点快照，回调阶段逐项复核，不匹配即拒绝并作废本次绑定。
+6. 重置密码：撤销旧会话失败即整体失败，口令哈希与凭据有效起点同事务落库；验证码记录里保存发码时的邮箱，确认阶段与账号当前邮箱比对，邮箱换绑后旧验证码失效。
+7. SMTP：声明 `starttls`（含默认值）必须真正升级成功，服务器不支持时中止发送；明文发送仅在显式 `smtp.allow_insecure_plaintext=true` 且环境不是 `production` 时允许，并打警告日志。
+8. 登录方式兜底：删除通行密钥与解绑外部身份前统计剩余登录方式（密码 / 其余通行密钥 / 其余外部身份），结果为 0 时返回 400；超级管理员可带 `force=true` 强制删除并写审计。
+9. 通行密钥签名计数器：新值不大于已存值（疑似克隆）时拒绝登录并记安全事件。
+10. SMTP 授权码改为 AES-256-GCM 加密存储（`enc:v1:` 前缀，密钥取 `OPENIAM_ENCRYPTION_KEY`，缺省回退 `OPENIAM_JWT_SECRET`），读取时解密，历史明文可平滑升级；接口层仍然脱敏。
+
+对应回归测试：`backend/internal/router/review2_security_test.go`（第 1、3、4、6 项）、`backend/internal/security/state_store_pwdreset_test.go`（第 2 项）、`backend/internal/oauthplugin/bind_state_internal_test.go`（第 5 项）、`backend/internal/mailer/starttls_test.go`（第 7 项）、`backend/internal/handlers/tokens_test.go`（第 1、8 项的判定函数）、`backend/internal/security/crypto_test.go`（第 10 项）。
+
+仍未覆盖：通行密钥 UV 缺失与签名计数器异常这两条只有服务端判定逻辑，没有构造真实认证器的端到端测试，需要后续用手工构造的 attestation/assertion 夹具补齐。
