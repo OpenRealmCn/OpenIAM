@@ -1,30 +1,18 @@
 import React, { useEffect, useRef, useState } from 'react';
-import {
-  Alert,
-  alpha,
-  Avatar,
-  Box,
-  Button,
-  Stack,
-  Typography,
-  useTheme,
-} from '@mui/material';
+import { Alert, Box, Button, Stack, Typography } from '@mui/material';
 import {
   AccessTimeRounded as OfflineIcon,
-  AppsRounded as AppIcon,
   BadgeRounded as ProfileIcon,
   CancelOutlined as DenyIcon,
   CheckCircleRounded as AllowIcon,
   EmailRounded as EmailIcon,
   FingerprintRounded as IdentityIcon,
-  LockRounded as LockIcon,
   PhoneAndroidRounded as PhoneIcon,
   SecurityRounded as RoleIcon,
-  VerifiedUserRounded as ShieldIcon,
 } from '@mui/icons-material';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
-import { HandshakeStatus, IdentityHandshakeDiagram, OAuthBackdrop } from '../components/OAuthAuthStage';
+import { OAuthScopeList, OAuthStage } from '../components/OAuthStage';
 import { useAuth } from '../context/AuthContext';
 import { useSite } from '../context/SiteContext';
 import { MOTION_SPEED_SCALE, useThemeStore } from '../store/themeStore';
@@ -59,7 +47,6 @@ interface ConsentData {
 type ConsentPhase = 'loading' | 'ready' | 'approving' | 'approved' | 'denying' | 'error';
 
 export const OAuthConsentPage: React.FC = () => {
-  const theme = useTheme();
   const [searchParams] = useSearchParams();
   const requestId = searchParams.get('request_id') || '';
   const { user } = useAuth();
@@ -131,20 +118,21 @@ export const OAuthConsentPage: React.FC = () => {
   };
 
   const initialChar = (user?.display_name || user?.username || 'U').slice(0, 1).toUpperCase();
-  const targetAppInitial = (consent?.client_name || 'A').slice(0, 1).toUpperCase();
-  const targetHost = consent ? redirectHost(consent.redirect_uri) : '应用回调地址';
-
-  const handshakeStatus: HandshakeStatus =
-    phase === 'loading' || phase === 'approving' || phase === 'denying'
-      ? 'verifying'
-      : phase === 'approved'
-        ? 'success'
-        : phase === 'error'
-          ? 'error'
-          : 'idle';
-
+  const targetHost = consent ? redirectHost(consent.redirect_uri) : '';
   const busy = phase === 'approving' || phase === 'approved' || phase === 'denying';
   const appName = consent?.client_name || '该应用';
+  const headline =
+    phase === 'error'
+      ? '无法完成授权'
+      : phase === 'loading'
+        ? '正在读取授权请求'
+        : phase === 'denying'
+          ? '正在返回应用'
+          : phase === 'approved'
+            ? `正在返回 ${appName}`
+            : phase === 'approving'
+              ? '正在签发授权码'
+              : `${appName} 想登录`;
 
   const buttonSx = {
     py: 1.15,
@@ -155,143 +143,50 @@ export const OAuthConsentPage: React.FC = () => {
   };
 
   return (
-    <OAuthBackdrop maxWidth={440}>
-      <Stack spacing={2.75}>
+    <OAuthStage
+      identity={{
+        label: '当前账号',
+        name: user?.display_name || user?.username || '未登录',
+        handle: user?.username ? `@${user.username}` : undefined,
+        hint: user?.email,
+        avatarUrl: user?.avatar_url,
+        fallback: initialChar,
+      }}
+    >
+      <Stack spacing={3}>
         <Box>
-          <Typography variant="h5" fontWeight={700} letterSpacing="-0.03em">
-            {phase === 'error'
-              ? '无法完成授权'
-              : phase === 'loading'
-                ? '确认登录请求'
-                : phase === 'denying'
-                  ? '正在返回应用'
-                  : `允许 ${appName} 登录`}
+          <Typography variant="h4" fontWeight={700} letterSpacing="-0.03em">
+            {headline}
           </Typography>
-          <Typography variant="body2" color="text.secondary" mt={0.6}>
-            {phase === 'approved'
-              ? `正在返回 ${appName}`
-              : phase === 'approving'
-                ? '正在签发授权码'
-                : phase === 'denying'
-                  ? `正在返回 ${targetHost}`
-                  : phase === 'loading'
-                    ? '正在确认这次登录请求'
-                    : `将使用你的 ${siteInfo.name || 'OpenIAM'} 账号，并获得下面这些权限`}
+          <Typography variant="body2" color="text.secondary" mt={1}>
+            {phase === 'ready' && consent
+              ? `允许后，${appName} 可以使用下面这些信息，并回到 ${targetHost}。`
+              : phase === 'error'
+                ? error || '授权请求无效或已过期，请返回应用重试'
+                : `使用你的 ${siteInfo.name || 'OpenIAM'} 账号`}
           </Typography>
         </Box>
-
-        <IdentityHandshakeDiagram
-          status={handshakeStatus}
-          leftNode={{
-            label: siteInfo.name || 'OpenIAM',
-            subLabel: '身份认证',
-            accent: theme.palette.primary.main,
-            icon: siteInfo.logo_url ? (
-              <Box
-                component="img"
-                src={siteInfo.logo_url}
-                alt=""
-                sx={{ width: 28, height: 28, objectFit: 'contain' }}
-              />
-            ) : (
-              <ShieldIcon />
-            ),
-          }}
-          rightNode={{
-            label: consent?.client_name || '接入应用',
-            subLabel: consent ? consent.domain_code : '确认中',
-            accent: theme.palette.primary.main,
-            icon: consent?.client_name ? (
-              <Typography fontWeight={700} fontSize="1.25rem" color="primary.main">
-                {targetAppInitial}
-              </Typography>
-            ) : (
-              <AppIcon />
-            ),
-          }}
-        />
 
         {phase === 'error' && <Alert severity="error">{error || '授权请求无效或已过期，请返回应用重试'}</Alert>}
 
         {consent && phase !== 'error' && (
-          <Stack spacing={2.25}>
+          <>
             {error && (
               <Alert severity="error" onClose={() => setError('')}>
                 {error}
               </Alert>
             )}
-
-            <Stack direction="row" spacing={1.25} alignItems="center">
-              <Avatar
-                src={user?.avatar_url || undefined}
-                sx={{ width: 40, height: 40, bgcolor: 'primary.main', fontWeight: 700 }}
-              >
-                {initialChar}
-              </Avatar>
-              <Box sx={{ minWidth: 0, flex: 1 }}>
-                <Typography variant="body2" fontWeight={700} noWrap>
-                  {user?.display_name || user?.username}
-                </Typography>
-                <Typography variant="caption" color="text.secondary" noWrap display="block">
-                  @{user?.username}
-                  {user?.email ? ` · ${user.email}` : ''}
-                </Typography>
-              </Box>
-              <Typography variant="caption" color="success.main" fontWeight={600} sx={{ flexShrink: 0 }}>
-                已验证
-              </Typography>
-            </Stack>
-
-            <Stack
-              spacing={0}
-              sx={{
-                borderTop: 1,
-                borderColor: 'divider',
-              }}
-            >
-              {consent.scopes.map((s) => {
+            <OAuthScopeList
+              items={consent.scopes.map((s) => {
                 const meta = SCOPE_META[s] || { label: '应用自定义权限', icon: <RoleIcon fontSize="small" /> };
-                return (
-                  <Stack
-                    key={s}
-                    direction="row"
-                    spacing={1.25}
-                    alignItems="center"
-                    sx={{ py: 1.15, borderBottom: 1, borderColor: 'divider' }}
-                  >
-                    <Box
-                      sx={{
-                        width: 32,
-                        height: 32,
-                        borderRadius: '10px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        color: 'primary.main',
-                        bgcolor: alpha(theme.palette.primary.main, theme.palette.mode === 'dark' ? 0.16 : 0.08),
-                        flexShrink: 0,
-                      }}
-                    >
-                      {meta.icon}
-                    </Box>
-                    <Typography variant="body2" sx={{ flex: 1, minWidth: 0 }}>
-                      {meta.label}
-                    </Typography>
-                    <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'ui-monospace, monospace' }}>
-                      {s}
-                    </Typography>
-                  </Stack>
-                );
+                return { id: s, label: meta.label, token: s, icon: meta.icon };
               })}
-            </Stack>
-
-            <Stack direction="row" spacing={0.6} alignItems="center">
-              <LockIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
+            />
+            {consent.domain_code && (
               <Typography variant="caption" color="text.secondary">
-                授权后将返回 {targetHost}
+                应用所属域 {consent.domain_code}
               </Typography>
-            </Stack>
-
+            )}
             <Stack direction="row" spacing={1.25}>
               <Button
                 variant="outlined"
@@ -311,18 +206,14 @@ export const OAuthConsentPage: React.FC = () => {
                 startIcon={<AllowIcon />}
                 disabled={busy}
                 onClick={() => handleDecision(true)}
-                sx={{
-                  ...buttonSx,
-                  flex: 1.35,
-                  boxShadow: `0 8px 18px ${alpha(theme.palette.primary.main, 0.22)}`,
-                }}
+                sx={{ ...buttonSx, flex: 1.4 }}
               >
                 {phase === 'approved' ? '正在跳转' : phase === 'approving' ? '正在授权' : '允许'}
               </Button>
             </Stack>
-          </Stack>
+          </>
         )}
       </Stack>
-    </OAuthBackdrop>
+    </OAuthStage>
   );
 };

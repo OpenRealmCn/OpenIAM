@@ -1,28 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Box, Button, Stack, Typography, useTheme } from '@mui/material';
-import {
-  ArrowBackRounded as BackIcon,
-  GitHub as GitHubIcon,
-  Google as GoogleIcon,
-  HubRounded as ProviderIcon,
-  VerifiedUserRounded as ShieldIcon,
-} from '@mui/icons-material';
-import { AnimatePresence, motion } from 'framer-motion';
+import { Alert, Box, Button, Stack, Typography } from '@mui/material';
+import { ArrowBackRounded as BackIcon, GitHub as GitHubIcon, Google as GoogleIcon, HubRounded as ProviderIcon } from '@mui/icons-material';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
-import {
-  AuthStageStep,
-  AuthStageTimeline,
-  HandshakeStatus,
-  IdentityHandshakeDiagram,
-  OAuthBackdrop,
-} from '../components/OAuthAuthStage';
+import { OAuthStage, OAuthStep, OAuthStepList } from '../components/OAuthStage';
 import { LoginResponse, useAuth } from '../context/AuthContext';
 import { useSite } from '../context/SiteContext';
 import { MOTION_SPEED_SCALE, useThemeStore } from '../store/themeStore';
 import { safeInternalPath } from '../utils/redirect';
-
-const MotionBox = motion.create(Box);
 
 type CallbackResponse = LoginResponse & { bound?: boolean; provider?: string };
 
@@ -59,7 +44,6 @@ function resolveProviderMeta(providerRaw?: string): { name: string; icon: React.
 type CallbackPhase = 'verifying' | 'success' | 'error';
 
 export const OAuthCallbackPage: React.FC = () => {
-  const theme = useTheme();
   const { provider } = useParams<{ provider: string }>();
   const [searchParams] = useSearchParams();
   const { user, applyLoginResponse, refreshProfile } = useAuth();
@@ -183,11 +167,8 @@ export const OAuthCallbackPage: React.FC = () => {
   }, [provider, code, state, errParam, applyLoginResponse, refreshProfile, navigate, scale]);
 
   const providerMeta = useMemo(() => resolveProviderMeta(provider), [provider]);
-  const handshakeStatus: HandshakeStatus =
-    phase === 'success' ? 'success' : phase === 'error' ? 'error' : 'verifying';
-
-  const steps: AuthStageStep[] = useMemo(() => {
-    const stepStatus = (idx: number): AuthStageStep['status'] => {
+  const steps: OAuthStep[] = useMemo(() => {
+    const stepStatus = (idx: number): OAuthStep['status'] => {
       if (phase === 'success') return 'done';
       if (phase === 'error') {
         if (idx < stageIndex) return 'done';
@@ -202,99 +183,76 @@ export const OAuthCallbackPage: React.FC = () => {
     return [
       {
         key: 'state',
-        label: '校验安全防篡改状态参数',
-        detail: `身份源：${providerMeta.name}`,
+        label: '确认这次登录',
+        detail: providerMeta.name,
         status: stepStatus(0),
       },
       {
         key: 'exchange',
-        label: '向第三方身份源交换访问凭证',
-        detail: '加密通道核验身份档案',
+        label: `向${providerMeta.name}核对身份`,
         status: stepStatus(1),
       },
       {
         key: 'session',
-        label: isBindingMode ? '关联第三方账号至当前身份' : '建立加密会话并同步权限',
+        label: isBindingMode ? '关联到当前账号' : `进入 ${siteInfo.name || 'OpenIAM'}`,
         detail: phase === 'success' ? successHeadline : undefined,
         status: stepStatus(2),
       },
     ];
-  }, [phase, stageIndex, providerMeta.name, isBindingMode, successHeadline]);
+  }, [phase, stageIndex, providerMeta.name, isBindingMode, successHeadline, siteInfo.name]);
+
+  const signedIn = Boolean(user);
+  const initial = (user?.display_name || user?.username || siteInfo.name || 'O').slice(0, 1).toUpperCase();
 
   return (
-    <OAuthBackdrop maxWidth={450}>
-      <Stack spacing={2.5}>
-        <Box textAlign="center">
-          <Typography variant="h6" fontWeight={700} letterSpacing="-0.01em">
-            {phase === 'success'
-              ? isBindingMode
-                ? '账号关联成功'
-                : '身份认证通过'
-              : phase === 'error'
-                ? '联合身份验证未完成'
-                : `正在验证 ${providerMeta.name} 身份`}
-          </Typography>
-          <Typography variant="body2" color="text.secondary" mt={0.4}>
-            {phase === 'success'
-              ? successHeadline
-              : phase === 'error'
-                ? '请查看下方提示信息或返回重新发起登录'
-                : '正在核验这次登录'}
-          </Typography>
-        </Box>
+    <OAuthStage
+      identity={
+        signedIn
+          ? {
+              label: isBindingMode ? '绑定到' : '当前账号',
+              name: user?.display_name || user?.username || '',
+              handle: user?.username ? `@${user.username}` : undefined,
+              hint: user?.email,
+              avatarUrl: user?.avatar_url,
+              fallback: initial,
+            }
+          : {
+              label: '登录后进入',
+              name: siteInfo.name || 'OpenIAM',
+              fallback: initial,
+            }
+      }
+    >
+      <Stack spacing={3}>
+        <Stack direction="row" spacing={1.5} alignItems="center">
+          <Box sx={{ color: providerMeta.color, display: 'flex' }}>{providerMeta.icon}</Box>
+          <Box>
+            <Typography variant="h4" fontWeight={700} letterSpacing="-0.03em">
+              {phase === 'error' ? '登录没有完成' : phase === 'success' ? (isBindingMode ? '账号已关联' : '登录成功') : `通过${providerMeta.name}登录`}
+            </Typography>
+            <Typography variant="body2" color="text.secondary" mt={0.5}>
+              {phase === 'success' ? successHeadline : phase === 'error' ? '可以返回后重新发起' : '请稍等，正在完成身份核对'}
+            </Typography>
+          </Box>
+        </Stack>
 
-        <IdentityHandshakeDiagram
-          status={handshakeStatus}
-          leftNode={{
-            label: providerMeta.name,
-            subLabel: '外部身份源',
-            accent: providerMeta.color,
-            icon: providerMeta.icon,
-          }}
-          rightNode={{
-            label: siteInfo.name || 'OpenIAM',
-            subLabel: isBindingMode ? '账号安全绑定' : '统一身份认证',
-            accent: theme.palette.primary.main,
-            icon: siteInfo.logo_url ? (
-              <Box
-                component="img"
-                src={siteInfo.logo_url}
-                alt={siteInfo.name}
-                sx={{ width: 28, height: 28, objectFit: 'contain', borderRadius: 1 }}
-              />
-            ) : (
-              <ShieldIcon color="primary" />
-            ),
-          }}
-        />
+        <OAuthStepList steps={steps} />
 
-        <AuthStageTimeline steps={steps} />
-
-        <AnimatePresence>
-          {phase === 'error' && (
-            <MotionBox
-              key="callback-error"
-              initial={scale === 0 ? false : { opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.2 * scale }}
+        {phase === 'error' && (
+          <Stack spacing={2}>
+            <Alert severity="error">{error}</Alert>
+            <Button
+              variant="contained"
+              size="large"
+              startIcon={<BackIcon />}
+              onClick={() => navigate(user ? '/profile?tab=oauth' : '/login', { replace: true })}
+              sx={{ alignSelf: 'flex-start', borderRadius: '12px' }}
             >
-              <Stack spacing={2}>
-                <Alert severity="error">{error}</Alert>
-                <Button
-                  variant="contained"
-                  fullWidth
-                  size="large"
-                  startIcon={<BackIcon />}
-                  onClick={() => navigate(user ? '/profile?tab=oauth' : '/login', { replace: true })}
-                >
-                  {user ? '返回个人中心' : '返回登录页'}
-                </Button>
-              </Stack>
-            </MotionBox>
-          )}
-        </AnimatePresence>
+              {user ? '返回个人中心' : '返回登录'}
+            </Button>
+          </Stack>
+        )}
       </Stack>
-    </OAuthBackdrop>
+    </OAuthStage>
   );
 };
