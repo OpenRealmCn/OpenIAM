@@ -41,19 +41,21 @@ func DynamicCORS(getOrigins func() []string) gin.HandlerFunc {
 		if origin != "" {
 			allowed := false
 			for _, o := range allowOrigins {
-				if o == "*" || o == origin {
+				if o == origin {
 					allowed = true
 					break
 				}
 			}
 			if allowed {
 				c.Header("Access-Control-Allow-Origin", origin)
+				// 仅对白名单内的具体来源允许携带凭据（HttpOnly Refresh Cookie 依赖此头）
+				c.Header("Access-Control-Allow-Credentials", "true")
 			}
 		} else {
 			c.Header("Vary", "Origin")
 		}
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-OpenIAM-Domain")
+		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-OpenIAM-Domain, X-Token-Delivery")
 		c.Header("Access-Control-Expose-Headers", "X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset")
 		c.Header("Vary", "Origin")
 

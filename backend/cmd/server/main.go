@@ -11,6 +11,7 @@ import (
 	"github.com/openrealm/openiam/internal/audit"
 	"github.com/openrealm/openiam/internal/config"
 	"github.com/openrealm/openiam/internal/database"
+	"github.com/openrealm/openiam/internal/mailer"
 	"github.com/openrealm/openiam/internal/oauthplugin"
 	"github.com/openrealm/openiam/internal/oauthserver"
 	"github.com/openrealm/openiam/internal/rbac"
@@ -131,6 +132,7 @@ func main() {
 	}
 
 	auditSvc := audit.NewService(db, logger)
+	mailerSvc := mailer.NewService(settingsSvc)
 	oauthplugin.SetAllowPrivateUpstream(os.Getenv("OPENIAM_OAUTH_ALLOW_PRIVATE_UPSTREAM") == "true")
 	pluginReg := oauthplugin.NewDefaultRegistry()
 	pluginSvc := oauthplugin.NewService(
@@ -154,6 +156,7 @@ func main() {
 		Enforcer:    enforcer,
 		AuditSvc:    auditSvc,
 		SettingsSvc: settingsSvc,
+		MailerSvc:   mailerSvc,
 		PluginSvc:   pluginSvc,
 		OAuthSrv:    oauthSrv,
 	})

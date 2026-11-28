@@ -8,11 +8,15 @@ import {
   setCurrentDomain,
   setTokens,
 } from '../api/client';
-import { Domain, User } from '../types/api';
+import { Domain, User, UserIdentity } from '../types/api';
 
 interface AuthContextValue {
   user: User | null;
   roles: Record<string, string[]>;
+  identities: UserIdentity[];
+  hasPassword: boolean;
+  passkeyCount: number;
+  isAdmin: boolean;
   domains: Domain[];
   currentDomain: string;
   loading: boolean;
@@ -30,10 +34,25 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [roles, setRoles] = useState<Record<string, string[]>>({});
+  const [identities, setIdentities] = useState<UserIdentity[]>([]);
+  const [hasPassword, setHasPassword] = useState<boolean>(true);
+  const [passkeyCount, setPasskeyCount] = useState<number>(0);
+  const [isAdmin, setIsAdmin] = useState<boolean>(false);
   const [domains, setDomains] = useState<Domain[]>([]);
   const [currentDomain, setDomainState] = useState<string>(getCurrentDomain());
   const [loading, setLoading] = useState<boolean>(true);
   const [mustChangePassword, setMustChangePassword] = useState<boolean>(false);
+
+  const resetAuthState = useCallback(() => {
+    setUser(null);
+    setRoles({});
+    setIdentities([]);
+    setHasPassword(true);
+    setPasskeyCount(0);
+    setIsAdmin(false);
+    setDomains([]);
+    setMustChangePassword(false);
+  }, []);
 
   const refreshDomains = useCallback(async () => {
     try {
@@ -47,9 +66,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const refreshProfile = useCallback(async () => {
     const token = getAccessToken() ?? (await refreshAccessToken());
     if (!token) {
-      setUser(null);
-      setRoles({});
-      setMustChangePassword(false);
+      resetAuthState();
       setLoading(false);
       return;
     }
@@ -58,16 +75,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(data.user);
       setRoles(data.roles || {});
       setMustChangePassword(!!data.user?.must_change_password);
-      await refreshDomains();
+      setIdentities(data.identities || []);
+      setHasPassword(Boolean(data.has_password));
+      setPasskeyCount(Number(data.passkey_count || 0));
+      setIsAdmin(Boolean(data.is_admin));
+      if (!data.user?.must_change_password) {
+        await refreshDomains();
+      }
     } catch {
       clearTokens();
-      setUser(null);
-      setRoles({});
-      setMustChangePassword(false);
+      resetAuthState();
     } finally {
       setLoading(false);
     }
-  }, [refreshDomains]);
+  }, [refreshDomains, resetAuthState]);
 
   useEffect(() => {
     refreshProfile();
@@ -87,7 +108,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const forced = !!data.must_change_password;
     setMustChangePassword(forced);
     if (!forced) {
-      await refreshDomains();
+      await refreshProfile();
     }
     return forced;
   };
@@ -104,9 +125,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       // ignore
     } finally {
       clearTokens();
-      setUser(null);
-      setRoles({});
-      setMustChangePassword(false);
+      resetAuthState();
     }
   };
 
@@ -115,6 +134,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       value={{
         user,
         roles,
+        identities,
+        hasPassword,
+        passkeyCount,
+        isAdmin,
         domains,
         currentDomain,
         loading,

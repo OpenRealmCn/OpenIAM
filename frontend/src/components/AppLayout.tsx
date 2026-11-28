@@ -1,10 +1,13 @@
 import React, { useMemo, useState } from 'react';
 import {
+  Alert,
+  AlertTitle,
   alpha,
   AppBar,
   Autocomplete,
   Avatar,
   Box,
+  Button,
   Chip,
   Divider,
   Drawer,
@@ -33,20 +36,23 @@ import {
   Domain as DomainIcon,
   Gavel as PolicyIcon,
   History as AuditIcon,
+  Home as PortalIcon,
   Hub as ProviderIcon,
   Logout as LogoutIcon,
+  ManageAccounts as ProfileIcon,
   Menu as MenuIcon,
   Palette as PaletteIcon,
   People as PeopleIcon,
   Search as SearchIcon,
   Security as RoleIcon,
   Settings as SettingsIcon,
-  VerifiedUser as ShieldIcon,
   SystemUpdateAlt as VersionIcon,
+  VerifiedUser as ShieldIcon,
 } from '@mui/icons-material';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useSite } from '../context/SiteContext';
 import { MOTION_SPEED_SCALE, useThemeStore } from '../store/themeStore';
 import { PageTransition } from './PageTransition';
 import { ThemeDrawer } from './ThemeDrawer';
@@ -63,10 +69,13 @@ interface NavItem {
   platformOnly?: boolean;
 }
 
-const navSections: { title: string; items: NavItem[] }[] = [
+const adminNavSections: { title: string; items: NavItem[] }[] = [
   {
     title: '总览',
-    items: [{ label: '概览', path: '/', keywords: 'dashboard overview 首页 统计 图表', icon: <DashboardIcon fontSize="small" /> }],
+    items: [
+      { label: '管理概览', path: '/', keywords: 'dashboard overview 首页 统计 图表', icon: <DashboardIcon fontSize="small" /> },
+      { label: '个人工作台', path: '/portal', keywords: 'portal 工作台 个人 首页', icon: <PortalIcon fontSize="small" /> },
+    ],
   },
   {
     title: '访问控制',
@@ -85,11 +94,23 @@ const navSections: { title: string; items: NavItem[] }[] = [
     ],
   },
   {
-    title: '系统',
+    title: '系统与账号',
     items: [
       { label: '审计日志', path: '/audit-logs', keywords: 'audit logs 登录记录 变更记录', icon: <AuditIcon fontSize="small" /> },
-      { label: '系统设置', path: '/system-settings', keywords: 'settings config jwt ratelimit cors 设置', icon: <SettingsIcon fontSize="small" />, platformOnly: true },
+      { label: '系统设置', path: '/system-settings', keywords: 'settings config smtp site 公告 图标 设置', icon: <SettingsIcon fontSize="small" />, platformOnly: true },
       { label: '版本信息', path: '/system-version', keywords: 'version migration 数据库 版本', icon: <VersionIcon fontSize="small" /> },
+      { label: '个人中心', path: '/profile', keywords: 'profile passkey 密码 通行密钥 资料 绑定', icon: <ProfileIcon fontSize="small" /> },
+    ],
+  },
+];
+
+const userNavSections: { title: string; items: NavItem[] }[] = [
+  {
+    title: '个人空间',
+    items: [
+      { label: '工作台', path: '/', keywords: 'portal 首页 概览 工作台', icon: <PortalIcon fontSize="small" /> },
+      { label: '我的应用', path: '/oauth-apps', keywords: 'oauth client 应用 授权码', icon: <AppsIcon fontSize="small" /> },
+      { label: '个人中心', path: '/profile', keywords: 'profile passkey 密码 通行密钥 资料 第三方账号', icon: <ProfileIcon fontSize="small" /> },
     ],
   },
 ];
@@ -103,26 +124,39 @@ export const AppLayout: React.FC = () => {
   const [searchFocused, setSearchFocused] = useState(false);
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const [themeDrawerOpen, setThemeDrawerOpen] = useState(false);
-  const { user, roles, domains, currentDomain, switchDomain, logout } = useAuth();
+  const [logoError, setLogoError] = useState(false);
+  const [announcementDismissed, setAnnouncementDismissed] = useState(false);
+
+  const { user, roles, isAdmin, domains, currentDomain, switchDomain, logout } = useAuth();
+  const { siteInfo } = useSite();
   const location = useLocation();
   const navigate = useNavigate();
 
   const isSuperAdmin = useMemo(() => (roles['openiam'] || []).includes('super_admin'), [roles]);
-  const visibleSections = useMemo(
-    () =>
-      navSections
-        .map((sec) => ({ ...sec, items: sec.items.filter((i) => !i.platformOnly || isSuperAdmin) }))
-        .filter((sec) => sec.items.length > 0),
-    [isSuperAdmin],
-  );
-  const allNavItems = useMemo(() => visibleSections.flatMap((s) => s.items), [visibleSections]);
+  const navSections = useMemo(() => {
+    const base = isAdmin ? adminNavSections : userNavSections;
+    return base
+      .map((sec) => ({ ...sec, items: sec.items.filter((i) => !i.platformOnly || isSuperAdmin) }))
+      .filter((sec) => sec.items.length > 0);
+  }, [isAdmin, isSuperAdmin]);
+  const allNavItems = useMemo(() => navSections.flatMap((s) => s.items), [navSections]);
   const radius = Number(theme.shape.borderRadius);
 
   const handleLogout = async () => {
     setAnchorEl(null);
+    setMobileOpen(false);
     await logout();
     navigate('/login');
   };
+
+  const handleGoProfile = () => {
+    setAnchorEl(null);
+    setMobileOpen(false);
+    navigate('/profile');
+  };
+
+  const initialChar = (user?.display_name || user?.username || 'U').slice(0, 1).toUpperCase();
+  const showDomainSelector = isAdmin || domains.length > 1;
 
   const drawerContent = (
     <Box
@@ -134,35 +168,58 @@ export const AppLayout: React.FC = () => {
       }}
     >
       {/* 品牌标识区 */}
-      <Box sx={{ px: 2.5, py: 2, display: 'flex', alignItems: 'center', gap: 1.5 }}>
-        <Box
-          sx={{
-            width: 36,
-            height: 36,
-            borderRadius: `${Math.max(4, radius)}px`,
-            background: `linear-gradient(135deg, ${theme.palette.primary.main} 0%, ${theme.palette.secondary.main} 100%)`,
-            color: '#fff',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            boxShadow: `0 4px 12px ${alpha(theme.palette.primary.main, 0.28)}`,
-          }}
-        >
-          <ShieldIcon fontSize="small" />
-        </Box>
-        <Box>
-          <Typography variant="subtitle1" fontWeight={700} lineHeight={1.2}>
-            OpenIAM
+      <Box
+        sx={{ px: 2.5, py: 2, display: 'flex', alignItems: 'center', gap: 1.5, cursor: 'pointer' }}
+        onClick={() => {
+          navigate('/');
+          setMobileOpen(false);
+        }}
+      >
+        {siteInfo.logo_url && !logoError ? (
+          <Box
+            component="img"
+            src={siteInfo.logo_url}
+            alt={siteInfo.name}
+            onError={() => setLogoError(true)}
+            sx={{
+              width: 36,
+              height: 36,
+              borderRadius: `${Math.max(4, radius)}px`,
+              objectFit: 'contain',
+              flexShrink: 0,
+            }}
+          />
+        ) : (
+          <Box
+            sx={{
+              width: 36,
+              height: 36,
+              borderRadius: `${Math.max(4, radius)}px`,
+              background: `linear-gradient(135deg, ${theme.palette.primary.main} 0%, ${theme.palette.secondary.main} 100%)`,
+              color: '#fff',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              flexShrink: 0,
+              boxShadow: `0 4px 12px ${alpha(theme.palette.primary.main, 0.28)}`,
+            }}
+          >
+            <ShieldIcon fontSize="small" />
+          </Box>
+        )}
+        <Box sx={{ minWidth: 0 }}>
+          <Typography variant="subtitle1" fontWeight={700} lineHeight={1.2} noWrap>
+            {siteInfo.name || 'OpenIAM'}
           </Typography>
-          <Typography variant="caption" color="text.secondary">
-            身份与访问管理
+          <Typography variant="caption" color="text.secondary" noWrap display="block">
+            {isAdmin ? '管理控制台' : '用户工作台'}
           </Typography>
         </Box>
       </Box>
 
       {/* 导航菜单 */}
       <Box sx={{ flex: 1, overflowY: 'auto', px: 1.5, py: 1 }}>
-        {visibleSections.map((sec) => (
+        {navSections.map((sec) => (
           <Box key={sec.title} sx={{ mb: 2 }}>
             <Typography
               variant="overline"
@@ -219,25 +276,78 @@ export const AppLayout: React.FC = () => {
         ))}
       </Box>
 
-      {/* 底部域状态 */}
-      <Box sx={{ p: 2 }}>
+      {/* 底部用户信息与快捷操作（确保移动端也能一键进入个人中心或退出登录） */}
+      <Box sx={{ p: 1.8 }}>
+        {isAdmin && (
+          <Box
+            sx={{
+              p: 1.2,
+              mb: 1.2,
+              borderRadius: `${radius + 2}px`,
+              bgcolor: 'background.paper',
+              border: 1,
+              borderColor: 'divider',
+            }}
+          >
+            <Typography variant="caption" color="text.secondary" display="block">
+              当前业务域
+            </Typography>
+            <Stack direction="row" alignItems="center" justifyContent="space-between" mt={0.3}>
+              <Typography variant="body2" fontWeight={700} color="primary.main" noWrap>
+                {currentDomain}
+              </Typography>
+              <Chip size="small" label="已连接" color="success" variant="outlined" sx={{ height: 20, fontSize: '0.68rem' }} />
+            </Stack>
+          </Box>
+        )}
+
         <Box
           sx={{
-            p: 1.4,
+            p: 1.2,
             borderRadius: `${radius + 2}px`,
             bgcolor: 'background.paper',
             border: 1,
             borderColor: 'divider',
           }}
         >
-          <Typography variant="caption" color="text.secondary" display="block">
-            当前业务域
-          </Typography>
-          <Stack direction="row" alignItems="center" justifyContent="space-between" mt={0.4}>
-            <Typography variant="body2" fontWeight={700} color="primary.main">
-              {currentDomain}
-            </Typography>
-            <Chip size="small" label="已连接" color="success" variant="outlined" sx={{ height: 20, fontSize: '0.68rem' }} />
+          <Stack direction="row" spacing={1.2} alignItems="center" mb={1}>
+            <Avatar
+              src={user?.avatar_url || undefined}
+              sx={{ width: 32, height: 32, bgcolor: 'primary.main', fontSize: '0.82rem', fontWeight: 700 }}
+            >
+              {initialChar}
+            </Avatar>
+            <Box sx={{ minWidth: 0, flex: 1 }}>
+              <Typography variant="body2" fontWeight={600} noWrap>
+                {user?.display_name || user?.username}
+              </Typography>
+              <Typography variant="caption" color="text.secondary" noWrap display="block">
+                {user?.email}
+              </Typography>
+            </Box>
+          </Stack>
+          <Stack direction="row" spacing={1}>
+            <Button
+              size="small"
+              variant="outlined"
+              fullWidth
+              startIcon={<ProfileIcon fontSize="small" />}
+              onClick={handleGoProfile}
+              sx={{ py: 0.4, fontSize: '0.75rem' }}
+            >
+              个人中心
+            </Button>
+            <Button
+              size="small"
+              color="error"
+              variant="outlined"
+              fullWidth
+              startIcon={<LogoutIcon fontSize="small" />}
+              onClick={handleLogout}
+              sx={{ py: 0.4, fontSize: '0.75rem' }}
+            >
+              退出
+            </Button>
           </Stack>
         </Box>
       </Box>
@@ -260,128 +370,163 @@ export const AppLayout: React.FC = () => {
           borderColor: 'divider',
         }}
       >
-        <Toolbar sx={{ gap: 1.5, minHeight: '60px !important' }}>
-          <IconButton edge="start" onClick={() => setMobileOpen(!mobileOpen)} sx={{ display: { md: 'none' } }}>
+        <Toolbar sx={{ gap: { xs: 0.75, sm: 1.5 }, minHeight: '60px !important', px: { xs: 1.5, sm: 2.5 } }}>
+          <IconButton
+            edge="start"
+            onClick={() => setMobileOpen(!mobileOpen)}
+            sx={{ display: { md: 'none' }, flexShrink: 0 }}
+            aria-label="打开导航菜单"
+          >
             <MenuIcon />
           </IconButton>
 
-          {/* 全局快捷搜索（聚焦平滑展开动画） */}
-          <motion.div
-            animate={{ width: searchFocused ? 310 : 220 }}
-            transition={
-              motionScale === 0
-                ? { duration: 0 }
-                : { type: 'spring', stiffness: 360 / motionScale, damping: 30 }
-            }
-            style={{ maxWidth: '48vw' }}
+          {/* 移动端顶部站点名称 */}
+          <Typography
+            variant="subtitle1"
+            fontWeight={700}
+            noWrap
+            sx={{ display: { xs: 'block', sm: 'none' }, minWidth: 0, flexShrink: 1 }}
           >
-            <Autocomplete
-              size="small"
-              options={allNavItems}
-              getOptionLabel={(o) => o.label}
-              filterOptions={(options, state) => {
-                const q = state.inputValue.trim().toLowerCase();
-                if (!q) return options;
-                return options.filter(
-                  (o) => o.label.toLowerCase().includes(q) || o.keywords.toLowerCase().includes(q),
-                );
-              }}
-              onChange={(_, val) => {
-                if (val) navigate(val.path);
-              }}
-              fullWidth
-              renderInput={(params) => (
-                <TextField
-                  {...params}
-                  placeholder="搜索页面..."
-                  onFocus={() => setSearchFocused(true)}
-                  onBlur={() => setSearchFocused(false)}
-                  InputProps={{
-                    ...params.InputProps,
-                    startAdornment: (
-                      <InputAdornment position="start">
-                        <SearchIcon fontSize="small" color={searchFocused ? 'primary' : 'action'} />
-                      </InputAdornment>
-                    ),
-                  }}
-                  sx={{
-                    '& .MuiOutlinedInput-root': {
-                      bgcolor: 'background.paper',
-                      height: 36,
-                      boxShadow: searchFocused ? `0 0 0 3px ${alpha(theme.palette.primary.main, 0.14)}` : 'none',
-                    },
-                  }}
-                />
-              )}
-            />
-          </motion.div>
+            {siteInfo.name || 'OpenIAM'}
+          </Typography>
 
-          {/* 业务域选择器 */}
-          <FormControl size="small" sx={{ minWidth: { xs: 110, sm: 170 } }}>
-            <Select
-              value={currentDomain}
-              onChange={(e) => switchDomain(e.target.value)}
-              sx={{
-                fontSize: '0.84rem',
-                height: 36,
-                bgcolor: 'background.paper',
-              }}
+          {/* 全局快捷搜索（桌面端与平板显示，避免移动端挤压右侧头像与退出菜单） */}
+          <Box sx={{ display: { xs: 'none', sm: 'block' } }}>
+            <motion.div
+              animate={{ width: searchFocused ? 300 : 210 }}
+              transition={
+                motionScale === 0
+                  ? { duration: 0 }
+                  : { type: 'spring', stiffness: 360 / motionScale, damping: 30 }
+              }
+              style={{ maxWidth: '38vw' }}
             >
-              {domains.length === 0 ? (
-                <MenuItem value="openiam">openiam · 核心域</MenuItem>
-              ) : (
-                domains.map((d) => (
-                  <MenuItem key={d.code} value={d.code}>
-                    {d.code} · {d.name}
-                  </MenuItem>
-                ))
-              )}
-            </Select>
-          </FormControl>
+              <Autocomplete
+                size="small"
+                options={allNavItems}
+                getOptionLabel={(o) => o.label}
+                filterOptions={(options, state) => {
+                  const q = state.inputValue.trim().toLowerCase();
+                  if (!q) return options;
+                  return options.filter(
+                    (o) => o.label.toLowerCase().includes(q) || o.keywords.toLowerCase().includes(q),
+                  );
+                }}
+                onChange={(_, val) => {
+                  if (val) navigate(val.path);
+                }}
+                fullWidth
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    placeholder="搜索页面..."
+                    onFocus={() => setSearchFocused(true)}
+                    onBlur={() => setSearchFocused(false)}
+                    InputProps={{
+                      ...params.InputProps,
+                      startAdornment: (
+                        <InputAdornment position="start">
+                          <SearchIcon fontSize="small" color={searchFocused ? 'primary' : 'action'} />
+                        </InputAdornment>
+                      ),
+                    }}
+                    sx={{
+                      '& .MuiOutlinedInput-root': {
+                        bgcolor: 'background.paper',
+                        height: 36,
+                        boxShadow: searchFocused ? `0 0 0 3px ${alpha(theme.palette.primary.main, 0.14)}` : 'none',
+                      },
+                    }}
+                  />
+                )}
+              />
+            </motion.div>
+          </Box>
+
+          {/* 业务域选择器（移动端自适应缩小） */}
+          {showDomainSelector && (
+            <FormControl size="small" sx={{ minWidth: { xs: 96, sm: 160 }, maxWidth: { xs: 132, sm: 220 } }}>
+              <Select
+                value={currentDomain}
+                onChange={(e) => switchDomain(e.target.value)}
+                sx={{
+                  fontSize: '0.82rem',
+                  height: 34,
+                  bgcolor: 'background.paper',
+                }}
+              >
+                {domains.length === 0 ? (
+                  <MenuItem value="openiam">openiam · 核心域</MenuItem>
+                ) : (
+                  domains.map((d) => (
+                    <MenuItem key={d.code} value={d.code}>
+                      {d.code} · {d.name}
+                    </MenuItem>
+                  ))
+                )}
+              </Select>
+            </FormControl>
+          )}
 
           <Box sx={{ flexGrow: 1 }} />
 
-          {/* 外观与主题抽屉触发器 */}
-          <Tooltip title="外观与主题设置">
-            <IconButton onClick={() => setThemeDrawerOpen(true)} size="small">
-              <PaletteIcon fontSize="small" color="primary" />
-            </IconButton>
-          </Tooltip>
+          {/* 右侧固定操作区：主题 + 深浅色 + 用户头像菜单 */}
+          <Stack direction="row" spacing={{ xs: 0.25, sm: 0.75 }} alignItems="center" sx={{ flexShrink: 0 }}>
+            <Tooltip title="外观与主题设置">
+              <IconButton onClick={() => setThemeDrawerOpen(true)} size="small">
+                <PaletteIcon fontSize="small" color="primary" />
+              </IconButton>
+            </Tooltip>
 
-          <Tooltip title={theme.palette.mode === 'light' ? '切换深色模式' : '切换浅色模式'}>
-            <IconButton onClick={() => toggleColorMode(theme.palette.mode)} size="small">
-              {theme.palette.mode === 'light' ? <DarkIcon fontSize="small" /> : <LightIcon fontSize="small" />}
-            </IconButton>
-          </Tooltip>
+            <Tooltip title={theme.palette.mode === 'light' ? '切换深色模式' : '切换浅色模式'}>
+              <IconButton onClick={() => toggleColorMode(theme.palette.mode)} size="small">
+                {theme.palette.mode === 'light' ? <DarkIcon fontSize="small" /> : <LightIcon fontSize="small" />}
+              </IconButton>
+            </Tooltip>
 
-          <IconButton onClick={(e) => setAnchorEl(e.currentTarget)} sx={{ p: 0.5 }}>
-            <Avatar
-              sx={{
-                width: 32,
-                height: 32,
-                bgcolor: 'primary.main',
-                fontSize: '0.85rem',
-                fontWeight: 700,
-              }}
+            <IconButton
+              onClick={(e) => setAnchorEl(e.currentTarget)}
+              sx={{ p: 0.5 }}
+              aria-label="账号菜单"
             >
-              {(user?.display_name || user?.username || 'A').slice(0, 1).toUpperCase()}
-            </Avatar>
-          </IconButton>
+              <Avatar
+                src={user?.avatar_url || undefined}
+                sx={{
+                  width: 32,
+                  height: 32,
+                  bgcolor: 'primary.main',
+                  fontSize: '0.85rem',
+                  fontWeight: 700,
+                }}
+              >
+                {initialChar}
+              </Avatar>
+            </IconButton>
+          </Stack>
+
           <Menu
             anchorEl={anchorEl}
             open={Boolean(anchorEl)}
             onClose={() => setAnchorEl(null)}
-            PaperProps={{ sx: { minWidth: 200, border: 1, borderColor: 'divider' } }}
+            PaperProps={{ sx: { minWidth: 210, border: 1, borderColor: 'divider' } }}
           >
             <Box sx={{ px: 2, py: 1.2 }}>
-              <Typography variant="subtitle2">{user?.display_name || user?.username}</Typography>
-              <Typography variant="caption" color="text.secondary">
+              <Typography variant="subtitle2" noWrap>
+                {user?.display_name || user?.username}
+              </Typography>
+              <Typography variant="caption" color="text.secondary" noWrap display="block">
                 {user?.email}
               </Typography>
             </Box>
             <Divider />
-            <MenuItem onClick={handleLogout}>
+            <MenuItem onClick={handleGoProfile}>
               <ListItemIcon>
+                <ProfileIcon fontSize="small" />
+              </ListItemIcon>
+              个人中心
+            </MenuItem>
+            <MenuItem onClick={handleLogout} sx={{ color: 'error.main' }}>
+              <ListItemIcon sx={{ color: 'inherit' }}>
                 <LogoutIcon fontSize="small" />
               </ListItemIcon>
               退出登录
@@ -421,7 +566,7 @@ export const AppLayout: React.FC = () => {
         </Drawer>
       </Box>
 
-      {/* 主内容区域（带路由过渡动画） */}
+      {/* 主内容区域（带全局公告与路由过渡动画） */}
       <Box
         component="main"
         sx={{
@@ -432,6 +577,17 @@ export const AppLayout: React.FC = () => {
           maxWidth: '100%',
         }}
       >
+        {siteInfo.announcement_enabled && siteInfo.announcement_content && !announcementDismissed && (
+          <Alert
+            severity={siteInfo.announcement_type || 'info'}
+            onClose={() => setAnnouncementDismissed(true)}
+            sx={{ mb: 2.5 }}
+          >
+            {siteInfo.announcement_title && <AlertTitle>{siteInfo.announcement_title}</AlertTitle>}
+            {siteInfo.announcement_content}
+          </Alert>
+        )}
+
         <AnimatePresence mode="wait">
           <PageTransition key={location.pathname}>
             <Outlet />

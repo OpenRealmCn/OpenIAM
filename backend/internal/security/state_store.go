@@ -18,6 +18,7 @@ type OAuthPluginState struct {
 	ProviderName string `json:"provider_name"`
 	CodeVerifier string `json:"code_verifier"`
 	RedirectTo   string `json:"redirect_to,omitempty"`
+	BindUserID   uint64 `json:"bind_user_id,omitempty"`
 }
 
 type RefreshTokenRecord struct {
@@ -232,4 +233,57 @@ func (s *StateStore) ConsumeConsentRequest(ctx context.Context, id string) (*OAu
 
 func (s *StateStore) DeleteConsentRequest(ctx context.Context, id string) error {
 	return s.rdb.Del(ctx, s.key("oauth_consent", id)).Err()
+}
+
+// SavePasskeySession 暂存 WebAuthn 注册或登录的 Challenge 会话。
+func (s *StateStore) SavePasskeySession(ctx context.Context, sessionID string, rawJSON []byte, ttl time.Duration) error {
+	return s.rdb.Set(ctx, s.key("passkey_session", sessionID), string(rawJSON), ttl).Err()
+}
+
+// ConsumePasskeySession 原子取出并删除 WebAuthn Challenge 会话，防止重放。
+func (s *StateStore) ConsumePasskeySession(ctx context.Context, sessionID string) ([]byte, error) {
+	val, err := s.rdb.GetDel(ctx, s.key("passkey_session", sessionID)).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, ErrStateNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return []byte(val), nil
+}
+
+type PasswordResetRecord struct {
+	UserID uint64 `json:"user_id"`
+	Email  string `json:"email"`
+	Code   string `json:"code"`
+}
+
+// SavePasswordResetCode 保存 6 位一次性重置密码验证码。
+func (s *StateStore) SavePasswordResetCode(ctx context.Context, email string, rec PasswordResetRecord, ttl time.Duration) error {
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	return s.rdb.Set(ctx, s.key("pwd_reset", email), string(b), ttl).Err()
+}
+
+// ConsumePasswordResetCode 校验并原子消费重置密码验证码。
+func (s *StateStore) ConsumePasswordResetCode(ctx context.Context, email, code string) (*PasswordResetRecord, error) {
+	k := s.key("pwd_reset", email)
+	val, err := s.rdb.Get(ctx, k).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, ErrStateNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	var rec PasswordResetRecord
+	if err := json.Unmarshal([]byte(val), &rec); err != nil {
+		return nil, err
+	}
+	if rec.Code != code {
+		return nil, errors.New("验证码不正确")
+	}
+	_ = s.rdb.Del(ctx, k).Err()
+	return &rec, nil
 }

@@ -16,7 +16,7 @@ import (
 
 const (
 	AppVersion            = "0.1.0"
-	ExpectedSchemaVersion = uint(4)
+	ExpectedSchemaVersion = uint(5)
 )
 
 // Status 描述当前应用版本与数据库 Schema 版本状态。
@@ -131,6 +131,7 @@ func AutoMigrateForTesting(db *gorm.DB) error {
 		&models.AuditLog{},
 		&models.SystemVersionHistory{},
 		&models.SystemSetting{},
+		&models.UserPasskey{},
 	); err != nil {
 		return err
 	}

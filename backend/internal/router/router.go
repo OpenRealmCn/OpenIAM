@@ -7,6 +7,7 @@ import (
 	"github.com/openrealm/openiam/internal/audit"
 	"github.com/openrealm/openiam/internal/config"
 	"github.com/openrealm/openiam/internal/handlers"
+	"github.com/openrealm/openiam/internal/mailer"
 	"github.com/openrealm/openiam/internal/middleware"
 	"github.com/openrealm/openiam/internal/oauthplugin"
 	"github.com/openrealm/openiam/internal/oauthserver"
@@ -29,6 +30,7 @@ type Dependencies struct {
 	Enforcer    *rbac.Enforcer
 	AuditSvc    *audit.Service
 	SettingsSvc *settings.Service
+	MailerSvc   *mailer.Service
 	PluginSvc   *oauthplugin.Service
 	OAuthSrv    *oauthserver.Server
 }
@@ -106,8 +108,13 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 	oauthClientH := handlers.NewOAuthClientHandler(deps.DB, deps.AuditSvc, deps.Enforcer)
 	oauthProviderH := handlers.NewOAuthProviderHandler(deps.DB, deps.PluginSvc.Registry(), deps.AuditSvc)
 	auditH := handlers.NewAuditHandler(deps.DB, deps.Enforcer)
+	mailSvc := deps.MailerSvc
+	if mailSvc == nil {
+		mailSvc = mailer.NewService(deps.SettingsSvc)
+	}
 	systemH := handlers.NewSystemHandler(deps.DB, deps.Redis)
-	settingsH := handlers.NewSettingsHandler(deps.SettingsSvc, deps.Enforcer, deps.AuditSvc)
+	settingsH := handlers.NewSettingsHandler(deps.SettingsSvc, deps.Enforcer, mailSvc, deps.AuditSvc)
+	passkeyH := handlers.NewPasskeyHandler(deps.DB, deps.JWTManager, deps.StateStore, deps.Enforcer, deps.AuditSvc, deps.SettingsSvc)
 
 	// OIDC Discovery & JWKS
 	r.GET("/.well-known/openid-configuration", deps.OAuthSrv.Discovery)
@@ -126,6 +133,7 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 	api := r.Group("/api/v1")
 	{
 		api.GET("/health", systemH.Health)
+		api.GET("/site/info", settingsH.PublicSiteInfo)
 
 		// 公开认证与联合登录端点（受严格 IP 速率限制保护）
 		authGroup := api.Group("/auth")
@@ -133,6 +141,10 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 			authGroup.POST("/login", authRateMiddleware, authH.Login)
 			authGroup.POST("/register", authRateMiddleware, authH.Register)
 			authGroup.POST("/refresh", authRateMiddleware, authH.Refresh)
+			authGroup.POST("/password-reset/request", authRateMiddleware, authH.RequestPasswordReset(mailSvc))
+			authGroup.POST("/password-reset/confirm", authRateMiddleware, authH.ConfirmPasswordReset)
+			authGroup.POST("/passkeys/login/begin", authRateMiddleware, passkeyH.BeginPasskeyLogin)
+			authGroup.POST("/passkeys/login/finish", authRateMiddleware, passkeyH.FinishPasskeyLogin)
 			authGroup.GET("/oauth/providers", authH.ListPublicProviders)
 			authGroup.GET("/oauth/:provider/authorize", authRateMiddleware, authH.OAuthAuthorize)
 			authGroup.GET("/oauth/:provider/callback", authRateMiddleware, authH.OAuthCallback)
@@ -145,7 +157,15 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 		{
 			protected.POST("/auth/logout", authH.Logout)
 			protected.GET("/auth/me", authH.Me)
+			protected.PUT("/auth/me", authH.UpdateProfile)
 			protected.POST("/auth/change-password", authH.ChangePassword)
+			protected.GET("/auth/me/identities", authH.ListMyIdentities)
+			protected.POST("/auth/me/identities/:provider/link", authH.StartBindIdentity)
+			protected.DELETE("/auth/me/identities/:id", authH.UnbindIdentity)
+			protected.GET("/auth/passkeys", passkeyH.ListPasskeys)
+			protected.POST("/auth/passkeys/register/begin", passkeyH.BeginRegisterPasskey)
+			protected.POST("/auth/passkeys/register/finish", passkeyH.FinishRegisterPasskey)
+			protected.DELETE("/auth/passkeys/:id", passkeyH.DeletePasskey)
 
 			// OAuth2 授权同意页审批与一次性授权码生成（普通用户默认具备 oauth_clients:authorize 权限）
 			protected.GET("/oauth2/consent/:id", middleware.RequirePermission(deps.Enforcer, "oauth_clients", "authorize"), deps.OAuthSrv.GetConsentRequest)
@@ -163,9 +183,10 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 			protected.GET("/system/version", middleware.RequirePermission(deps.Enforcer, "system", "read"), systemH.VersionInfo)
 			protected.GET("/system/dashboard", middleware.RequirePermission(deps.Enforcer, "system", "read"), systemH.Dashboard)
 			protected.GET("/system/settings", middleware.RequirePermission(deps.Enforcer, "settings", "read"), settingsH.List)
-			// 全局设置属于平台级能力：更新接口显式限定为超管专属（handler 内还有第二次判定）；
+			// 全局设置属于平台级能力：更新与 SMTP 测试接口显式限定为超管专属（handler 内还有第二次判定）；
 			// 读取接口走 Casbin 的 settings:read，同样被 rbac 的平台级闸门限制为仅超管生效。
 			protected.PUT("/system/settings", middleware.RequireSuperAdmin(deps.Enforcer), settingsH.Update)
+			protected.POST("/system/settings/test-smtp", middleware.RequireSuperAdmin(deps.Enforcer), settingsH.TestSMTP)
 
 			// 域管理（domains 是平台级资源，rbac 闸门保证非超管即使被授予 domains:* 也不生效）
 			protected.GET("/domains", domainH.List)

@@ -123,7 +123,7 @@ func policiesToPermissions(rules []rbac.PolicyRule) []rbac.Permission {
 }
 
 // validatePolicyScope 非超级管理员不得配置 super_admin 策略或含通配符的策略，防止自我提权。
-func validatePolicyScope(c *gin.Context, enforcer *rbac.Enforcer, role, resource, action string) bool {
+func validatePolicyScope(c *gin.Context, enforcer *rbac.Enforcer, role, domain, resource, action string, grant bool) bool {
 	if isSuperAdmin(enforcer, CurrentUserID(c)) {
 		return true
 	}
@@ -133,15 +133,36 @@ func validatePolicyScope(c *gin.Context, enforcer *rbac.Enforcer, role, resource
 		Fail(c, http.StatusForbidden, "仅超级管理员可配置通配符或超级管理员策略")
 		return false
 	}
+	if !grant {
+		return true
+	}
+	res, act := strings.TrimSpace(resource), strings.TrimSpace(action)
+	if superAdminOnlyResources[res] && act != "read" {
+		Fail(c, http.StatusForbidden, "仅超级管理员可授予 "+res+" 的写权限")
+		return false
+	}
+	// 只能授予自己已持有的权限，防止通过自行配置策略提权
+	held, err := enforcer.Enforce(CurrentUserID(c), strings.TrimSpace(domain), res, act)
+	if err != nil {
+		Fail(c, http.StatusInternalServerError, "权限校验服务异常")
+		return false
+	}
+	if !held {
+		Fail(c, http.StatusForbidden, "不能授予自己未持有的权限: "+res+" ("+act+")")
+		return false
+	}
 	return true
 }
 
+// superAdminOnlyResources 为仅超级管理员可授予写权限的全局性资源。
+var superAdminOnlyResources = map[string]bool{"settings": true, "oauth_providers": true, "domains": true, "system": true}
+
 // requirePolicyWriteAccess 校验策略所属域的 permissions:write 权限，并限制策略范围。
-func requirePolicyWriteAccess(c *gin.Context, enforcer *rbac.Enforcer, role, domain, resource, action string) bool {
+func requirePolicyWriteAccess(c *gin.Context, enforcer *rbac.Enforcer, role, domain, resource, action string, grant bool) bool {
 	if !requireDomainPermission(c, enforcer, domain, "permissions", "write") {
 		return false
 	}
-	return validatePolicyScope(c, enforcer, role, resource, action)
+	return validatePolicyScope(c, enforcer, role, domain, resource, action, grant)
 }
 
 // scopedDomain 返回列表类接口应使用的域范围：超级管理员可用 domain 参数指定任意域或 "*"（全部）；
@@ -168,6 +189,36 @@ func visibleRoles(c *gin.Context, enforcer *rbac.Enforcer, roles map[string][]st
 		out[dom] = v
 	}
 	return out
+}
+
+// requireTargetInDomain 非超级管理员只能管理「仅属于当前请求域」的用户：
+// 目标用户必须在请求域内持有角色，且不得在其他域持有角色，防止跨域重置、禁用或删除他人账号。
+func requireTargetInDomain(c *gin.Context, enforcer *rbac.Enforcer, targetID uint64) bool {
+	if isSuperAdmin(enforcer, CurrentUserID(c)) || targetID == CurrentUserID(c) {
+		return true
+	}
+	dom := middleware.ResolveDomain(c)
+	roles, err := enforcer.GetAllUserRoles(targetID)
+	if err != nil {
+		Fail(c, http.StatusInternalServerError, "权限校验服务异常")
+		return false
+	}
+	inDomain := false
+	for d, rs := range roles {
+		if len(rs) == 0 {
+			continue
+		}
+		if d != dom {
+			Fail(c, http.StatusForbidden, "目标用户同时属于其他域，仅超级管理员可操作")
+			return false
+		}
+		inDomain = true
+	}
+	if !inDomain {
+		Fail(c, http.StatusForbidden, "目标用户不属于当前域")
+		return false
+	}
+	return true
 }
 
 // requireRoleMutation 校验目标角色所属域的 roles:write 权限；内置系统角色仅超级管理员可修改。

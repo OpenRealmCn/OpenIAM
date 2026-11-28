@@ -84,7 +84,7 @@ type createUserReq struct {
 	Username    string   `json:"username" binding:"required,min=3,max=64,excludes=@"`
 	Email       string   `json:"email" binding:"required,email"`
 	DisplayName string   `json:"display_name"`
-	Password    string   `json:"password" binding:"required,min=8,max=72"`
+	Password    string   `json:"password" binding:"required,min=8,maxbytes=72"`
 	Status      string   `json:"status"`
 	DomainCode  string   `json:"domain_code"`
 	RoleCodes   []string `json:"role_codes"`
@@ -254,7 +254,10 @@ func (h *UserHandler) Update(c *gin.Context) {
 		Status:       "success",
 	})
 	if before.Status == "active" && user.Status != "active" {
-		_ = h.stateStore.RevokeUserTokens(c.Request.Context(), user.ID)
+		if err := h.stateStore.RevokeUserTokens(c.Request.Context(), user.ID); err != nil {
+			Fail(c, http.StatusInternalServerError, "用户已禁用，但撤销旧会话失败，请重试")
+			return
+		}
 	}
 	OK(c, user)
 }
@@ -300,12 +303,15 @@ func (h *UserHandler) Delete(c *gin.Context) {
 		Before:       user,
 		Status:       "success",
 	})
-	_ = h.stateStore.RevokeUserTokens(c.Request.Context(), id)
+	if err := h.stateStore.RevokeUserTokens(c.Request.Context(), id); err != nil {
+		Fail(c, http.StatusInternalServerError, "用户已删除，但撤销旧会话失败，请重试")
+		return
+	}
 	OK(c, gin.H{"deleted": true})
 }
 
 type resetPasswordReq struct {
-	NewPassword string `json:"new_password" binding:"required,min=8,max=72"`
+	NewPassword string `json:"new_password" binding:"required,min=8,maxbytes=72"`
 }
 
 func (h *UserHandler) ResetPassword(c *gin.Context) {

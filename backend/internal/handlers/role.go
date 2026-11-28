@@ -262,7 +262,7 @@ func (h *RoleHandler) SetPermissions(c *gin.Context) {
 	for _, p := range req.Policies {
 		res := strings.TrimSpace(p.Resource)
 		act := strings.TrimSpace(p.Action)
-		if !validatePolicyScope(c, h.enforcer, role.Code, res, act) {
+		if !validatePolicyScope(c, h.enforcer, role.Code, role.DomainCode, res, act, true) {
 			return
 		}
 		requested = append(requested, rbac.Permission{Resource: res, Action: act})

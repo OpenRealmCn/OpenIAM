@@ -31,10 +31,8 @@ func (c *ClientRecord) GetSecret() string {
 }
 
 func (c *ClientRecord) GetDomain() string {
-	if len(c.Model.RedirectURIs) > 0 {
-		return c.Model.RedirectURIs[0]
-	}
-	return ""
+	// 返回该客户端登记的全部回调地址（换行分隔），供 redirect_uri 校验只在「当前客户端」自己的白名单内匹配
+	return strings.Join(c.Model.RedirectURIs, "\n")
 }
 
 func (c *ClientRecord) IsPublic() bool {

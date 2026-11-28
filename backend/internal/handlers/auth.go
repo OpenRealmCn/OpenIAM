@@ -215,7 +215,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 type registerReq struct {
 	Username    string `json:"username" binding:"required,min=3,max=64,excludes=@"`
 	Email       string `json:"email" binding:"required,email"`
-	Password    string `json:"password" binding:"required,min=8,max=72"`
+	Password    string `json:"password" binding:"required,min=8,maxbytes=72"`
 	DisplayName string `json:"display_name"`
 }
 
@@ -385,18 +385,44 @@ func (h *AuthHandler) Me(c *gin.Context) {
 	}
 	var identities []models.UserIdentity
 	h.db.Where("user_id = ?", uid).Find(&identities)
+	var passkeyCount int64
+	h.db.Model(&models.UserPasskey{}).Where("user_id = ?", uid).Count(&passkeyCount)
+
+	isAdmin := false
+	for _, rList := range rolesMap {
+		for _, rc := range rList {
+			if rc == rbac.SuperAdminRole || rc == "domain_admin" || rc == "auditor" {
+				isAdmin = true
+				break
+			}
+		}
+		if isAdmin {
+			break
+		}
+	}
+	if !isAdmin {
+		for _, check := range [][2]string{{"users", "read"}, {"system", "read"}, {"settings", "read"}, {"audit_logs", "read"}} {
+			if ok, _ := h.enforcer.Enforce(uid, domain, check[0], check[1]); ok {
+				isAdmin = true
+				break
+			}
+		}
+	}
 
 	OK(c, gin.H{
-		"user":       user,
-		"roles":      rolesMap,
-		"identities": identities,
-		"policies":   policies,
+		"user":          user,
+		"roles":         rolesMap,
+		"identities":    identities,
+		"policies":      policies,
+		"has_password":  user.PasswordHash != "",
+		"passkey_count": passkeyCount,
+		"is_admin":      isAdmin,
 	})
 }
 
 type changePasswordReq struct {
-	OldPassword string `json:"old_password" binding:"required"`
-	NewPassword string `json:"new_password" binding:"required,min=8,max=72"`
+	OldPassword string `json:"old_password"`
+	NewPassword string `json:"new_password" binding:"required,min=8,maxbytes=72"`
 }
 
 func (h *AuthHandler) ChangePassword(c *gin.Context) {
@@ -411,9 +437,11 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		Fail(c, http.StatusNotFound, "用户不存在")
 		return
 	}
-	if user.PasswordHash != "" && !security.VerifyPassword(user.PasswordHash, req.OldPassword) {
-		Fail(c, http.StatusBadRequest, "原密码不正确")
-		return
+	if user.PasswordHash != "" {
+		if req.OldPassword == "" || !security.VerifyPassword(user.PasswordHash, req.OldPassword) {
+			Fail(c, http.StatusBadRequest, "原密码不正确")
+			return
+		}
 	}
 	// 新口令不得与当前口令相同：否则强制改密账号可以把已知的默认口令原样提交一次，
 	// 标记被清掉、默认口令继续可用，等于绕过整套初始凭据修复。

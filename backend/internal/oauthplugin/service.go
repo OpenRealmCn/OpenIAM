@@ -83,6 +83,18 @@ func (s *Service) refreshTTL() time.Duration {
 
 // StartLogin 生成 state 与 PKCE 并调用插件生成授权跳转 URL。
 func (s *Service) StartLogin(ctx context.Context, providerName, redirectOverride string) (authURL string, state string, err error) {
+	return s.startFlow(ctx, providerName, redirectOverride, 0)
+}
+
+// StartBind 为已登录用户生成绑定第三方 OAuth 账号的授权跳转 URL。
+func (s *Service) StartBind(ctx context.Context, providerName, redirectOverride string, bindUserID uint64) (authURL string, state string, err error) {
+	if bindUserID == 0 {
+		return "", "", errors.New("invalid bind user id")
+	}
+	return s.startFlow(ctx, providerName, redirectOverride, bindUserID)
+}
+
+func (s *Service) startFlow(ctx context.Context, providerName, redirectOverride string, bindUserID uint64) (authURL string, state string, err error) {
 	if vErr := s.validateRedirectOverride(providerName, redirectOverride); vErr != nil {
 		return "", "", vErr
 	}
@@ -105,6 +117,7 @@ func (s *Service) StartLogin(ctx context.Context, providerName, redirectOverride
 	if err := s.stateStore.SaveOAuthPluginState(ctx, state, security.OAuthPluginState{
 		ProviderName: provider.Name,
 		CodeVerifier: verifier,
+		BindUserID:   bindUserID,
 	}, 10*time.Minute); err != nil {
 		return "", "", fmt.Errorf("save oauth state: %w", err)
 	}
@@ -181,6 +194,73 @@ func (s *Service) HandleCallback(ctx context.Context, providerName, code, state,
 	var user models.User
 	isNewUser := false
 
+	// 已登录用户主动发起的第三方账号绑定流程
+	if savedState.BindUserID > 0 {
+		if err := s.db.First(&user, savedState.BindUserID).Error; err != nil {
+			return nil, fmt.Errorf("target user not found: %w", err)
+		}
+		if user.Status != "active" {
+			return nil, errors.New("账号已被禁用")
+		}
+		err = s.db.Where("provider_name = ? AND external_user_id = ?", providerName, extUser.ExternalUserID).First(&identity).Error
+		if err == nil {
+			if identity.UserID != savedState.BindUserID {
+				return nil, errors.New("该第三方账号已绑定到其他用户，无法重复绑定")
+			}
+			identity.ExternalUsername = extUser.Username
+			identity.ExternalEmail = extUser.Email
+			identity.RawProfile = extUser.RawProfile
+			_ = s.db.Save(&identity).Error
+		} else if errors.Is(err, gorm.ErrRecordNotFound) {
+			identity = models.UserIdentity{
+				UserID:           user.ID,
+				ProviderName:     providerName,
+				ExternalUserID:   extUser.ExternalUserID,
+				ExternalUsername: extUser.Username,
+				ExternalEmail:    extUser.Email,
+				RawProfile:       extUser.RawProfile,
+			}
+			if err := s.db.Create(&identity).Error; err != nil {
+				return nil, fmt.Errorf("bind user identity: %w", err)
+			}
+		} else {
+			return nil, err
+		}
+		accessToken, _, _, err := s.jwtMgr.GenerateAccessToken(user.ID, user.Username, user.Email, "openid profile email", "")
+		if err != nil {
+			return nil, err
+		}
+		refreshToken := uuid.NewString()
+		if err := s.stateStore.SaveRefreshToken(ctx, refreshToken, security.RefreshTokenRecord{
+			UserID:   user.ID,
+			Username: user.Username,
+		}, s.refreshTTL()); err != nil {
+			return nil, err
+		}
+		s.auditSvc.Record(audit.Entry{
+			ActorID:       user.ID,
+			ActorUsername: user.Username,
+			DomainCode:    rbac.DefaultDomain,
+			Action:        "user.oauth_bind",
+			ResourceType:  "user_identity",
+			ResourceID:    fmt.Sprintf("%s:%s", providerName, extUser.ExternalUserID),
+			After: map[string]interface{}{
+				"provider":          providerName,
+				"external_username": extUser.Username,
+			},
+			IPAddress: clientIP,
+			UserAgent: userAgent,
+			Status:    "success",
+		})
+		return &LoginResult{
+			AccessToken:  accessToken,
+			RefreshToken: refreshToken,
+			ExpiresIn:    int64(s.jwtMgr.AccessTTL().Seconds()),
+			User:         user,
+			IsNewUser:    false,
+		}, nil
+	}
+
 	err = s.db.Where("provider_name = ? AND external_user_id = ?", providerName, extUser.ExternalUserID).First(&identity).Error
 	if err == nil {
 		if err := s.db.First(&user, identity.UserID).Error; err != nil {
@@ -192,15 +272,25 @@ func (s *Service) HandleCallback(ctx context.Context, providerName, code, state,
 		identity.RawProfile = extUser.RawProfile
 		_ = s.db.Save(&identity).Error
 	} else if errors.Is(err, gorm.ErrRecordNotFound) {
-		// 先尝试按已验证邮箱关联现有账号
-		matchedByEmail := false
+		// 外部邮箱未必经过验证，禁止按邮箱自动关联本地账号；用户需先登录再在个人中心主动绑定
+		// 邮箱冲突一律拒绝，不存在按邮箱自动关联的分支
 		if extUser.Email != "" {
 			if eErr := s.db.Where("email = ?", extUser.Email).First(&user).Error; eErr == nil {
-				return nil, errors.New("该邮箱已被本地账号占用，出于安全原因不允许按邮箱自动关联，请联系管理员处理")
+				s.auditSvc.Record(audit.Entry{
+					DomainCode:   rbac.DefaultDomain,
+					Action:       "auth.oauth_login",
+					ResourceType: "oauth_provider",
+					ResourceID:   providerName,
+					IPAddress:    clientIP,
+					UserAgent:    userAgent,
+					Status:       "failed",
+					ErrorMessage: "external email conflicts with an existing local account; auto-link refused",
+				})
+				return nil, errors.New("该邮箱已被本地账号占用，出于安全原因不允许自动关联：请先使用账号密码登录，再在个人中心绑定该第三方账号")
 			}
 		}
 
-		if !matchedByEmail {
+		{
 			if !provider.AutoRegister {
 				return nil, errors.New("未绑定本地账号且该身份源未开启自动注册")
 			}
@@ -274,9 +364,9 @@ func (s *Service) HandleCallback(ctx context.Context, providerName, code, state,
 			"external_user_id": extUser.ExternalUserID,
 			"is_new_user":      isNewUser,
 		},
-		IPAddress:     clientIP,
-		UserAgent:     userAgent,
-		Status:        "success",
+		IPAddress: clientIP,
+		UserAgent: userAgent,
+		Status:    "success",
 	})
 
 	return &LoginResult{

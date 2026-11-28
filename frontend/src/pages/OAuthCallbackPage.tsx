@@ -29,7 +29,9 @@ export const OAuthCallbackPage: React.FC = () => {
     api.auth
       .oauthCallback(provider, { code, state, redirect_uri: redirectUri })
       .then(async (data) => {
-        await completeOAuthLogin(data.access_token);
+        if (data?.access_token) {
+          await completeOAuthLogin(data.access_token);
+        }
         const target = localStorage.getItem('openiam_post_login_redirect') || '/';
         localStorage.removeItem('openiam_post_login_redirect');
         navigate(target, { replace: true });

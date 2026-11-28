@@ -137,25 +137,11 @@ func NewServer(
 		if redirectURI == "" {
 			return oautherrors.ErrInvalidRedirectURI
 		}
-		var client models.OAuthClient
-		// 首先尝试精准匹配 baseURI，随后在授权和同意接口中也会基于 ClientRecord 校验完整数组
-		if baseURI == redirectURI {
-			return nil
-		}
-		if err := db.Where("status = ?", "active").Find(&[]models.OAuthClient{}).Error; err == nil {
-			_ = client
-		}
-		// 如果 baseURI 为空或只是首地址，校验同一个客户端是否包含 redirectURI
-		var clients []models.OAuthClient
-		db.Where("status = ?", "active").Find(&clients)
-		for _, c := range clients {
-			if len(c.RedirectURIs) == 0 || c.RedirectURIs[0] != baseURI {
-				continue
-			}
-			for _, u := range c.RedirectURIs {
-				if u == redirectURI {
-					return nil
-				}
+		// baseURI 来自 ClientRecord.GetDomain，即「当前请求所属客户端」登记的全部回调地址（换行分隔），
+		// 因此只会在该客户端自己的白名单内匹配，不会借用其他客户端的回调地址
+		for _, u := range strings.Split(baseURI, "\n") {
+			if u == redirectURI {
+				return nil
 			}
 		}
 		return oautherrors.ErrInvalidRedirectURI
@@ -621,6 +607,10 @@ func (s *Server) UserInfo(c *gin.Context) {
 		if strings.HasPrefix(authHeader, "Bearer ") {
 			tokenStr := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
 			if claims, jwtErr := s.jwtMgr.ParseAccessToken(tokenStr); jwtErr == nil && claims.UserID > 0 {
+				if s.userRevoked(c.Request.Context(), claims.UserID, claims.IssuedAtMs) {
+					c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token"})
+					return
+				}
 				s.writeUserInfo(c, claims.UserID)
 				return
 			}
@@ -639,6 +629,10 @@ func (s *Server) UserInfo(c *gin.Context) {
 	uid, err := strconv.ParseUint(ti.GetUserID(), 10, 64)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token"})
+		return
+	}
+	if s.userRevoked(c.Request.Context(), uid, ti.GetAccessCreateAt().UnixMilli()) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "error_description": "令牌已失效"})
 		return
 	}
 	s.writeUserInfo(c, uid)
@@ -669,7 +663,8 @@ func (s *Server) writeUserInfo(c *gin.Context, uid uint64) {
 
 // Revoke 处理 POST /oauth2/revoke (RFC 7009)。
 func (s *Server) Revoke(c *gin.Context) {
-	if !s.authenticateClient(c) {
+	clientID, authed := s.authenticateClient(c, true)
+	if !authed {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client"})
 		return
 	}
@@ -687,10 +682,13 @@ func (s *Server) Revoke(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	_ = s.manager.RemoveAccessToken(ctx, token)
-	_ = s.manager.RemoveRefreshToken(ctx, token)
-	if claims, err := s.jwtMgr.ParseAccessToken(token); err == nil && claims.ID != "" && claims.ExpiresAt != nil {
-		_ = s.stateStore.RevokeAccessToken(ctx, claims.ID, time.Until(claims.ExpiresAt.Time))
+	// 只能撤销属于自己的令牌；归属不符时静默成功（RFC 7009），避免泄露令牌是否存在
+	if owner, found := s.tokenOwner(ctx, token); found && owner == clientID {
+		_ = s.manager.RemoveAccessToken(ctx, token)
+		_ = s.manager.RemoveRefreshToken(ctx, token)
+		if claims, err := s.jwtMgr.ParseAccessToken(token); err == nil && claims.ID != "" && claims.ExpiresAt != nil {
+			_ = s.stateStore.RevokeAccessToken(ctx, claims.ID, time.Until(claims.ExpiresAt.Time))
+		}
 	}
 
 	s.auditSvc.RecordFromContext(c, audit.Entry{
@@ -704,7 +702,8 @@ func (s *Server) Revoke(c *gin.Context) {
 
 // Introspect 处理 POST /oauth2/introspect (RFC 7662)。
 func (s *Server) Introspect(c *gin.Context) {
-	if !s.authenticateClient(c) {
+	clientID, authed := s.authenticateClient(c, false)
+	if !authed {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client"})
 		return
 	}
@@ -723,6 +722,14 @@ func (s *Server) Introspect(c *gin.Context) {
 
 	ctx := c.Request.Context()
 	if ti, err := s.manager.LoadAccessToken(ctx, token); err == nil && ti != nil {
+		if ti.GetClientID() != clientID {
+			c.JSON(http.StatusOK, gin.H{"active": false})
+			return
+		}
+		if uid, pErr := strconv.ParseUint(ti.GetUserID(), 10, 64); pErr == nil && s.userRevoked(ctx, uid, ti.GetAccessCreateAt().UnixMilli()) {
+			c.JSON(http.StatusOK, gin.H{"active": false})
+			return
+		}
 		// 强制改密账号的令牌对外一律视为不可用。这条判定必须和下面的 JWT 回退分支共用，
 		// 否则早已签发的真实 OAuth access token 在账号被标记后依然内省为 active。
 		// 客户端凭据令牌没有用户主体，不参与账号态判定。
@@ -742,8 +749,14 @@ func (s *Server) Introspect(c *gin.Context) {
 		return
 	}
 
-	if claims, err := s.jwtMgr.ParseAccessToken(token); err == nil {
-		revoked, _ := s.stateStore.IsAccessTokenRevoked(ctx, claims.ID)
+	if claims, err := s.jwtMgr.ParseAccessToken(token); err == nil && claims.ClientID == clientID {
+		revoked, rErr := s.stateStore.IsAccessTokenRevoked(ctx, claims.ID)
+		if rErr != nil {
+			revoked = true
+		}
+		if !revoked && claims.UserID > 0 {
+			revoked = s.userRevoked(ctx, claims.UserID, claims.IssuedAtMs)
+		}
 		if !revoked {
 			// 与上面的令牌存储分支共用同一个主体判定：账号处于强制改密、已被删除、
 			// 或查询失败时一律按不可用处理（fail-closed），不再由本分支自己查库、
@@ -808,22 +821,49 @@ func (s *Server) subjectRequiresPasswordChange(ctx context.Context, subject stri
 	return user.MustChangePassword
 }
 
-// authenticateClient 校验调用方为已登记的机密客户端（HTTP Basic 或表单 client_id/client_secret）。
-func (s *Server) authenticateClient(c *gin.Context) bool {
+// authenticateClient 校验调用方客户端身份（HTTP Basic 或表单 client_id/client_secret）并返回其 client_id。
+// 机密客户端必须提供正确密钥；allowPublic 为 true 时公共客户端仅凭 client_id 即可通过（用于 RFC 7009 撤销自己的令牌）。
+func (s *Server) authenticateClient(c *gin.Context, allowPublic bool) (string, bool) {
 	id, secret, ok := c.Request.BasicAuth()
 	if !ok {
 		id = c.PostForm("client_id")
 		secret = c.PostForm("client_secret")
 	}
-	if id == "" || secret == "" {
-		return false
+	if id == "" {
+		return "", false
 	}
 	cli, err := s.manager.GetClient(c.Request.Context(), id)
-	if err != nil || cli == nil || cli.IsPublic() {
-		return false
+	if err != nil || cli == nil {
+		return "", false
 	}
-	verifier, ok := cli.(oauth2.ClientPasswordVerifier)
-	return ok && verifier.VerifyPassword(secret)
+	if cli.IsPublic() {
+		return id, allowPublic
+	}
+	verifier, isVerifier := cli.(oauth2.ClientPasswordVerifier)
+	if secret == "" || !isVerifier || !verifier.VerifyPassword(secret) {
+		return "", false
+	}
+	return id, true
+}
+
+// tokenOwner 返回令牌所属的 client_id；令牌无法识别时 found 为 false。
+func (s *Server) tokenOwner(ctx context.Context, token string) (owner string, found bool) {
+	if ti, err := s.manager.LoadAccessToken(ctx, token); err == nil && ti != nil {
+		return ti.GetClientID(), true
+	}
+	if ti, err := s.manager.LoadRefreshToken(ctx, token); err == nil && ti != nil {
+		return ti.GetClientID(), true
+	}
+	if claims, err := s.jwtMgr.ParseAccessToken(token); err == nil {
+		return claims.ClientID, true
+	}
+	return "", false
+}
+
+// userRevoked 判断令牌签发时间是否早于该用户的令牌失效时间点（改密、禁用、删除后生效）；Redis 异常时按已失效处理。
+func (s *Server) userRevoked(ctx context.Context, userID uint64, issuedAtMs int64) bool {
+	revoked, err := s.stateStore.IsIssuedBeforeRevocation(ctx, userID, issuedAtMs)
+	return err != nil || revoked
 }
 
 // ApplySettings 热更新 OAuth2 授权码与令牌有效期。

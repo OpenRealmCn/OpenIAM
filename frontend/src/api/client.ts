@@ -38,6 +38,7 @@ const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\
 export const http = axios.create({
   baseURL: API_BASE_URL,
   timeout: 15000,
+  withCredentials: true,
 });
 
 http.interceptors.request.use((config: InternalAxiosRequestConfig) => {
@@ -55,7 +56,7 @@ let refreshingPromise: Promise<string | null> | null = null;
 export function refreshAccessToken(): Promise<string | null> {
   if (!refreshingPromise) {
     refreshingPromise = axios
-      .post(`${API_BASE_URL}/auth/refresh`, {}, { timeout: 15000 })
+      .post(`${API_BASE_URL}/auth/refresh`, {}, { timeout: 15000, withCredentials: true })
       .then((res) => {
         const token = res.data.data.access_token as string;
         setTokens(token);
@@ -90,6 +91,9 @@ http.interceptors.response.use(
 );
 
 export const api = {
+  site: {
+    info: () => http.get('/site/info').then((r) => r.data.data),
+  },
   auth: {
     login: (username: string, password: string) =>
       http.post('/auth/login', { username, password }).then((r) => r.data.data),
@@ -98,8 +102,27 @@ export const api = {
     logout: () =>
       http.post('/auth/logout', {}).then((r) => r.data.data),
     me: () => http.get('/auth/me').then((r) => r.data.data),
+    updateProfile: (payload: { display_name: string; avatar_url: string }) =>
+      http.put('/auth/me', payload).then((r) => r.data.data),
     changePassword: (old_password: string, new_password: string) =>
       http.post('/auth/change-password', { old_password, new_password }).then((r) => r.data.data),
+    requestPasswordReset: (email: string) =>
+      http.post('/auth/password-reset/request', { email }).then((r) => r.data.data),
+    confirmPasswordReset: (payload: { email: string; code: string; new_password: string }) =>
+      http.post('/auth/password-reset/confirm', payload).then((r) => r.data.data),
+    listIdentities: () => http.get('/auth/me/identities').then((r) => r.data.data),
+    linkIdentity: (provider: string, redirect_uri?: string) =>
+      http.post(`/auth/me/identities/${provider}/link`, null, { params: { redirect_uri } }).then((r) => r.data.data),
+    unbindIdentity: (id: number) => http.delete(`/auth/me/identities/${id}`).then((r) => r.data.data),
+    listPasskeys: () => http.get('/auth/passkeys').then((r) => r.data.data),
+    passkeyRegisterBegin: () => http.post('/auth/passkeys/register/begin').then((r) => r.data.data),
+    passkeyRegisterFinish: (session_id: string, name: string, credential: unknown) =>
+      http.post('/auth/passkeys/register/finish', credential, { params: { session_id, name } }).then((r) => r.data.data),
+    deletePasskey: (id: number) => http.delete(`/auth/passkeys/${id}`).then((r) => r.data.data),
+    passkeyLoginBegin: (username?: string) =>
+      http.post('/auth/passkeys/login/begin', { username: username || '' }).then((r) => r.data.data),
+    passkeyLoginFinish: (session_id: string, credential: unknown) =>
+      http.post('/auth/passkeys/login/finish', credential, { params: { session_id } }).then((r) => r.data.data),
     publicProviders: () => http.get('/auth/oauth/providers').then((r) => r.data.data),
     oauthAuthorize: (provider: string, redirect_uri?: string) =>
       http.get(`/auth/oauth/${provider}/authorize`, { params: { redirect_uri } }).then((r) => r.data.data),
@@ -222,5 +245,7 @@ export const api = {
     getSettings: () => http.get('/system/settings').then((r) => r.data.data),
     updateSettings: (settings: Record<string, string>) =>
       http.put('/system/settings', { settings }).then((r) => r.data.data),
+    testSMTP: (to: string) =>
+      http.post('/system/settings/test-smtp', { to }).then((r) => r.data.data),
   },
 };

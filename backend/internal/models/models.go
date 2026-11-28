@@ -244,3 +244,19 @@ type SystemSetting struct {
 func (SystemSetting) TableName() string {
 	return "system_settings"
 }
+
+// UserPasskey 存储用户绑定的 WebAuthn 通行密钥凭证。
+type UserPasskey struct {
+	ID             uint64     `gorm:"primaryKey" json:"id"`
+	UserID         uint64     `gorm:"index;not null" json:"user_id"`
+	CredentialID   string     `gorm:"size:512;uniqueIndex;not null" json:"credential_id"`
+	Name           string     `gorm:"size:128;not null;default:''" json:"name"`
+	CredentialJSON string     `gorm:"type:text;not null" json:"-"`
+	LastUsedAt     *time.Time `json:"last_used_at"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+func (UserPasskey) TableName() string {
+	return "user_passkeys"
+}

@@ -574,3 +574,83 @@ func TestOrdinaryUserSelfServiceOAuthClientAndAuthCode(t *testing.T) {
 	assert.Contains(t, tokW.Body.String(), `"access_token"`)
 	assert.Contains(t, tokW.Body.String(), `"id_token"`)
 }
+
+func TestProfilePasskeySiteAndSMTPSettings(t *testing.T) {
+	env := setupTestEnv(t, "")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
+
+	// 1. 公开站点信息接口
+	siteW := doJSON(t, env.engine, http.MethodGet, "/api/v1/site/info", nil, "")
+	require.Equal(t, http.StatusOK, siteW.Code)
+	assert.Contains(t, siteW.Body.String(), `"/logo.png"`)
+
+	// 2. 管理员更新站点公告与 SMTP 密码，验证脱敏与公开接口实时更新
+	updW := doJSON(t, env.engine, http.MethodPut, "/api/v1/system/settings", map[string]interface{}{
+		"settings": map[string]string{
+			"site.name":                 "OpenIAM Prod",
+			"site.announcement_enabled": "true",
+			"site.announcement_title":   "系统维护通知",
+			"site.announcement_content": "今晚 23:00 进行例行升级",
+			"smtp.password":             "SuperSecretSMTPPass!",
+		},
+	}, adminToken)
+	require.Equal(t, http.StatusOK, updW.Code, updW.Body.String())
+	// 响应与列表均不得回传 SMTP 密码明文
+	assert.NotContains(t, updW.Body.String(), "SuperSecretSMTPPass!")
+
+	listSetW := doJSON(t, env.engine, http.MethodGet, "/api/v1/system/settings", nil, adminToken)
+	require.Equal(t, http.StatusOK, listSetW.Code)
+	assert.NotContains(t, listSetW.Body.String(), "SuperSecretSMTPPass!")
+
+	siteAfterW := doJSON(t, env.engine, http.MethodGet, "/api/v1/site/info", nil, "")
+	require.Equal(t, http.StatusOK, siteAfterW.Code)
+	assert.Contains(t, siteAfterW.Body.String(), "OpenIAM Prod")
+	assert.Contains(t, siteAfterW.Body.String(), "系统维护通知")
+
+	// 3. SMTP 未启用时发送测试邮件应返回 502 并给出明确错误
+	testMailW := doJSON(t, env.engine, http.MethodPost, "/api/v1/system/settings/test-smtp", map[string]string{
+		"to": "ops@example.com",
+	}, adminToken)
+	assert.Equal(t, http.StatusBadGateway, testMailW.Code)
+
+	// 4. 区分管理员与普通用户的 is_admin 标记
+	adminMeW := doJSON(t, env.engine, http.MethodGet, "/api/v1/auth/me", nil, adminToken)
+	require.Equal(t, http.StatusOK, adminMeW.Code)
+	assert.Contains(t, adminMeW.Body.String(), `"is_admin":true`)
+
+	regW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "member1",
+		"email":    "member1@openrealm.local",
+		"password": "Member@12345",
+	}, "")
+	require.Equal(t, http.StatusCreated, regW.Code)
+	memberToken, _ := loginAs(t, env.engine, "member1", "Member@12345")
+
+	memberMeW := doJSON(t, env.engine, http.MethodGet, "/api/v1/auth/me", nil, memberToken)
+	require.Equal(t, http.StatusOK, memberMeW.Code)
+	assert.Contains(t, memberMeW.Body.String(), `"is_admin":false`)
+	assert.Contains(t, memberMeW.Body.String(), `"has_password":true`)
+
+	// 5. 个人资料更新与非法头像协议拦截
+	badAvatarW := doJSON(t, env.engine, http.MethodPut, "/api/v1/auth/me", map[string]string{
+		"display_name": "普通成员",
+		"avatar_url":   "javascript:alert(1)",
+	}, memberToken)
+	assert.Equal(t, http.StatusBadRequest, badAvatarW.Code)
+
+	okProfileW := doJSON(t, env.engine, http.MethodPut, "/api/v1/auth/me", map[string]string{
+		"display_name": "普通成员A",
+		"avatar_url":   "/logo.png",
+	}, memberToken)
+	require.Equal(t, http.StatusOK, okProfileW.Code, okProfileW.Body.String())
+	assert.Contains(t, okProfileW.Body.String(), "普通成员A")
+
+	// 6. 通行密钥列表与注册 Challenge 生成
+	pkListW := doJSON(t, env.engine, http.MethodGet, "/api/v1/auth/passkeys", nil, memberToken)
+	require.Equal(t, http.StatusOK, pkListW.Code)
+
+	pkBeginW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/passkeys/register/begin", nil, memberToken)
+	require.Equal(t, http.StatusOK, pkBeginW.Code, pkBeginW.Body.String())
+	assert.Contains(t, pkBeginW.Body.String(), `"session_id"`)
+	assert.Contains(t, pkBeginW.Body.String(), `"challenge"`)
+}

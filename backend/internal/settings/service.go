@@ -34,6 +34,27 @@ const (
 	KeyOAuthPluginCallbackBaseURL = "oauth_plugin.callback_base_url"
 
 	KeyServerCORSAllowOrigins = "server.cors_allow_origins"
+
+	// 站点品牌与首页公告
+	KeySiteName                = "site.name"
+	KeySiteSubtitle            = "site.subtitle"
+	KeySiteLogoURL             = "site.logo_url"
+	KeySiteFaviconURL          = "site.favicon_url"
+	KeySiteAnnouncementEnabled = "site.announcement_enabled"
+	KeySiteAnnouncementTitle   = "site.announcement_title"
+	KeySiteAnnouncementContent = "site.announcement_content"
+	KeySiteAnnouncementType    = "site.announcement_type"
+	KeySiteFooterText          = "site.footer_text"
+
+	// SMTP 邮件服务
+	KeySMTPEnabled    = "smtp.enabled"
+	KeySMTPHost       = "smtp.host"
+	KeySMTPPort       = "smtp.port"
+	KeySMTPUsername   = "smtp.username"
+	KeySMTPPassword   = "smtp.password"
+	KeySMTPFromName   = "smtp.from_name"
+	KeySMTPFromEmail  = "smtp.from_email"
+	KeySMTPEncryption = "smtp.encryption"
 )
 
 // RuntimeSettings 为从数据库加载并缓存在内存中的强类型运行时配置快照。
@@ -59,6 +80,25 @@ type RuntimeSettings struct {
 	OAuthPluginCallbackBaseURL string
 
 	CORSAllowOrigins []string
+
+	SiteName                string
+	SiteSubtitle            string
+	SiteLogoURL             string
+	SiteFaviconURL          string
+	SiteAnnouncementEnabled bool
+	SiteAnnouncementTitle   string
+	SiteAnnouncementContent string
+	SiteAnnouncementType    string
+	SiteFooterText          string
+
+	SMTPEnabled    bool
+	SMTPHost       string
+	SMTPPort       int
+	SMTPUsername   string
+	SMTPPassword   string
+	SMTPFromName   string
+	SMTPFromEmail  string
+	SMTPEncryption string
 }
 
 type settingSpec struct {
@@ -199,6 +239,144 @@ var defaultSpecs = []settingSpec{
 		Label:       "允许跨域来源（CORS）",
 		Description: "允许访问平台接口的前端域名列表，多个地址以英文逗号分隔。",
 	},
+	// 站点品牌与公告
+	{
+		Key:         KeySiteName,
+		Category:    "site",
+		DefaultVal:  "OpenIAM",
+		ValueType:   "string",
+		Label:       "站点名称",
+		Description: "展示在登录页、导航栏及浏览器标签页标题中的平台名称。",
+	},
+	{
+		Key:         KeySiteSubtitle,
+		Category:    "site",
+		DefaultVal:  "OpenRealm 统一身份与访问管理平台",
+		ValueType:   "string",
+		Label:       "站点副标题",
+		Description: "展示在登录页标题下方的简短说明。",
+	},
+	{
+		Key:         KeySiteLogoURL,
+		Category:    "site",
+		DefaultVal:  "/logo.png",
+		ValueType:   "string",
+		Label:       "全局图标（Logo URL）",
+		Description: "展示在导航栏与登录页的品牌图标，支持站内路径（如 /logo.png）或 https:// 图片地址。",
+	},
+	{
+		Key:         KeySiteFaviconURL,
+		Category:    "site",
+		DefaultVal:  "/logo.png",
+		ValueType:   "string",
+		Label:       "浏览器标签图标（Favicon）",
+		Description: "浏览器标签页显示的小图标地址，支持站内路径或 https:// 图片地址。",
+	},
+	{
+		Key:         KeySiteAnnouncementEnabled,
+		Category:    "site",
+		DefaultVal:  "false",
+		ValueType:   "bool",
+		Label:       "启用首页公告",
+		Description: "开启后将在登录页与控制台顶部展示全局通知公告。",
+	},
+	{
+		Key:         KeySiteAnnouncementTitle,
+		Category:    "site",
+		DefaultVal:  "系统公告",
+		ValueType:   "string",
+		Label:       "公告标题",
+		Description: "全局公告横幅的标题文字。",
+	},
+	{
+		Key:         KeySiteAnnouncementContent,
+		Category:    "site",
+		DefaultVal:  "",
+		ValueType:   "text",
+		Label:       "公告内容",
+		Description: "向所有用户展示的维护通知、安全提醒或运维公告。",
+	},
+	{
+		Key:         KeySiteAnnouncementType,
+		Category:    "site",
+		DefaultVal:  "info",
+		ValueType:   "string",
+		Label:       "公告级别",
+		Description: "可选 info（通知）、success（成功）、warning（提醒）、error（重要告警）。",
+	},
+	{
+		Key:         KeySiteFooterText,
+		Category:    "site",
+		DefaultVal:  "© OpenRealm · OpenIAM",
+		ValueType:   "string",
+		Label:       "页脚版权文字",
+		Description: "展示在登录页底部的版权与归属说明。",
+	},
+	// SMTP 邮件服务
+	{
+		Key:         KeySMTPEnabled,
+		Category:    "smtp",
+		DefaultVal:  "false",
+		ValueType:   "bool",
+		Label:       "启用 SMTP 发信",
+		Description: "开启后支持发送测试邮件、密码重置验证码与安全通知。",
+	},
+	{
+		Key:         KeySMTPHost,
+		Category:    "smtp",
+		DefaultVal:  "",
+		ValueType:   "string",
+		Label:       "SMTP 服务器地址",
+		Description: "邮件服务商提供的 SMTP 主机名，例如 smtp.exmail.qq.com 或 smtp.gmail.com。",
+	},
+	{
+		Key:         KeySMTPPort,
+		Category:    "smtp",
+		DefaultVal:  "587",
+		ValueType:   "int",
+		Label:       "SMTP 端口",
+		Description: "常见端口：587（STARTTLS）、465（SSL/TLS）、25（无加密）。",
+	},
+	{
+		Key:         KeySMTPUsername,
+		Category:    "smtp",
+		DefaultVal:  "",
+		ValueType:   "string",
+		Label:       "SMTP 认证账号",
+		Description: "用于登录 SMTP 服务器的用户名或发信邮箱。",
+	},
+	{
+		Key:         KeySMTPPassword,
+		Category:    "smtp",
+		DefaultVal:  "",
+		ValueType:   "secret",
+		Label:       "SMTP 授权码 / 密码",
+		Description: "SMTP 认证密码或应用专用授权码（留空保存将保留原密码）。",
+	},
+	{
+		Key:         KeySMTPFromName,
+		Category:    "smtp",
+		DefaultVal:  "OpenIAM",
+		ValueType:   "string",
+		Label:       "发件人名称",
+		Description: "收件人看到的发件人显示名称。",
+	},
+	{
+		Key:         KeySMTPFromEmail,
+		Category:    "smtp",
+		DefaultVal:  "",
+		ValueType:   "string",
+		Label:       "发件人邮箱",
+		Description: "对外发送邮件使用的 From 邮箱地址（留空时默认使用 SMTP 认证账号）。",
+	},
+	{
+		Key:         KeySMTPEncryption,
+		Category:    "smtp",
+		DefaultVal:  "starttls",
+		ValueType:   "string",
+		Label:       "传输加密方式",
+		Description: "可选 starttls（推荐，端口 587）、tls（隐式 SSL/TLS，端口 465）或 none。",
+	},
 }
 
 // Service 管理持久化在数据库中的全部动态系统设置及热更新通知。
@@ -283,6 +461,23 @@ func (s *Service) Reload() error {
 		OAuthServerRefreshTokenTTL:    time.Duration(parseInt(kv[KeyOAuthServerRefreshTokenTTLHours], 720)) * time.Hour,
 		OAuthPluginCallbackBaseURL:    fallbackStr(kv[KeyOAuthPluginCallbackBaseURL], "http://localhost:5173/oauth/callback"),
 		CORSAllowOrigins:              splitCSV(fallbackStr(kv[KeyServerCORSAllowOrigins], "http://localhost:5173,http://127.0.0.1:5173")),
+		SiteName:                      fallbackStr(kv[KeySiteName], "OpenIAM"),
+		SiteSubtitle:                  strings.TrimSpace(kv[KeySiteSubtitle]),
+		SiteLogoURL:                   fallbackStr(kv[KeySiteLogoURL], "/logo.png"),
+		SiteFaviconURL:                fallbackStr(kv[KeySiteFaviconURL], "/logo.png"),
+		SiteAnnouncementEnabled:       parseBool(kv[KeySiteAnnouncementEnabled], false),
+		SiteAnnouncementTitle:         fallbackStr(kv[KeySiteAnnouncementTitle], "系统公告"),
+		SiteAnnouncementContent:       strings.TrimSpace(kv[KeySiteAnnouncementContent]),
+		SiteAnnouncementType:          fallbackStr(kv[KeySiteAnnouncementType], "info"),
+		SiteFooterText:                fallbackStr(kv[KeySiteFooterText], "© OpenRealm · OpenIAM"),
+		SMTPEnabled:                   parseBool(kv[KeySMTPEnabled], false),
+		SMTPHost:                      strings.TrimSpace(kv[KeySMTPHost]),
+		SMTPPort:                      parseInt(kv[KeySMTPPort], 587),
+		SMTPUsername:                  strings.TrimSpace(kv[KeySMTPUsername]),
+		SMTPPassword:                  kv[KeySMTPPassword],
+		SMTPFromName:                  fallbackStr(kv[KeySMTPFromName], "OpenIAM"),
+		SMTPFromEmail:                 strings.TrimSpace(kv[KeySMTPFromEmail]),
+		SMTPEncryption:                fallbackStr(kv[KeySMTPEncryption], "starttls"),
 	}
 
 	s.mu.Lock()
@@ -302,10 +497,16 @@ func (s *Service) Snapshot() RuntimeSettings {
 	return s.snapshot
 }
 
+// ListAll 返回全部设置项（对敏感密钥字段自动脱敏，不向前端明文回传）。
 func (s *Service) ListAll() ([]models.SystemSetting, error) {
 	var rows []models.SystemSetting
 	if err := s.db.Order("category ASC, id ASC").Find(&rows).Error; err != nil {
 		return nil, err
+	}
+	for i := range rows {
+		if IsSecretKey(rows[i].SettingKey) && rows[i].Value != "" {
+			rows[i].Value = ""
+		}
 	}
 	return rows, nil
 }
@@ -334,13 +535,22 @@ func (s *Service) UpdateBatch(updates map[string]string, actorID uint64) (before
 		if !ok {
 			return nil, nil, fmt.Errorf("未知的系统设置项: %s", k)
 		}
+		// 敏感密钥字段留空时表示保留原值，避免前端未修改密码时意外清空
+		if IsSecretKey(k) && strings.TrimSpace(rawVal) == "" {
+			continue
+		}
 		normVal, err := validateSettingValue(item.SettingKey, item.ValueType, rawVal)
 		if err != nil {
 			return nil, nil, err
 		}
 		if item.Value != normVal {
-			before[k] = item.Value
-			after[k] = normVal
+			if IsSecretKey(k) {
+				before[k] = "***REDACTED***"
+				after[k] = "***REDACTED***"
+			} else {
+				before[k] = item.Value
+				after[k] = normVal
+			}
 			validated[k] = normVal
 		}
 	}
@@ -404,10 +614,13 @@ func validateSettingValue(key, valueType, raw string) (string, error) {
 				return "", fmt.Errorf("限流表达式 %s 格式无效（示例: 15-M, 120-M, 20-S）", trimmed)
 			}
 		}
-		if trimmed == "" {
+		if trimmed == "" && !optionalEmptyKeys[key] {
 			return "", fmt.Errorf("设置项 %s 不能为空", key)
 		}
 		if err := validateURLSetting(key, trimmed); err != nil {
+			return "", err
+		}
+		if err := validateEnumOrSpecialSetting(key, trimmed); err != nil {
 			return "", err
 		}
 		return trimmed, nil

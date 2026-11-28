@@ -222,7 +222,7 @@ func (h *PermissionHandler) AddPolicy(c *gin.Context) {
 	req.Domain = strings.TrimSpace(req.Domain)
 	req.Resource = strings.TrimSpace(req.Resource)
 	req.Action = strings.TrimSpace(req.Action)
-	if !requirePolicyWriteAccess(c, h.enforcer, req.Role, req.Domain, req.Resource, req.Action) {
+	if !requirePolicyWriteAccess(c, h.enforcer, req.Role, req.Domain, req.Resource, req.Action, true) {
 		return
 	}
 	// 策略写入同样受「可委派上限 ∩ 调用者自身权限」约束，并且在写入前确认角色属于该域，
@@ -259,7 +259,7 @@ func (h *PermissionHandler) RemovePolicy(c *gin.Context) {
 	req.Domain = strings.TrimSpace(req.Domain)
 	req.Resource = strings.TrimSpace(req.Resource)
 	req.Action = strings.TrimSpace(req.Action)
-	if !requirePolicyWriteAccess(c, h.enforcer, req.Role, req.Domain, req.Resource, req.Action) {
+	if !requirePolicyWriteAccess(c, h.enforcer, req.Role, req.Domain, req.Resource, req.Action, false) {
 		return
 	}
 	removed, err := h.enforcer.RemovePolicy(req.Role, req.Domain, req.Resource, req.Action)

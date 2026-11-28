@@ -149,9 +149,43 @@ export interface SystemSetting {
   setting_key: string;
   category: string;
   value: string;
-  value_type: 'string' | 'int' | 'bool' | 'string_list';
+  value_type: 'string' | 'int' | 'bool' | 'string_list' | 'text' | 'secret';
   label: string;
   description: string;
   updated_by: number;
   updated_at: string;
+}
+
+export interface SiteInfo {
+  name: string;
+  subtitle: string;
+  logo_url: string;
+  favicon_url: string;
+  announcement_enabled: boolean;
+  announcement_title: string;
+  announcement_content: string;
+  announcement_type: 'info' | 'success' | 'warning' | 'error';
+  footer_text: string;
+  allow_public_register: boolean;
+  smtp_enabled: boolean;
+}
+
+export interface UserIdentity {
+  id: number;
+  user_id: number;
+  provider_name: string;
+  external_user_id: string;
+  external_username: string;
+  external_email: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UserPasskey {
+  id: number;
+  user_id: number;
+  credential_id: string;
+  name: string;
+  last_used_at: string | null;
+  created_at: string;
 }

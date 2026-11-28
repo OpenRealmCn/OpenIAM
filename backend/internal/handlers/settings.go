@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/openrealm/openiam/internal/audit"
+	"github.com/openrealm/openiam/internal/mailer"
 	"github.com/openrealm/openiam/internal/rbac"
 	"github.com/openrealm/openiam/internal/settings"
 )
@@ -12,11 +13,30 @@ import (
 type SettingsHandler struct {
 	svc      *settings.Service
 	enforcer *rbac.Enforcer
+	mailSvc  *mailer.Service
 	auditSvc *audit.Service
 }
 
-func NewSettingsHandler(svc *settings.Service, enforcer *rbac.Enforcer, auditSvc *audit.Service) *SettingsHandler {
-	return &SettingsHandler{svc: svc, enforcer: enforcer, auditSvc: auditSvc}
+func NewSettingsHandler(svc *settings.Service, enforcer *rbac.Enforcer, mailSvc *mailer.Service, auditSvc *audit.Service) *SettingsHandler {
+	return &SettingsHandler{svc: svc, enforcer: enforcer, mailSvc: mailSvc, auditSvc: auditSvc}
+}
+
+// PublicSiteInfo 公开返回站点名称、图标、首页公告等非敏感品牌与运维配置。
+func (h *SettingsHandler) PublicSiteInfo(c *gin.Context) {
+	snap := h.svc.Snapshot()
+	OK(c, gin.H{
+		"name":                  snap.SiteName,
+		"subtitle":              snap.SiteSubtitle,
+		"logo_url":              snap.SiteLogoURL,
+		"favicon_url":           snap.SiteFaviconURL,
+		"announcement_enabled":  snap.SiteAnnouncementEnabled,
+		"announcement_title":    snap.SiteAnnouncementTitle,
+		"announcement_content":  snap.SiteAnnouncementContent,
+		"announcement_type":     snap.SiteAnnouncementType,
+		"footer_text":           snap.SiteFooterText,
+		"allow_public_register": snap.AllowPublicRegister,
+		"smtp_enabled":          snap.SMTPEnabled,
+	})
 }
 
 func (h *SettingsHandler) List(c *gin.Context) {
@@ -66,4 +86,47 @@ func (h *SettingsHandler) Update(c *gin.Context) {
 
 	items, _ := h.svc.ListAll()
 	OK(c, items)
+}
+
+type testSMTPReq struct {
+	To string `json:"to" binding:"required,email"`
+}
+
+// TestSMTP 使用当前数据库中保存的 SMTP 配置发送一封测试邮件。
+func (h *SettingsHandler) TestSMTP(c *gin.Context) {
+	if !h.enforcer.IsSuperAdmin(CurrentUserID(c)) {
+		Fail(c, http.StatusForbidden, "仅平台超级管理员可测试全局邮件服务")
+		return
+	}
+	var req testSMTPReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		Fail(c, http.StatusBadRequest, "请输入有效的测试收件人邮箱")
+		return
+	}
+	if h.mailSvc == nil {
+		Fail(c, http.StatusInternalServerError, "邮件服务未初始化")
+		return
+	}
+	if err := h.mailSvc.SendTestEmail(c.Request.Context(), req.To); err != nil {
+		h.auditSvc.RecordFromContext(c, audit.Entry{
+			DomainCode:   rbac.DefaultDomain,
+			Action:       "system.smtp.test",
+			ResourceType: "system_setting",
+			ResourceID:   "smtp",
+			After:        map[string]interface{}{"to": req.To},
+			Status:       "failed",
+			ErrorMessage: err.Error(),
+		})
+		Fail(c, http.StatusBadGateway, "测试邮件发送失败: "+err.Error())
+		return
+	}
+	h.auditSvc.RecordFromContext(c, audit.Entry{
+		DomainCode:   rbac.DefaultDomain,
+		Action:       "system.smtp.test",
+		ResourceType: "system_setting",
+		ResourceID:   "smtp",
+		After:        map[string]interface{}{"to": req.To},
+		Status:       "success",
+	})
+	OK(c, gin.H{"sent": true})
 }
