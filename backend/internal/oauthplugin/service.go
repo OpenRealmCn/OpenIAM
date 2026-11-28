@@ -231,7 +231,7 @@ func (s *Service) HandleCallback(ctx context.Context, providerName, code, state,
 		if rErr != nil {
 			return nil, fmt.Errorf("verify bind session: %w", rErr)
 		}
-		if vErr := bindStateError(savedState, user, revoked); vErr != nil {
+		if vErr := bindStateError(*savedState, user, revoked); vErr != nil {
 			s.auditSvc.Record(audit.Entry{
 				ActorID:      savedState.BindUserID,
 				DomainCode:   rbac.DefaultDomain,
