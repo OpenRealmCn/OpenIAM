@@ -16,7 +16,7 @@ import (
 
 const (
 	AppVersion            = "0.1.0"
-	ExpectedSchemaVersion = uint(5)
+	ExpectedSchemaVersion = uint(6)
 )
 
 // Status 描述当前应用版本与数据库 Schema 版本状态。
