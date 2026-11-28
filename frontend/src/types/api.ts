@@ -17,6 +17,8 @@ export interface User {
   status: string;
   last_login_at: string | null;
   last_login_ip: string;
+  // 强制改密状态：为 true 时登录后只能先改密（后端限制），控制台据此跳转改密页。
+  must_change_password?: boolean;
   created_at: string;
   updated_at: string;
   roles?: Record<string, string[]>;

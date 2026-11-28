@@ -54,6 +54,8 @@ type SeedConfig struct {
 	Enabled       bool
 	AdminUsername string
 	AdminEmail    string
+	// AdminPassword 为空库首次初始化的初始管理员口令，必须通过 OPENIAM_SEED_ADMIN_PASSWORD 显式提供。
+	// 本字段不再有内置默认值；未提供、长度/复杂度不达标或仍为历史默认口令时，初始化会直接失败。
 	AdminPassword string
 }
 
@@ -87,7 +89,8 @@ func Default() *BootstrapConfig {
 			Enabled:       true,
 			AdminUsername: "admin",
 			AdminEmail:    "admin@openrealm.local",
-			AdminPassword: "Admin@123456",
+			// 故意留空：必须在部署时显式设置强口令，否则空库初始化失败。
+			AdminPassword: "",
 		},
 	}
 }

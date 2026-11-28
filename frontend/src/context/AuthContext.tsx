@@ -16,10 +16,11 @@ interface AuthContextValue {
   domains: Domain[];
   currentDomain: string;
   loading: boolean;
+  mustChangePassword: boolean;
   switchDomain: (domainCode: string) => void;
   refreshProfile: () => Promise<void>;
   refreshDomains: () => Promise<void>;
-  loginWithCredentials: (username: string, password: string) => Promise<void>;
+  loginWithCredentials: (username: string, password: string) => Promise<boolean>;
   completeOAuthLogin: (accessToken: string) => Promise<void>;
   logout: () => Promise<void>;
 }
@@ -32,6 +33,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [domains, setDomains] = useState<Domain[]>([]);
   const [currentDomain, setDomainState] = useState<string>(getCurrentDomain());
   const [loading, setLoading] = useState<boolean>(true);
+  const [mustChangePassword, setMustChangePassword] = useState<boolean>(false);
 
   const refreshDomains = useCallback(async () => {
     try {
@@ -47,6 +49,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!token) {
       setUser(null);
       setRoles({});
+      setMustChangePassword(false);
       setLoading(false);
       return;
     }
@@ -54,11 +57,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const data = await api.auth.me();
       setUser(data.user);
       setRoles(data.roles || {});
+      setMustChangePassword(!!data.user?.must_change_password);
       await refreshDomains();
     } catch {
       clearTokens();
       setUser(null);
       setRoles({});
+      setMustChangePassword(false);
     } finally {
       setLoading(false);
     }
@@ -73,12 +78,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setDomainState(domainCode);
   };
 
-  const loginWithCredentials = async (username: string, password: string) => {
+  // 返回是否处于强制改密状态，交给调用方决定跳改密页还是进控制台。
+  const loginWithCredentials = async (username: string, password: string): Promise<boolean> => {
     const data = await api.auth.login(username, password);
     setTokens(data.access_token);
     setUser(data.user);
     setRoles(data.roles || {});
-    await refreshDomains();
+    const forced = !!data.must_change_password;
+    setMustChangePassword(forced);
+    if (!forced) {
+      await refreshDomains();
+    }
+    return forced;
   };
 
   const completeOAuthLogin = async (accessToken: string) => {
@@ -95,6 +106,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       clearTokens();
       setUser(null);
       setRoles({});
+      setMustChangePassword(false);
     }
   };
 
@@ -106,6 +118,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         domains,
         currentDomain,
         loading,
+        mustChangePassword,
         switchDomain,
         refreshProfile,
         refreshDomains,

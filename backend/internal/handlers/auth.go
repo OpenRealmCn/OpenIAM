@@ -147,6 +147,37 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		"last_login_ip": c.ClientIP(),
 	}).Error
 
+	// 强制改密状态：只签发短期受限令牌，不下发 Refresh Token；
+	// 该令牌仅能用于修改密码与退出登录，其余接口由 AuthMiddleware 统一返回 403 password_change_required。
+	if user.MustChangePassword {
+		accessToken, _, _, err := h.jwtMgr.GenerateAccessToken(
+			user.ID, user.Username, user.Email,
+			security.ScopePasswordChange, "", security.PasswordChangeTokenTTL,
+		)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, "签发令牌失败")
+			return
+		}
+		clearRefreshCookie(c)
+		h.auditSvc.RecordFromContext(c, audit.Entry{
+			ActorID:       user.ID,
+			ActorUsername: user.Username,
+			DomainCode:    rbac.DefaultDomain,
+			Action:        "auth.login",
+			ResourceType:  "user",
+			ResourceID:    fmt.Sprintf("%d", user.ID),
+			After:         map[string]interface{}{"must_change_password": true},
+			Status:        "success",
+		})
+		OK(c, gin.H{
+			"access_token":         accessToken,
+			"expires_in":           int64(security.PasswordChangeTokenTTL.Seconds()),
+			"must_change_password": true,
+			"user":                 user,
+		})
+		return
+	}
+
 	accessToken, _, _, err := h.jwtMgr.GenerateAccessToken(user.ID, user.Username, user.Email, "openid profile email", "")
 	if err != nil {
 		Fail(c, http.StatusInternalServerError, "签发令牌失败")
@@ -271,6 +302,15 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 		Fail(c, http.StatusUnauthorized, "用户不存在或已被禁用")
 		return
 	}
+	if user.MustChangePassword {
+		// 强制改密期间不允许续期会话，必须重新登录并先完成改密。
+		c.JSON(http.StatusForbidden, gin.H{
+			"code":    403,
+			"error":   "password_change_required",
+			"message": "当前账号处于强制改密状态，请重新登录并先修改密码",
+		})
+		return
+	}
 
 	accessToken, _, _, err := h.jwtMgr.GenerateAccessToken(user.ID, user.Username, user.Email, "openid profile email", "")
 	if err != nil {
@@ -375,12 +415,33 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		Fail(c, http.StatusBadRequest, "原密码不正确")
 		return
 	}
+	// 新口令不得与当前口令相同：否则强制改密账号可以把已知的默认口令原样提交一次，
+	// 标记被清掉、默认口令继续可用，等于绕过整套初始凭据修复。
+	if security.VerifyPassword(user.PasswordHash, req.NewPassword) {
+		Fail(c, http.StatusBadRequest, "新密码不能与当前密码相同")
+		return
+	}
+	if security.IsLegacyDefaultPassword(req.NewPassword) {
+		Fail(c, http.StatusBadRequest, "新密码不能使用历史默认口令")
+		return
+	}
+	// 强制改密（初始管理员）沿用初始口令策略，避免用 8 位弱口令替代初始强口令。
+	if user.MustChangePassword {
+		if vErr := security.ValidateInitialPassword(req.NewPassword); vErr != nil {
+			Fail(c, http.StatusBadRequest, "新密码不符合初始口令策略: "+vErr.Error())
+			return
+		}
+	}
 	hash, err := security.HashPassword(req.NewPassword)
 	if err != nil {
 		Fail(c, http.StatusInternalServerError, "密码加密失败")
 		return
 	}
-	if err := h.db.Model(&user).Update("password_hash", hash).Error; err != nil {
+	// 改密成功即清除强制改密标记，并在下方吊销该用户此前签发的所有会话。
+	if err := h.db.Model(&user).Updates(map[string]interface{}{
+		"password_hash":        hash,
+		"must_change_password": false,
+	}).Error; err != nil {
 		Fail(c, http.StatusInternalServerError, "修改密码失败")
 		return
 	}

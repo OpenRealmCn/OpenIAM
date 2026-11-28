@@ -10,6 +10,7 @@ import { buildOpenIAMTheme } from './theme/theme';
 import { AppLayout } from './components/AppLayout';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { LoginPage } from './pages/LoginPage';
+import { ChangePasswordPage } from './pages/ChangePasswordPage';
 import { OAuthCallbackPage } from './pages/OAuthCallbackPage';
 import { OAuthConsentPage } from './pages/OAuthConsentPage';
 import { DashboardPage } from './pages/DashboardPage';
@@ -55,6 +56,14 @@ export const App: React.FC = () => {
           <BrowserRouter>
             <Routes>
               <Route path="/login" element={<LoginPage />} />
+              <Route
+                path="/change-password"
+                element={
+                  <ProtectedRoute>
+                    <ChangePasswordPage />
+                  </ProtectedRoute>
+                }
+              />
               <Route path="/oauth/callback/:provider" element={<OAuthCallbackPage />} />
               <Route
                 path="/oauth2/consent"

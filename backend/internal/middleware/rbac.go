@@ -24,6 +24,37 @@ func ResolveDomain(c *gin.Context) string {
 	return dom
 }
 
+// RequireSuperAdmin 仅放行持有平台超管身份的用户，用于全局设置等平台级接口。
+// 超管身份来自 Casbin 中 openiam 域的固定角色常量，不依赖任何请求头或可编辑字段。
+func RequireSuperAdmin(enforcer *rbac.Enforcer) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		uidVal, ok := c.Get("user_id")
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"code":    401,
+				"message": "未认证用户",
+			})
+			return
+		}
+		userID, ok := uidVal.(uint64)
+		if !ok || userID == 0 {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"code":    401,
+				"message": "无效的用户身份",
+			})
+			return
+		}
+		if !enforcer.IsSuperAdmin(userID) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"code":    403,
+				"message": "仅平台超级管理员可执行该操作",
+			})
+			return
+		}
+		c.Next()
+	}
+}
+
 // RequirePermission 返回基于 Casbin 多域 RBAC 的权限校验中间件。
 func RequirePermission(enforcer *rbac.Enforcer, resource, action string) gin.HandlerFunc {
 	return func(c *gin.Context) {

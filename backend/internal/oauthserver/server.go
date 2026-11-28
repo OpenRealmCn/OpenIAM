@@ -39,7 +39,10 @@ func (g *JWTAccessGenerator) Token(ctx context.Context, data *oauth2.GenerateBas
 		if id, parseErr := strconv.ParseUint(data.UserID, 10, 64); parseErr == nil {
 			userID = id
 			var user models.User
-			if err := g.db.WithContext(ctx).Select("id, username, email").First(&user, id).Error; err == nil {
+			if err := g.db.WithContext(ctx).Select("id, username, email, must_change_password").First(&user, id).Error; err == nil {
+				if user.MustChangePassword {
+					return "", "", security.ErrPasswordChangeRequired
+				}
 				username = user.Username
 				email = user.Email
 			}
@@ -78,6 +81,7 @@ type Server struct {
 	settingsSvc *settings.Service
 	manager     *manage.Manager
 	oauthSrv    *server.Server
+	tokenStore  *RedisTokenStore
 }
 
 func NewServer(
@@ -182,6 +186,7 @@ func NewServer(
 		settingsSvc: settingsSvc,
 		manager:     mgr,
 		oauthSrv:    srv,
+		tokenStore:  tokenStore,
 	}
 
 	srv.SetClientAuthorizedHandler(func(clientID string, grant oauth2.GrantType) (bool, error) {
@@ -558,6 +563,9 @@ func (s *Server) CreateAuthorizationCode(c *gin.Context) {
 
 // Token 处理 POST /oauth2/token。
 func (s *Server) Token(c *gin.Context) {
+	if s.rejectPasswordChangeGrant(c) {
+		return
+	}
 	if err := s.oauthSrv.HandleTokenRequest(c.Writer, c.Request); err != nil {
 		s.auditSvc.RecordFromContext(c, audit.Entry{
 			DomainCode:   rbac.DefaultDomain,
@@ -567,6 +575,41 @@ func (s *Server) Token(c *gin.Context) {
 			ErrorMessage: err.Error(),
 		})
 	}
+}
+
+// rejectPasswordChangeGrant 在 OAuth2 令牌端点拦下强制改密账号的 refresh_token 续期请求。
+// authorization_code 授权码在同意阶段就已被 AuthMiddleware 拦截，签发阶段再由 JWTAccessGenerator 兜底拒绝。
+func (s *Server) rejectPasswordChangeGrant(c *gin.Context) bool {
+	if err := c.Request.ParseForm(); err != nil {
+		return false
+	}
+	if c.Request.PostForm.Get("grant_type") != string(oauth2.Refreshing) {
+		return false
+	}
+	token := c.Request.PostForm.Get("refresh_token")
+	if token == "" {
+		return false
+	}
+	ti, err := s.tokenStore.GetByRefresh(c.Request.Context(), token)
+	if err != nil || ti == nil {
+		return false
+	}
+	uid, err := strconv.ParseUint(ti.GetUserID(), 10, 64)
+	if err != nil || uid == 0 {
+		return false
+	}
+	var user models.User
+	if err := s.db.WithContext(c.Request.Context()).Select("id, must_change_password").First(&user, uid).Error; err != nil {
+		return false
+	}
+	if !user.MustChangePassword {
+		return false
+	}
+	c.JSON(http.StatusForbidden, gin.H{
+		"error":             "password_change_required",
+		"error_description": "当前账号处于强制改密状态，请先修改密码",
+	})
+	return true
 }
 
 // UserInfo 处理 GET /oauth2/userinfo，校验 OAuth2 Bearer Token 并返回 OIDC 用户信息。
@@ -609,6 +652,10 @@ func (s *Server) writeUserInfo(c *gin.Context, uid uint64) {
 	}
 	if user.Status != "active" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "error_description": "用户已被禁用"})
+		return
+	}
+	if user.MustChangePassword {
+		c.JSON(http.StatusForbidden, gin.H{"error": "password_change_required", "error_description": "当前账号处于强制改密状态，请先修改密码"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -676,6 +723,14 @@ func (s *Server) Introspect(c *gin.Context) {
 
 	ctx := c.Request.Context()
 	if ti, err := s.manager.LoadAccessToken(ctx, token); err == nil && ti != nil {
+		// 强制改密账号的令牌对外一律视为不可用。这条判定必须和下面的 JWT 回退分支共用，
+		// 否则早已签发的真实 OAuth access token 在账号被标记后依然内省为 active。
+		// 客户端凭据令牌没有用户主体，不参与账号态判定。
+		if subject := userTokenSubject(ti.GetUserID(), 0); subject != "" &&
+			s.subjectRequiresPasswordChange(ctx, subject) {
+			c.JSON(http.StatusOK, gin.H{"active": false})
+			return
+		}
 		exp := ti.GetAccessCreateAt().Add(ti.GetAccessExpiresIn()).Unix()
 		c.JSON(http.StatusOK, gin.H{
 			"active":    true,
@@ -690,6 +745,16 @@ func (s *Server) Introspect(c *gin.Context) {
 	if claims, err := s.jwtMgr.ParseAccessToken(token); err == nil {
 		revoked, _ := s.stateStore.IsAccessTokenRevoked(ctx, claims.ID)
 		if !revoked {
+			// 与上面的令牌存储分支共用同一个主体判定：账号处于强制改密、已被删除、
+			// 或查询失败时一律按不可用处理（fail-closed），不再由本分支自己查库、
+			// 避免两条分支对内省结果给出不一致的结论。
+			// 客户端凭据令牌没有用户主体（签发器把 userID=0 写成 sub="0"），不参与账号态判定。
+			if subject := userTokenSubject(claims.Subject, claims.UserID); subject != "" &&
+				s.subjectRequiresPasswordChange(ctx, subject) {
+				revoked = true
+			}
+		}
+		if !revoked {
 			c.JSON(http.StatusOK, gin.H{
 				"active":    true,
 				"client_id": claims.ClientID,
@@ -703,6 +768,44 @@ func (s *Server) Introspect(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"active": false})
+}
+
+// userTokenSubject 从令牌主体里取出代表用户账号的部分。
+// 客户端凭据（client_credentials）令牌不属于任何用户：go-oauth2 签发时不设置 UserID，
+// 令牌存储里的 GetUserID() 为空，JWT 签发器又把 userID=0 写成 sub="0"。若把这种主体
+// 交给账号态判定，合法的机器对机器令牌会一律内省为 inactive（空主体按 fail-closed 处理），
+// 因此这里显式区分：返回空串表示该令牌不代表任何用户账号。
+func userTokenSubject(subject string, userID uint64) string {
+	subject = strings.TrimSpace(subject)
+	if subject == "" && userID > 0 {
+		subject = strconv.FormatUint(userID, 10)
+	}
+	if subject == "" {
+		return ""
+	}
+	if id, err := strconv.ParseUint(subject, 10, 64); err == nil && id == 0 {
+		return ""
+	}
+	return subject
+}
+
+// subjectRequiresPasswordChange 判断令牌主体当前是否处于强制改密状态。
+// 主体无法解析为账号、或账号已不存在时按「不可用」处理（fail-closed）。
+func (s *Server) subjectRequiresPasswordChange(ctx context.Context, subject string) bool {
+	subject = strings.TrimSpace(subject)
+	if subject == "" {
+		return true
+	}
+	var user models.User
+	q := s.db.WithContext(ctx).Select("id, must_change_password")
+	if id, err := strconv.ParseUint(subject, 10, 64); err == nil {
+		if err := q.First(&user, id).Error; err != nil {
+			return true
+		}
+	} else if err := q.Where("username = ?", subject).First(&user).Error; err != nil {
+		return true
+	}
+	return user.MustChangePassword
 }
 
 // authenticateClient 校验调用方为已登记的机密客户端（HTTP Basic 或表单 client_id/client_secret）。

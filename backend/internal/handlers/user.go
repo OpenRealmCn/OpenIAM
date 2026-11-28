@@ -108,6 +108,10 @@ func (h *UserHandler) Create(c *gin.Context) {
 		if rejectSuperAdminGrant(c, h.enforcer, req.RoleCodes) {
 			return
 		}
+		// 建号时夹带角色同样是一次授予，必须过可委派上限检查。
+		if !h.requireAssignableRoles(c, roleDomain, req.RoleCodes) {
+			return
+		}
 	}
 	if req.Status != "" && req.Status != "active" && req.Status != "disabled" {
 		Fail(c, http.StatusBadRequest, "无效的用户状态")
@@ -192,11 +196,24 @@ func (h *UserHandler) Update(c *gin.Context) {
 	if protectSuperAdminTarget(c, h.enforcer, id) {
 		return
 	}
+	// 对象归属：目标用户必须在操作者本次办理的域内至少有一个角色绑定（超管除外）。
+	// 越界时不区分"不存在"与"不在你的域"，统一 404，避免跨域探测。
+	bindings, ok := requireTargetUserInDomain(c, h.enforcer, id, middleware.ResolveDomain(c))
+	if !ok {
+		return
+	}
+	// 共享身份：目标用户在别的域也有角色绑定，说明它的资料与状态属于全平台身份。
+	// 否则任一所属域的域管理员都能改其邮箱或停用账号，波及其它域。
+	if outside := bindingsOutsideDomain(bindings, middleware.ResolveDomain(c)); len(outside) > 0 &&
+		!isSuperAdmin(h.enforcer, CurrentUserID(c)) {
+		Fail(c, http.StatusForbidden, "该用户同时在其它域有归属，其资料与状态只能由平台超级管理员修改")
+		return
+	}
 	before := user
 
+	// 严格解析：domain_code / role_codes / username / is_super_admin 之类身份边界字段一律拒绝。
 	var req updateUserReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数错误")
+	if !decodeStrictJSON(c, &req) {
 		return
 	}
 
@@ -213,6 +230,12 @@ func (h *UserHandler) Update(c *gin.Context) {
 		if req.Status != "active" && req.Status != "disabled" {
 			Fail(c, http.StatusBadRequest, "无效的用户状态")
 			return
+		}
+		// 保护管理路径：不允许把平台上最后一个可用超管停用（包括操作者本人）。
+		if req.Status != "active" && user.Status == "active" && isSuperAdmin(h.enforcer, id) {
+			if h.guardLastSuperAdmin(c, id, "不能停用最后一个可用的超级管理员") {
+				return
+			}
 		}
 		user.Status = req.Status
 	}
@@ -246,14 +269,22 @@ func (h *UserHandler) Delete(c *gin.Context) {
 		Fail(c, http.StatusBadRequest, "不能删除当前登录账号")
 		return
 	}
+	// 删除抹掉的是全平台身份（可能同时属于多个域），本批收紧为超级管理员专属。
+	if !isSuperAdmin(h.enforcer, CurrentUserID(c)) {
+		Fail(c, http.StatusForbidden, "仅超级管理员可删除用户")
+		return
+	}
 	var user models.User
 	if err := h.db.First(&user, id).Error; err != nil {
 		Fail(c, http.StatusNotFound, "用户不存在")
 		return
 	}
 
-	if protectSuperAdminTarget(c, h.enforcer, id) {
-		return
+	// 保护管理路径：不允许删掉最后一个可用超管。
+	if isSuperAdmin(h.enforcer, id) {
+		if h.guardLastSuperAdmin(c, id, "不能删除最后一个可用的超级管理员") {
+			return
+		}
 	}
 	if err := h.db.Delete(&user).Error; err != nil {
 		Fail(c, http.StatusInternalServerError, "删除用户失败")
@@ -283,8 +314,12 @@ func (h *UserHandler) ResetPassword(c *gin.Context) {
 		Fail(c, http.StatusBadRequest, "无效的用户 ID")
 		return
 	}
+	// 严格解析：只接受 new_password，body 里夹带其它字段（domain_code、status 等）一律 400。
 	var req resetPasswordReq
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if !decodeStrictJSON(c, &req) {
+		return
+	}
+	if n := len(req.NewPassword); n < 8 || n > 72 {
 		Fail(c, http.StatusBadRequest, "新密码需为 8~72 位")
 		return
 	}
@@ -293,8 +328,33 @@ func (h *UserHandler) ResetPassword(c *gin.Context) {
 		Fail(c, http.StatusNotFound, "用户不存在")
 		return
 	}
-	if protectSuperAdminTarget(c, h.enforcer, id) {
+	// 超级管理员账号的密码绝不允许通过该接口重置（超管本人也不行）。
+	if isSuperAdmin(h.enforcer, id) {
+		Fail(c, http.StatusForbidden, "不允许重置超级管理员账号的密码")
 		return
+	}
+	// 密码是全局凭据：改一个跨域共享账号的密码等于动了别的域。
+	// 只有"角色绑定全部落在操作者域内"的账号，才允许由该域管理员重置；否则仅超管可重置。
+	bindings, bErr := userBindings(h.enforcer, id)
+	if bErr != nil {
+		Fail(c, http.StatusInternalServerError, "查询用户归属失败")
+		return
+	}
+	if !isSuperAdmin(h.enforcer, CurrentUserID(c)) {
+		dom := middleware.ResolveDomain(c)
+		if len(h.enforcer.GetRolesForUserInDomain(CurrentUserID(c), dom)) == 0 {
+			Fail(c, http.StatusForbidden, "无权在该域操作")
+			return
+		}
+		if len(bindings[dom]) == 0 {
+			denyTargetUserNotFound(c)
+			return
+		}
+		// 不在响应里列出其它域名：域管理员不应借此枚举他不该知道的域。
+		if outside := bindingsOutsideDomain(bindings, dom); len(outside) > 0 {
+			Fail(c, http.StatusForbidden, "该账号同时属于其它域，密码只能由超级管理员重置")
+			return
+		}
 	}
 	hash, err := security.HashPassword(req.NewPassword)
 	if err != nil {
@@ -350,6 +410,44 @@ type assignRolesReq struct {
 	Replace    bool     `json:"replace"` // true 时替换该域下原有角色；false 时增量添加
 }
 
+// requireAssignableRoles 校验把 roleCodes 授予目标域用户后不会造成越权：
+//  1. 角色必须真实存在于目标域（禁止引用其它域的角色，也禁止挂不存在的角色）；
+//  2. 角色在该域的最终生效权限集合必须落在调用者可委派上限与自身权限内
+//     —— 直接授予一个已存在的高权角色同样会被拦下。
+//
+// 超管不受限。注意这里看的是角色「当前」的最终权限，而不是角色名或角色是否内置。
+func (h *UserHandler) requireAssignableRoles(c *gin.Context, domain string, roleCodes []string) bool {
+	if h.enforcer.IsSuperAdmin(CurrentUserID(c)) {
+		return true
+	}
+	seen := make(map[string]struct{}, len(roleCodes))
+	for _, rc := range roleCodes {
+		code := strings.TrimSpace(rc)
+		if code == "" {
+			continue
+		}
+		if _, ok := seen[code]; ok {
+			continue
+		}
+		seen[code] = struct{}{}
+
+		var role models.Role
+		if err := h.db.Where("domain_code = ? AND code = ?", domain, code).First(&role).Error; err != nil {
+			Fail(c, http.StatusForbidden, "角色 ["+code+"] 不存在于域 ["+domain+"]，禁止跨域引用角色")
+			return false
+		}
+		rules, err := h.enforcer.GetPolicies(domain, code)
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, "查询角色权限失败")
+			return false
+		}
+		if !validateDelegablePolicies(c, h.enforcer, domain, policiesToPermissions(rules)) {
+			return false
+		}
+	}
+	return true
+}
+
 // AssignRoles 为用户在指定域分配或替换角色，并记录完整前后审计快照。
 func (h *UserHandler) AssignRoles(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
@@ -378,6 +476,22 @@ func (h *UserHandler) AssignRoles(c *gin.Context) {
 	}
 	if protectSuperAdminTarget(c, h.enforcer, id) {
 		return
+	}
+	// 授权边界：只能给「已经属于该域」的用户分配角色。
+	// 否则域管理员可以先给外域用户挂一个本域空角色、自行制造归属，
+	// 再借这个归属修改其全局资料或停用账号，等于跨域接管。
+	if _, ok := requireTargetUserInDomain(c, h.enforcer, id, req.DomainCode); !ok {
+		return
+	}
+	if !h.requireAssignableRoles(c, req.DomainCode, req.RoleCodes) {
+		return
+	}
+	// 保护管理路径：替换角色时不得把最后一个可用超管的 super_admin 摘掉。
+	if req.Replace && req.DomainCode == rbac.DefaultDomain && isSuperAdmin(h.enforcer, id) &&
+		!containsString(req.RoleCodes, rbac.SuperAdminRole) {
+		if h.guardLastSuperAdmin(c, id, "不能移除最后一个可用超级管理员的超级管理员角色") {
+			return
+		}
 	}
 
 	beforeRoles := h.enforcer.GetRolesForUserInDomain(id, req.DomainCode)
@@ -430,6 +544,15 @@ func (h *UserHandler) RevokeRole(c *gin.Context) {
 	if protectSuperAdminTarget(c, h.enforcer, id) {
 		return
 	}
+	if _, ok := requireTargetUserInDomain(c, h.enforcer, id, domain); !ok {
+		return
+	}
+	// 保护管理路径：不得撤销最后一个可用超管的 super_admin 角色。
+	if domain == rbac.DefaultDomain && roleCode == rbac.SuperAdminRole && isSuperAdmin(h.enforcer, id) {
+		if h.guardLastSuperAdmin(c, id, "不能撤销最后一个可用超级管理员的超级管理员角色") {
+			return
+		}
+	}
 
 	beforeRoles := h.enforcer.GetRolesForUserInDomain(id, domain)
 	_, err = h.enforcer.DeleteRoleForUserInDomain(id, roleCode, domain)
@@ -450,4 +573,51 @@ func (h *UserHandler) RevokeRole(c *gin.Context) {
 	})
 
 	OK(c, gin.H{"roles": afterRoles})
+}
+
+// isLastActiveSuperAdmin 判断摘掉目标之后平台是否就没有可用超管了。
+// 只看「除目标之外」的 active 超管数量：为 0 时，停用/降权/删除目标就会让平台失去管理入口。
+func (h *UserHandler) isLastActiveSuperAdmin(targetID uint64) (bool, error) {
+	ids, err := h.enforcer.GetUsersForRoleInDomain(rbac.SuperAdminRole, rbac.DefaultDomain)
+	if err != nil {
+		return false, err
+	}
+	others := make([]uint64, 0, len(ids))
+	for _, id := range ids {
+		if id != targetID {
+			others = append(others, id)
+		}
+	}
+	if len(others) == 0 {
+		return true, nil
+	}
+	var active int64
+	if err := h.db.Model(&models.User{}).Where("id IN ? AND status = ?", others, "active").Count(&active).Error; err != nil {
+		return false, err
+	}
+	return active == 0, nil
+}
+
+// guardLastSuperAdmin 在"会让平台失去最后一个可用超管"时写出 409；返回 true 表示已拒绝。
+func (h *UserHandler) guardLastSuperAdmin(c *gin.Context, targetID uint64, msg string) bool {
+	last, err := h.isLastActiveSuperAdmin(targetID)
+	if err != nil {
+		Fail(c, http.StatusInternalServerError, "校验超级管理员数量失败")
+		return true
+	}
+	if !last {
+		return false
+	}
+	Fail(c, http.StatusConflict, msg)
+	return true
+}
+
+// containsString 判断字符串切片是否包含目标值（忽略首尾空格）。
+func containsString(list []string, target string) bool {
+	for _, item := range list {
+		if strings.TrimSpace(item) == target {
+			return true
+		}
+	}
+	return false
 }

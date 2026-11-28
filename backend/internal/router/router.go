@@ -107,7 +107,7 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 	oauthProviderH := handlers.NewOAuthProviderHandler(deps.DB, deps.PluginSvc.Registry(), deps.AuditSvc)
 	auditH := handlers.NewAuditHandler(deps.DB, deps.Enforcer)
 	systemH := handlers.NewSystemHandler(deps.DB, deps.Redis)
-	settingsH := handlers.NewSettingsHandler(deps.SettingsSvc, deps.AuditSvc)
+	settingsH := handlers.NewSettingsHandler(deps.SettingsSvc, deps.Enforcer, deps.AuditSvc)
 
 	// OIDC Discovery & JWKS
 	r.GET("/.well-known/openid-configuration", deps.OAuthSrv.Discovery)
@@ -163,9 +163,11 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 			protected.GET("/system/version", middleware.RequirePermission(deps.Enforcer, "system", "read"), systemH.VersionInfo)
 			protected.GET("/system/dashboard", middleware.RequirePermission(deps.Enforcer, "system", "read"), systemH.Dashboard)
 			protected.GET("/system/settings", middleware.RequirePermission(deps.Enforcer, "settings", "read"), settingsH.List)
-			protected.PUT("/system/settings", middleware.RequirePermission(deps.Enforcer, "settings", "write"), settingsH.Update)
+			// 全局设置属于平台级能力：更新接口显式限定为超管专属（handler 内还有第二次判定）；
+			// 读取接口走 Casbin 的 settings:read，同样被 rbac 的平台级闸门限制为仅超管生效。
+			protected.PUT("/system/settings", middleware.RequireSuperAdmin(deps.Enforcer), settingsH.Update)
 
-			// 域管理
+			// 域管理（domains 是平台级资源，rbac 闸门保证非超管即使被授予 domains:* 也不生效）
 			protected.GET("/domains", domainH.List)
 			protected.POST("/domains", middleware.RequirePermission(deps.Enforcer, "domains", "write"), domainH.Create)
 			protected.PUT("/domains/:id", middleware.RequirePermission(deps.Enforcer, "domains", "write"), domainH.Update)
@@ -207,7 +209,7 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 			protected.POST("/oauth-clients/:id/rotate-secret", middleware.RequirePermission(deps.Enforcer, "oauth_clients", "write"), oauthClientH.RotateSecret)
 			protected.DELETE("/oauth-clients/:id", middleware.RequirePermission(deps.Enforcer, "oauth_clients", "write"), oauthClientH.Delete)
 
-			// 外部 OAuth 联合登录插件管理
+			// 外部 OAuth 联合登录插件管理（oauth_providers 是全局身份源，属平台级资源）
 			protected.GET("/oauth-providers/plugins", middleware.RequirePermission(deps.Enforcer, "oauth_providers", "read"), oauthProviderH.ListPlugins)
 			protected.GET("/oauth-providers", middleware.RequirePermission(deps.Enforcer, "oauth_providers", "read"), oauthProviderH.List)
 			protected.POST("/oauth-providers", middleware.RequirePermission(deps.Enforcer, "oauth_providers", "write"), oauthProviderH.Create)

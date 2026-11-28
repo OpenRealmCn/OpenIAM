@@ -92,17 +92,19 @@ func (Domain) TableName() string { return "domains" }
 
 // User 代表平台身份主体。
 type User struct {
-	ID           uint64     `gorm:"primaryKey" json:"id"`
-	Username     string     `gorm:"size:64;uniqueIndex;not null" json:"username"`
-	Email        string     `gorm:"size:128;uniqueIndex;not null" json:"email"`
-	DisplayName  string     `gorm:"size:128;not null;default:''" json:"display_name"`
-	PasswordHash string     `gorm:"size:255;not null;default:''" json:"-"`
-	AvatarURL    string     `gorm:"size:512;not null;default:''" json:"avatar_url"`
-	Status       string     `gorm:"size:32;not null;default:'active'" json:"status"` // active | disabled
-	LastLoginAt  *time.Time `json:"last_login_at"`
-	LastLoginIP  string     `gorm:"size:64;not null;default:''" json:"last_login_ip"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	ID           uint64 `gorm:"primaryKey" json:"id"`
+	Username     string `gorm:"size:64;uniqueIndex;not null" json:"username"`
+	Email        string `gorm:"size:128;uniqueIndex;not null" json:"email"`
+	DisplayName  string `gorm:"size:128;not null;default:''" json:"display_name"`
+	PasswordHash string `gorm:"size:255;not null;default:''" json:"-"`
+	AvatarURL    string `gorm:"size:512;not null;default:''" json:"avatar_url"`
+	Status       string `gorm:"size:32;not null;default:'active'" json:"status"` // active | disabled
+	// MustChangePassword 表示账号处于强制改密状态：登录后只能修改密码或退出，不能访问任何业务接口。
+	MustChangePassword bool       `gorm:"not null;default:false" json:"must_change_password"`
+	LastLoginAt        *time.Time `json:"last_login_at"`
+	LastLoginIP        string     `gorm:"size:64;not null;default:''" json:"last_login_ip"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 func (User) TableName() string { return "users" }
