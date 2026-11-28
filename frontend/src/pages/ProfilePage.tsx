@@ -29,6 +29,7 @@ import {
 } from '@mui/material';
 import {
   Add as AddIcon,
+  Computer as DeviceIcon,
   DeleteOutline as DeleteIcon,
   Fingerprint as PasskeyIcon,
   GitHub as GitHubIcon,
@@ -36,21 +37,31 @@ import {
   Link as LinkIcon,
   LinkOff as UnlinkIcon,
   LockReset as PasswordIcon,
+  Logout as KickIcon,
   Person as PersonIcon,
-  Save as SaveIcon,
+  QrCode2 as TOTPIcon,
+  Refresh as RegenIcon,
   Security as SecurityIcon,
+  Shield as RiskIcon,
   VpnKey as OAuthIcon,
 } from '@mui/icons-material';
+import QRCode from 'qrcode';
 import dayjs from 'dayjs';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
-import { PublicProvider, UserIdentity, UserPasskey } from '../types/api';
+import {
+  PublicProvider,
+  RiskEvent,
+  TOTPStatus,
+  UserIdentity,
+  UserPasskey,
+  UserSession,
+} from '../types/api';
 import { createPasskeyCredential, isWebAuthnSupported } from '../utils/webauthn';
 
-const TAB_KEYS = ['basic', 'security', 'oauth'] as const;
+const TAB_KEYS = ['basic', 'security', 'sessions', 'oauth', 'risk'] as const;
 type TabKey = (typeof TAB_KEYS)[number];
-
 const ALLOWED_AVATAR_EXT_RE = /\.(png|ico|jpg)$/i;
 
 function validateAvatarInput(raw: string, isAdmin: boolean): string {
@@ -88,20 +99,20 @@ export const ProfilePage: React.FC = () => {
   const theme = useTheme();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { user, isAdmin, hasPassword, refreshProfile, logout } = useAuth();
+  const { user, isAdmin, adminTier, hasPassword, refreshProfile, logout } = useAuth();
 
   const initialTab = TAB_KEYS.includes(searchParams.get('tab') as TabKey)
     ? (searchParams.get('tab') as TabKey)
     : 'basic';
   const [tab, setTab] = useState<TabKey>(initialTab);
 
-  // 全局反馈
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
   // 基本资料表单
   const [displayName, setDisplayName] = useState(user?.display_name || '');
   const [avatarUrl, setAvatarUrl] = useState(user?.avatar_url || '');
+  const [phone, setPhone] = useState(user?.phone || '');
   const [savingProfile, setSavingProfile] = useState(false);
 
   // 修改密码表单
@@ -117,6 +128,24 @@ export const ProfilePage: React.FC = () => {
   const [newPasskeyName, setNewPasskeyName] = useState('');
   const [registeringPasskey, setRegisteringPasskey] = useState(false);
 
+  // TOTP 状态
+  const [totpStatus, setTotpStatus] = useState<TOTPStatus>({ enabled: false, verified_at: null, remaining_recovery_codes: 0 });
+  const [totpSetupOpen, setTotpSetupOpen] = useState(false);
+  const [totpSecret, setTotpSecret] = useState('');
+  const [totpQrDataUrl, setTotpQrDataUrl] = useState('');
+  const [totpVerifyCode, setTotpVerifyCode] = useState('');
+  const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
+  const [unbindDialogOpen, setUnbindDialogOpen] = useState(false);
+  const [unbindPassword, setUnbindPassword] = useState('');
+  const [unbindCode, setUnbindCode] = useState('');
+
+  // 会话与设备
+  const [sessions, setSessions] = useState<UserSession[]>([]);
+  const [loadingSessions, setLoadingSessions] = useState(false);
+
+  // 风险安全记录
+  const [riskEvents, setRiskEvents] = useState<RiskEvent[]>([]);
+
   // 第三方账号绑定
   const [providers, setProviders] = useState<PublicProvider[]>([]);
   const [identities, setIdentities] = useState<UserIdentity[]>([]);
@@ -125,6 +154,7 @@ export const ProfilePage: React.FC = () => {
   useEffect(() => {
     setDisplayName(user?.display_name || '');
     setAvatarUrl(user?.avatar_url || '');
+    setPhone(user?.phone || '');
   }, [user]);
 
   useEffect(() => {
@@ -139,8 +169,7 @@ export const ProfilePage: React.FC = () => {
   const loadPasskeys = useCallback(async () => {
     setLoadingPasskeys(true);
     try {
-      const list = await api.auth.listPasskeys();
-      setPasskeys(list || []);
+      setPasskeys((await api.auth.listPasskeys()) || []);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -148,13 +177,37 @@ export const ProfilePage: React.FC = () => {
     }
   }, []);
 
+  const loadTOTP = useCallback(async () => {
+    try {
+      setTotpStatus(await api.auth.totpStatus());
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const loadSessions = useCallback(async () => {
+    setLoadingSessions(true);
+    try {
+      setSessions((await api.auth.mySessions()) || []);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoadingSessions(false);
+    }
+  }, []);
+
+  const loadRiskEvents = useCallback(async () => {
+    try {
+      setRiskEvents((await api.auth.myRiskEvents()) || []);
+    } catch {
+      // ignore
+    }
+  }, []);
+
   const loadOAuthBindings = useCallback(async () => {
     setLoadingOAuth(true);
     try {
-      const [provList, idList] = await Promise.all([
-        api.auth.publicProviders(),
-        api.auth.listIdentities(),
-      ]);
+      const [provList, idList] = await Promise.all([api.auth.publicProviders(), api.auth.listIdentities()]);
       setProviders(provList || []);
       setIdentities(idList || []);
     } catch (err) {
@@ -165,9 +218,8 @@ export const ProfilePage: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    loadPasskeys();
-    loadOAuthBindings();
-  }, [loadPasskeys, loadOAuthBindings]);
+    void Promise.all([loadPasskeys(), loadTOTP(), loadSessions(), loadOAuthBindings(), loadRiskEvents()]);
+  }, [loadPasskeys, loadTOTP, loadSessions, loadOAuthBindings, loadRiskEvents]);
 
   const handleTabChange = (_: React.SyntheticEvent, value: TabKey) => {
     setTab(value);
@@ -190,6 +242,7 @@ export const ProfilePage: React.FC = () => {
       await api.auth.updateProfile({
         display_name: displayName.trim(),
         avatar_url: avatarUrl.trim(),
+        phone: phone.trim(),
       });
       await refreshProfile();
       setSuccess('个人资料已更新');
@@ -230,6 +283,63 @@ export const ProfilePage: React.FC = () => {
     }
   };
 
+  const handleOpenTOTPSetup = async () => {
+    setError('');
+    setRecoveryCodes([]);
+    setTotpVerifyCode('');
+    try {
+      const data = await api.auth.totpSetup();
+      setTotpSecret(data.secret);
+      const qr = await QRCode.toDataURL(data.otpauth_uri, { width: 220, margin: 1 });
+      setTotpQrDataUrl(qr);
+      setTotpSetupOpen(true);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const handleVerifyBindTOTP = async () => {
+    setError('');
+    try {
+      const res = await api.auth.totpVerifyBind(totpVerifyCode.trim());
+      setRecoveryCodes(res.recovery_codes || []);
+      setTotpSetupOpen(false);
+      await Promise.all([loadTOTP(), refreshProfile()]);
+      setSuccess('已成功启用 TOTP 验证器，请务必妥善保存以下一次性备用恢复码！');
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const handleUnbindTOTP = async () => {
+    setError('');
+    try {
+      await api.auth.totpUnbind({ password: unbindPassword, code: unbindCode });
+      setUnbindDialogOpen(false);
+      setUnbindPassword('');
+      setUnbindCode('');
+      setRecoveryCodes([]);
+      await Promise.all([loadTOTP(), refreshProfile()]);
+      setSuccess('已关闭并解绑 TOTP 验证器');
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const handleRegenerateRecovery = async () => {
+    const code = window.prompt('请输入验证器当前的 6 位动态码以重新生成备用恢复码：');
+    if (!code) return;
+    setError('');
+    try {
+      const res = await api.auth.totpRegenerateCodes(code.trim());
+      setRecoveryCodes(res.recovery_codes || []);
+      await loadTOTP();
+      setSuccess('已重新生成 10 组备用恢复码（旧恢复码已全部作废）');
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
   const handleRegisterPasskey = async () => {
     setError('');
     setSuccess('');
@@ -241,11 +351,7 @@ export const ProfilePage: React.FC = () => {
     try {
       const begin = await api.auth.passkeyRegisterBegin();
       const credential = await createPasskeyCredential(begin.options);
-      await api.auth.passkeyRegisterFinish(
-        begin.session_id,
-        newPasskeyName.trim() || '我的设备',
-        credential,
-      );
+      await api.auth.passkeyRegisterFinish(begin.session_id, newPasskeyName.trim() || '我的设备', credential);
       setPasskeyDialogOpen(false);
       setNewPasskeyName('');
       await Promise.all([loadPasskeys(), refreshProfile()]);
@@ -265,6 +371,33 @@ export const ProfilePage: React.FC = () => {
       await api.auth.deletePasskey(pk.id);
       await Promise.all([loadPasskeys(), refreshProfile()]);
       setSuccess('已移除该通行密钥');
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const handleRevokeSession = async (sess: UserSession) => {
+    if (sess.is_current && !window.confirm('确认下线当前正在使用的设备会话？您将需要重新登录。')) return;
+    try {
+      await api.auth.revokeMySession(sess.session_id);
+      if (sess.is_current) {
+        await logout();
+        navigate('/login', { replace: true });
+        return;
+      }
+      await loadSessions();
+      setSuccess('指定设备已下线');
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const handleRevokeAllOtherSessions = async () => {
+    if (!window.confirm('确认将除当前设备外的所有其他在线设备强制下线？')) return;
+    try {
+      await api.auth.revokeAllMySessions(true);
+      await loadSessions();
+      setSuccess('已下线其他所有设备');
     } catch (err) {
       setError((err as Error).message);
     }
@@ -301,11 +434,19 @@ export const ProfilePage: React.FC = () => {
     return <OAuthIcon />;
   };
 
+  const tierLabel =
+    adminTier === 'platform_admin'
+      ? '平台超级管理员'
+      : adminTier === 'domain_admin'
+        ? '域管理员'
+        : adminTier === 'auditor'
+          ? '安全审计员'
+          : '普通用户';
+
   const initialChar = (user?.display_name || user?.username || 'U').slice(0, 1).toUpperCase();
 
   return (
     <Box>
-      {/* 头部个人名片 */}
       <Card
         sx={{
           mb: 3,
@@ -313,47 +454,32 @@ export const ProfilePage: React.FC = () => {
         }}
       >
         <CardContent sx={{ p: { xs: 2.5, sm: 3 } }}>
-          <Stack
-            direction={{ xs: 'column', sm: 'row' }}
-            spacing={2.5}
-            alignItems={{ xs: 'flex-start', sm: 'center' }}
-            justifyContent="space-between"
-          >
-            <Stack direction="row" spacing={2} alignItems="center">
-              <Avatar
-                src={user?.avatar_url || undefined}
-                sx={{
-                  width: 64,
-                  height: 64,
-                  bgcolor: 'primary.main',
-                  fontSize: '1.5rem',
-                  fontWeight: 700,
-                }}
-              >
-                {initialChar}
-              </Avatar>
-              <Box>
-                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                  <Typography variant="h5" fontWeight={700}>
-                    {user?.display_name || user?.username}
-                  </Typography>
-                  <Chip
-                    size="small"
-                    color={isAdmin ? 'primary' : 'default'}
-                    label={isAdmin ? '管理员' : '普通用户'}
-                  />
-                </Stack>
-                <Typography variant="body2" color="text.secondary" mt={0.3}>
-                  @{user?.username} · {user?.email}
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2.5} alignItems={{ xs: 'flex-start', sm: 'center' }}>
+            <Avatar
+              src={user?.avatar_url || undefined}
+              sx={{ width: 64, height: 64, bgcolor: 'primary.main', fontSize: '1.5rem', fontWeight: 700 }}
+            >
+              {initialChar}
+            </Avatar>
+            <Box>
+              <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                <Typography variant="h5" fontWeight={700}>
+                  {user?.display_name || user?.username}
                 </Typography>
-                {user?.last_login_at && (
-                  <Typography variant="caption" color="text.secondary">
-                    最近登录：{dayjs(user.last_login_at).format('YYYY-MM-DD HH:mm:ss')}
-                    {user.last_login_ip ? ` · IP ${user.last_login_ip}` : ''}
-                  </Typography>
-                )}
-              </Box>
-            </Stack>
+                <Chip size="small" color={isAdmin ? 'primary' : 'default'} label={tierLabel} />
+                {totpStatus.enabled && <Chip size="small" color="success" label="TOTP 已开启" />}
+              </Stack>
+              <Typography variant="body2" color="text.secondary" mt={0.3}>
+                @{user?.username} · {user?.email}
+                {user?.phone ? ` · ${user.phone}` : ''}
+              </Typography>
+              {user?.last_login_at && (
+                <Typography variant="caption" color="text.secondary">
+                  最近登录：{dayjs(user.last_login_at).format('YYYY-MM-DD HH:mm:ss')}
+                  {user.last_login_ip ? ` · IP ${user.last_login_ip}` : ''}
+                </Typography>
+              )}
+            </Box>
           </Stack>
         </CardContent>
       </Card>
@@ -369,6 +495,19 @@ export const ProfilePage: React.FC = () => {
         </Alert>
       )}
 
+      {recoveryCodes.length > 0 && (
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          <Typography variant="subtitle2" fontWeight={700} mb={1}>
+            请保存您的 TOTP 一次性备用恢复码（离开页面后不再完整展示）：
+          </Typography>
+          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+            {recoveryCodes.map((c) => (
+              <Chip key={c} label={c} sx={{ fontFamily: 'monospace', fontWeight: 700 }} />
+            ))}
+          </Stack>
+        </Alert>
+      )}
+
       <Card>
         <Tabs
           value={tab}
@@ -378,19 +517,20 @@ export const ProfilePage: React.FC = () => {
           sx={{ px: 2, borderBottom: 1, borderColor: 'divider' }}
         >
           <Tab value="basic" icon={<PersonIcon fontSize="small" />} iconPosition="start" label="基本资料" />
-          <Tab value="security" icon={<SecurityIcon fontSize="small" />} iconPosition="start" label="密码与通行密钥" />
+          <Tab value="security" icon={<SecurityIcon fontSize="small" />} iconPosition="start" label="密码与多因素认证" />
+          <Tab value="sessions" icon={<DeviceIcon fontSize="small" />} iconPosition="start" label="设备与会话" />
           <Tab value="oauth" icon={<LinkIcon fontSize="small" />} iconPosition="start" label="第三方账号" />
+          <Tab value="risk" icon={<RiskIcon fontSize="small" />} iconPosition="start" label="安全记录" />
         </Tabs>
 
         <CardContent sx={{ p: { xs: 2.5, sm: 3 } }}>
-          {/* Tab 1: 基本资料 */}
           {tab === 'basic' && (
             <Box component="form" onSubmit={handleSaveProfile} maxWidth={560}>
               <Typography variant="subtitle1" fontWeight={600} mb={0.5}>
                 个人基本信息
               </Typography>
               <Typography variant="body2" color="text.secondary" mb={3}>
-                修改您的对外显示名称与头像地址，保存后立即在全局生效
+                修改您的对外显示名称、手机号与头像地址，保存后立即在全局生效
               </Typography>
 
               <Stack spacing={2.5}>
@@ -407,50 +547,26 @@ export const ProfilePage: React.FC = () => {
                     </Typography>
                     <Typography variant="caption" color="text.secondary">
                       {isAdmin
-                        ? '仅支持 .png、.ico、.jpg 格式的站内路径（如 /logo.png）或外部 http(s) 图片链接，留空将显示首字母头像'
+                        ? '仅支持 .png、.ico、.jpg 格式的站内路径（如 /logo.png）或外部 http(s) 图片链接'
                         : '仅支持 .png、.ico、.jpg 格式的外部 http(s) 图片链接，留空将显示首字母头像'}
                     </Typography>
                   </Box>
                 </Stack>
 
+                <TextField label="用户名" value={user?.username || ''} disabled size="small" fullWidth helperText="用户名作为唯一账号标识，不支持自助修改" />
+                <TextField label="绑定邮箱" value={user?.email || ''} disabled size="small" fullWidth />
                 <TextField
-                  label="用户名"
-                  value={user?.username || ''}
-                  disabled
+                  label="绑定手机号（用于短信验证码与二步验证）"
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
                   size="small"
                   fullWidth
-                  helperText="用户名作为唯一账号标识，不支持自助修改"
+                  placeholder="例如：+8613800138000"
                 />
-                <TextField
-                  label="绑定邮箱"
-                  value={user?.email || ''}
-                  disabled
-                  size="small"
-                  fullWidth
-                />
-                <TextField
-                  label="显示名称"
-                  value={displayName}
-                  onChange={(e) => setDisplayName(e.target.value)}
-                  size="small"
-                  fullWidth
-                  placeholder="请输入您的显示名称"
-                />
-                <TextField
-                  label="头像图片 URL"
-                  value={avatarUrl}
-                  onChange={(e) => setAvatarUrl(e.target.value)}
-                  size="small"
-                  fullWidth
-                  placeholder="https://example.com/avatar.png"
-                />
+                <TextField label="显示名称" value={displayName} onChange={(e) => setDisplayName(e.target.value)} size="small" fullWidth />
+                <TextField label="头像图片 URL" value={avatarUrl} onChange={(e) => setAvatarUrl(e.target.value)} size="small" fullWidth />
                 <Box>
-                  <Button
-                    type="submit"
-                    variant="contained"
-                    startIcon={<SaveIcon />}
-                    disabled={savingProfile}
-                  >
+                  <Button type="submit" variant="contained" disabled={savingProfile}>
                     {savingProfile ? '保存中...' : '保存个人资料'}
                   </Button>
                 </Box>
@@ -458,10 +574,10 @@ export const ProfilePage: React.FC = () => {
             </Box>
           )}
 
-          {/* Tab 2: 密码与通行密钥 */}
           {tab === 'security' && (
             <Grid container spacing={3}>
-              <Grid size={{ xs: 12, md: 6 }}>
+              {/* 修改密码 */}
+              <Grid size={{ xs: 12, lg: 4 }}>
                 <Card variant="outlined" sx={{ height: '100%' }}>
                   <CardContent>
                     <Stack direction="row" spacing={1} alignItems="center" mb={0.5}>
@@ -471,106 +587,95 @@ export const ProfilePage: React.FC = () => {
                       </Typography>
                     </Stack>
                     <Typography variant="body2" color="text.secondary" mb={2.5}>
-                      {hasPassword
-                        ? '修改密码后将自动注销所有旧设备会话，需要重新登录'
-                        : '当前账号尚未设置本地密码，设置后可使用用户名与密码登录'}
+                      修改后将注销所有旧设备会话，需要重新登录
                     </Typography>
-
                     <Box component="form" onSubmit={handleChangePassword}>
                       <Stack spacing={2}>
                         {hasPassword && (
-                          <TextField
-                            label="当前密码"
-                            type="password"
-                            size="small"
-                            fullWidth
-                            required
-                            value={oldPassword}
-                            onChange={(e) => setOldPassword(e.target.value)}
-                          />
+                          <TextField label="当前密码" type="password" size="small" fullWidth required value={oldPassword} onChange={(e) => setOldPassword(e.target.value)} />
                         )}
-                        <TextField
-                          label="新密码"
-                          type="password"
-                          size="small"
-                          fullWidth
-                          required
-                          helperText="密码长度需为 8 ~ 72 位"
-                          value={newPassword}
-                          onChange={(e) => setNewPassword(e.target.value)}
-                        />
-                        <TextField
-                          label="确认新密码"
-                          type="password"
-                          size="small"
-                          fullWidth
-                          required
-                          value={confirmPassword}
-                          onChange={(e) => setConfirmPassword(e.target.value)}
-                        />
-                        <Box>
-                          <Button type="submit" variant="contained" disabled={changingPwd}>
-                            {changingPwd ? '提交中...' : hasPassword ? '更新密码' : '设置密码'}
-                          </Button>
-                        </Box>
+                        <TextField label="新密码（8 ~ 72 位）" type="password" size="small" fullWidth required value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
+                        <TextField label="确认新密码" type="password" size="small" fullWidth required value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} />
+                        <Button type="submit" variant="contained" disabled={changingPwd}>
+                          {changingPwd ? '提交中...' : '更新密码'}
+                        </Button>
                       </Stack>
                     </Box>
                   </CardContent>
                 </Card>
               </Grid>
 
-              <Grid size={{ xs: 12, md: 6 }}>
+              {/* TOTP 验证器 */}
+              <Grid size={{ xs: 12, lg: 4 }}>
                 <Card variant="outlined" sx={{ height: '100%' }}>
                   <CardContent>
-                    <Stack
-                      direction="row"
-                      justifyContent="space-between"
-                      alignItems="center"
-                      mb={0.5}
-                    >
+                    <Stack direction="row" justifyContent="space-between" alignItems="center" mb={0.5}>
+                      <Stack direction="row" spacing={1} alignItems="center">
+                        <TOTPIcon color="primary" fontSize="small" />
+                        <Typography variant="subtitle1" fontWeight={600}>
+                          验证器 App（TOTP）
+                        </Typography>
+                      </Stack>
+                      <Chip
+                        size="small"
+                        color={totpStatus.enabled ? 'success' : 'default'}
+                        label={totpStatus.enabled ? '已启用' : '未启用'}
+                      />
+                    </Stack>
+                    <Typography variant="body2" color="text.secondary" mb={2.5}>
+                      使用 Google / Microsoft Authenticator 等验证器生成 6 位动态口令保护账号安全
+                    </Typography>
+
+                    {totpStatus.enabled ? (
+                      <Stack spacing={2}>
+                        <Alert severity="success" sx={{ py: 0.5 }}>
+                          绑定时间：{totpStatus.verified_at ? dayjs(totpStatus.verified_at).format('YYYY-MM-DD HH:mm') : '已验证'}
+                          <br />
+                          剩余备用恢复码：{totpStatus.remaining_recovery_codes} 组
+                        </Alert>
+                        <Stack direction="row" spacing={1}>
+                          <Button size="small" variant="outlined" startIcon={<RegenIcon />} onClick={handleRegenerateRecovery}>
+                            重置恢复码
+                          </Button>
+                          <Button size="small" color="error" variant="outlined" onClick={() => setUnbindDialogOpen(true)}>
+                            解绑验证器
+                          </Button>
+                        </Stack>
+                      </Stack>
+                    ) : (
+                      <Button variant="contained" startIcon={<TOTPIcon />} onClick={handleOpenTOTPSetup}>
+                        立即绑定验证器
+                      </Button>
+                    )}
+                  </CardContent>
+                </Card>
+              </Grid>
+
+              {/* 通行密钥 */}
+              <Grid size={{ xs: 12, lg: 4 }}>
+                <Card variant="outlined" sx={{ height: '100%' }}>
+                  <CardContent>
+                    <Stack direction="row" justifyContent="space-between" alignItems="center" mb={0.5}>
                       <Stack direction="row" spacing={1} alignItems="center">
                         <PasskeyIcon color="primary" fontSize="small" />
                         <Typography variant="subtitle1" fontWeight={600}>
                           通行密钥（Passkey）
                         </Typography>
                       </Stack>
-                      <Button
-                        size="small"
-                        variant="contained"
-                        startIcon={<AddIcon />}
-                        onClick={() => setPasskeyDialogOpen(true)}
-                      >
-                        添加通行密钥
+                      <Button size="small" variant="contained" startIcon={<AddIcon />} onClick={() => setPasskeyDialogOpen(true)}>
+                        添加
                       </Button>
                     </Stack>
                     <Typography variant="body2" color="text.secondary" mb={2}>
-                      使用设备指纹、面容识别或硬件安全密钥免密登录，更安全防钓鱼
+                      使用设备指纹、面容或安全密钥免密登录
                     </Typography>
 
-                    {!isWebAuthnSupported() && (
-                      <Alert severity="warning" sx={{ mb: 2 }}>
-                        当前浏览器或访问协议不支持通行密钥（需 HTTPS 或 localhost 环境）
-                      </Alert>
-                    )}
-
                     {loadingPasskeys ? (
-                      <Typography variant="body2" color="text.secondary" py={2}>
-                        加载中...
-                      </Typography>
+                      <Typography variant="body2" color="text.secondary">加载中...</Typography>
                     ) : passkeys.length === 0 ? (
-                      <Box
-                        sx={{
-                          py: 4,
-                          textAlign: 'center',
-                          border: '1px dashed',
-                          borderColor: 'divider',
-                          borderRadius: 2,
-                        }}
-                      >
-                        <PasskeyIcon sx={{ fontSize: 36, color: 'text.disabled', mb: 1 }} />
-                        <Typography variant="body2" color="text.secondary">
-                          尚未绑定任何通行密钥
-                        </Typography>
+                      <Box sx={{ py: 3, textAlign: 'center', border: '1px dashed', borderColor: 'divider', borderRadius: 2 }}>
+                        <PasskeyIcon sx={{ fontSize: 32, color: 'text.disabled', mb: 0.5 }} />
+                        <Typography variant="body2" color="text.secondary">尚未绑定任何通行密钥</Typography>
                       </Box>
                     ) : (
                       <List disablePadding>
@@ -580,13 +685,8 @@ export const ProfilePage: React.FC = () => {
                             <ListItem
                               disableGutters
                               secondaryAction={
-                                <Tooltip title="移除通行密钥">
-                                  <IconButton
-                                    edge="end"
-                                    color="error"
-                                    size="small"
-                                    onClick={() => handleDeletePasskey(pk)}
-                                  >
+                                <Tooltip title="移除">
+                                  <IconButton edge="end" color="error" size="small" onClick={() => handleDeletePasskey(pk)}>
                                     <DeleteIcon fontSize="small" />
                                   </IconButton>
                                 </Tooltip>
@@ -599,14 +699,7 @@ export const ProfilePage: React.FC = () => {
                               </ListItemAvatar>
                               <ListItemText
                                 primary={pk.name}
-                                secondary={
-                                  <>
-                                    绑定于 {dayjs(pk.created_at).format('YYYY-MM-DD HH:mm')}
-                                    {pk.last_used_at
-                                      ? ` · 最近使用 ${dayjs(pk.last_used_at).format('YYYY-MM-DD HH:mm')}`
-                                      : ' · 尚未使用'}
-                                  </>
-                                }
+                                secondary={`绑定于 ${dayjs(pk.created_at).format('MM-DD HH:mm')}`}
                               />
                             </ListItem>
                           </React.Fragment>
@@ -619,20 +712,66 @@ export const ProfilePage: React.FC = () => {
             </Grid>
           )}
 
-          {/* Tab 3: 第三方账号 */}
+          {tab === 'sessions' && (
+            <Box>
+              <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} spacing={2} mb={2.5}>
+                <Box>
+                  <Typography variant="subtitle1" fontWeight={600}>
+                    在线设备与登录会话
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    查看当前账号全部在线设备的 IP、归属地与活跃时间，发现异常可立即踢下线
+                  </Typography>
+                </Box>
+                <Button variant="outlined" color="error" startIcon={<KickIcon />} onClick={handleRevokeAllOtherSessions}>
+                  下线其他全部设备
+                </Button>
+              </Stack>
+
+              {loadingSessions ? (
+                <Typography variant="body2" color="text.secondary">加载中...</Typography>
+              ) : sessions.length === 0 ? (
+                <Alert severity="info">暂无在线设备记录</Alert>
+              ) : (
+                <Stack spacing={1.5}>
+                  {sessions.map((s) => (
+                    <Card key={s.session_id} variant="outlined">
+                      <CardContent sx={{ py: 1.8, '&:last-child': { pb: 1.8 } }}>
+                        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} spacing={1.5}>
+                          <Stack direction="row" spacing={1.5} alignItems="center">
+                            <Avatar sx={{ bgcolor: alpha(theme.palette.primary.main, 0.12), color: 'primary.main' }}>
+                              <DeviceIcon fontSize="small" />
+                            </Avatar>
+                            <Box>
+                              <Stack direction="row" spacing={1} alignItems="center">
+                                <Typography variant="subtitle2" fontWeight={600}>
+                                  {s.device_name || '浏览器设备'}
+                                </Typography>
+                                {s.is_current && <Chip size="small" color="success" label="当前设备" />}
+                              </Stack>
+                              <Typography variant="caption" color="text.secondary" display="block">
+                                IP：{s.ip_address || '-'} · 地点：{s.location || '未知'} · 最近活跃：{dayjs(s.last_active_at).format('YYYY-MM-DD HH:mm:ss')}
+                              </Typography>
+                            </Box>
+                          </Stack>
+                          <Button size="small" color="error" variant="outlined" onClick={() => handleRevokeSession(s)}>
+                            {s.is_current ? '退出登录' : '强制下线'}
+                          </Button>
+                        </Stack>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </Stack>
+              )}
+            </Box>
+          )}
+
           {tab === 'oauth' && (
             <Box>
-              <Typography variant="subtitle1" fontWeight={600} mb={0.5}>
-                第三方账号关联
-              </Typography>
-              <Typography variant="body2" color="text.secondary" mb={2.5}>
-                关联外部身份提供商后，可使用对应的第三方账号一键登录平台
-              </Typography>
-
+              <Typography variant="subtitle1" fontWeight={600} mb={0.5}>第三方账号关联</Typography>
+              <Typography variant="body2" color="text.secondary" mb={2.5}>关联外部身份提供商后，可使用对应的第三方账号一键登录平台</Typography>
               {loadingOAuth ? (
-                <Typography variant="body2" color="text.secondary">
-                  加载中...
-                </Typography>
+                <Typography variant="body2" color="text.secondary">加载中...</Typography>
               ) : providers.length === 0 && identities.length === 0 ? (
                 <Alert severity="info">管理员暂未启用任何第三方登录方式</Alert>
               ) : (
@@ -642,32 +781,15 @@ export const ProfilePage: React.FC = () => {
                     return (
                       <Card key={prov.name} variant="outlined">
                         <CardContent sx={{ py: 2, '&:last-child': { pb: 2 } }}>
-                          <Stack
-                            direction={{ xs: 'column', sm: 'row' }}
-                            justifyContent="space-between"
-                            alignItems={{ xs: 'flex-start', sm: 'center' }}
-                            spacing={2}
-                          >
+                          <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', sm: 'center' }} spacing={2}>
                             <Stack direction="row" spacing={1.5} alignItems="center">
-                              <Avatar
-                                sx={{
-                                  bgcolor: alpha(theme.palette.primary.main, 0.12),
-                                  color: 'primary.main',
-                                }}
-                              >
+                              <Avatar sx={{ bgcolor: alpha(theme.palette.primary.main, 0.12), color: 'primary.main' }}>
                                 {providerIcon(prov.plugin_type)}
                               </Avatar>
                               <Box>
                                 <Stack direction="row" spacing={1} alignItems="center">
-                                  <Typography variant="subtitle2" fontWeight={600}>
-                                    {prov.display_name}
-                                  </Typography>
-                                  <Chip
-                                    size="small"
-                                    color={bound ? 'success' : 'default'}
-                                    variant={bound ? 'filled' : 'outlined'}
-                                    label={bound ? '已绑定' : '未绑定'}
-                                  />
+                                  <Typography variant="subtitle2" fontWeight={600}>{prov.display_name}</Typography>
+                                  <Chip size="small" color={bound ? 'success' : 'default'} variant={bound ? 'filled' : 'outlined'} label={bound ? '已绑定' : '未绑定'} />
                                 </Stack>
                                 <Typography variant="caption" color="text.secondary">
                                   {bound
@@ -676,24 +798,12 @@ export const ProfilePage: React.FC = () => {
                                 </Typography>
                               </Box>
                             </Stack>
-
                             {bound ? (
-                              <Button
-                                size="small"
-                                color="error"
-                                variant="outlined"
-                                startIcon={<UnlinkIcon />}
-                                onClick={() => handleUnbindOAuth(bound)}
-                              >
+                              <Button size="small" color="error" variant="outlined" startIcon={<UnlinkIcon />} onClick={() => handleUnbindOAuth(bound)}>
                                 解除绑定
                               </Button>
                             ) : (
-                              <Button
-                                size="small"
-                                variant="contained"
-                                startIcon={<LinkIcon />}
-                                onClick={() => handleBindOAuth(prov.name)}
-                              >
+                              <Button size="small" variant="contained" startIcon={<LinkIcon />} onClick={() => handleBindOAuth(prov.name)}>
                                 立即绑定
                               </Button>
                             )}
@@ -702,38 +812,37 @@ export const ProfilePage: React.FC = () => {
                       </Card>
                     );
                   })}
+                </Stack>
+              )}
+            </Box>
+          )}
 
-                  {/* 展示历史已绑定但当前已被管理员禁用的提供方，允许解绑 */}
-                  {identities
-                    .filter((id) => !providers.some((p) => p.name === id.provider_name))
-                    .map((orphan) => (
-                      <Card key={orphan.id} variant="outlined">
-                        <CardContent sx={{ py: 2, '&:last-child': { pb: 2 } }}>
-                          <Stack direction="row" justifyContent="space-between" alignItems="center">
-                            <Box>
-                              <Stack direction="row" spacing={1} alignItems="center">
-                                <Typography variant="subtitle2" fontWeight={600}>
-                                  {orphan.provider_name}
-                                </Typography>
-                                <Chip size="small" label="提供方已停用" />
-                              </Stack>
-                              <Typography variant="caption" color="text.secondary">
-                                {orphan.external_username || orphan.external_email || orphan.external_user_id}
-                              </Typography>
-                            </Box>
-                            <Button
-                              size="small"
-                              color="error"
-                              variant="outlined"
-                              startIcon={<UnlinkIcon />}
-                              onClick={() => handleUnbindOAuth(orphan)}
-                            >
-                              解除绑定
-                            </Button>
+          {tab === 'risk' && (
+            <Box>
+              <Typography variant="subtitle1" fontWeight={600} mb={0.5}>账号异常风险记录</Typography>
+              <Typography variant="body2" color="text.secondary" mb={2}>记录近期异地、新设备、非常用时间登录触发的风险自适应评估历史</Typography>
+              {riskEvents.length === 0 ? (
+                <Alert severity="success">近期账号登录环境均处于低风险安全状态</Alert>
+              ) : (
+                <Stack spacing={1.5}>
+                  {riskEvents.map((ev) => (
+                    <Card key={ev.id} variant="outlined">
+                      <CardContent sx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
+                        <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={1}>
+                          <Stack direction="row" spacing={1} alignItems="center">
+                            <Chip size="small" color={ev.risk_level === 'high' ? 'error' : 'warning'} label={`${ev.risk_level.toUpperCase()} · ${ev.risk_score} 分`} />
+                            <Typography variant="body2" fontWeight={600}>{ev.location}（{ev.ip_address}）</Typography>
                           </Stack>
-                        </CardContent>
-                      </Card>
-                    ))}
+                          <Typography variant="caption" color="text.secondary">
+                            {dayjs(ev.created_at).format('YYYY-MM-DD HH:mm:ss')} · 处置：{ev.action_taken}
+                          </Typography>
+                        </Stack>
+                        <Typography variant="caption" color="text.secondary" display="block" mt={0.5}>
+                          触发原因：{(ev.reasons || []).join('；')}
+                        </Typography>
+                      </CardContent>
+                    </Card>
+                  ))}
                 </Stack>
               )}
             </Box>
@@ -741,38 +850,62 @@ export const ProfilePage: React.FC = () => {
         </CardContent>
       </Card>
 
+      {/* TOTP 绑定弹窗 */}
+      <Dialog open={totpSetupOpen} onClose={() => setTotpSetupOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>绑定 TOTP 验证器</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} alignItems="center" mt={1}>
+            <Typography variant="body2" color="text.secondary" textAlign="center">
+              请使用验证器 App 扫描下方二维码，或手动输入密钥后填写生成的 6 位动态码：
+            </Typography>
+            {totpQrDataUrl && <Box component="img" src={totpQrDataUrl} alt="TOTP QRCode" sx={{ width: 190, height: 190, borderRadius: 2, border: 1, borderColor: 'divider' }} />}
+            <Chip label={totpSecret} sx={{ fontFamily: 'monospace', maxWidth: '100%' }} />
+            <TextField
+              autoFocus
+              fullWidth
+              size="small"
+              label="6 位动态验证码"
+              value={totpVerifyCode}
+              onChange={(e) => setTotpVerifyCode(e.target.value)}
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => setTotpSetupOpen(false)}>取消</Button>
+          <Button variant="contained" onClick={handleVerifyBindTOTP}>验证并启用</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* 解绑 TOTP 弹窗 */}
+      <Dialog open={unbindDialogOpen} onClose={() => setUnbindDialogOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>解绑 TOTP 验证器</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} mt={1}>
+            <Typography variant="body2" color="text.secondary">
+              请输入您的登录密码或验证器动态码/恢复码以确认关闭：
+            </Typography>
+            <TextField label="登录密码（或留空填动态码）" type="password" size="small" fullWidth value={unbindPassword} onChange={(e) => setUnbindPassword(e.target.value)} />
+            <TextField label="动态码或备用恢复码" size="small" fullWidth value={unbindCode} onChange={(e) => setUnbindCode(e.target.value)} />
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => setUnbindDialogOpen(false)}>取消</Button>
+          <Button color="error" variant="contained" onClick={handleUnbindTOTP}>确认解绑</Button>
+        </DialogActions>
+      </Dialog>
+
       {/* 添加通行密钥弹窗 */}
-      <Dialog
-        open={passkeyDialogOpen}
-        onClose={() => !registeringPasskey && setPasskeyDialogOpen(false)}
-        maxWidth="xs"
-        fullWidth
-      >
+      <Dialog open={passkeyDialogOpen} onClose={() => !registeringPasskey && setPasskeyDialogOpen(false)} maxWidth="xs" fullWidth>
         <DialogTitle>添加通行密钥</DialogTitle>
         <DialogContent>
           <Typography variant="body2" color="text.secondary" mb={2}>
             为当前设备设置一个便于识别的名称，点击确认后浏览器将弹出指纹、面容或安全密钥验证窗口。
           </Typography>
-          <TextField
-            autoFocus
-            fullWidth
-            size="small"
-            label="设备名称"
-            placeholder="例如：MacBook Touch ID / Windows Hello"
-            value={newPasskeyName}
-            onChange={(e) => setNewPasskeyName(e.target.value)}
-          />
+          <TextField autoFocus fullWidth size="small" label="设备名称" placeholder="例如：MacBook Touch ID" value={newPasskeyName} onChange={(e) => setNewPasskeyName(e.target.value)} />
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={() => setPasskeyDialogOpen(false)} disabled={registeringPasskey}>
-            取消
-          </Button>
-          <Button
-            variant="contained"
-            startIcon={<PasskeyIcon />}
-            onClick={handleRegisterPasskey}
-            disabled={registeringPasskey}
-          >
+          <Button onClick={() => setPasskeyDialogOpen(false)} disabled={registeringPasskey}>取消</Button>
+          <Button variant="contained" startIcon={<PasskeyIcon />} onClick={handleRegisterPasskey} disabled={registeringPasskey}>
             {registeringPasskey ? '等待设备验证...' : '开始绑定'}
           </Button>
         </DialogActions>

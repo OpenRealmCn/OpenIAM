@@ -25,6 +25,7 @@ type AccessClaims struct {
 	Email      string `json:"email"`
 	Scope      string `json:"scope,omitempty"`
 	ClientID   string `json:"client_id,omitempty"`
+	SessionID  string `json:"sid,omitempty"`
 	IssuedAtMs int64  `json:"iat_ms,omitempty"`
 	jwt.RegisteredClaims
 }
@@ -155,6 +156,11 @@ func (m *JWTManager) AccessTTL() time.Duration {
 
 // GenerateAccessToken 签发 RS256 Access Token，同时返回 JTI 和过期时间。
 func (m *JWTManager) GenerateAccessToken(userID uint64, username, email, scope, clientID string, customTTL ...time.Duration) (tokenStr string, jti string, expiresAt time.Time, err error) {
+	return m.GenerateAccessTokenWithSession(userID, username, email, scope, clientID, "", customTTL...)
+}
+
+// GenerateAccessTokenWithSession 签发携带指定会话 ID（sid）的 RS256 Access Token。
+func (m *JWTManager) GenerateAccessTokenWithSession(userID uint64, username, email, scope, clientID, sessionID string, customTTL ...time.Duration) (tokenStr string, jti string, expiresAt time.Time, err error) {
 	m.mu.RLock()
 	ttl := m.accessTTL
 	issuer := m.issuer
@@ -172,6 +178,7 @@ func (m *JWTManager) GenerateAccessToken(userID uint64, username, email, scope, 
 		Email:      email,
 		Scope:      scope,
 		ClientID:   clientID,
+		SessionID:  sessionID,
 		IssuedAtMs: now.UnixMilli(),
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    issuer,

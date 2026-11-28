@@ -1,0 +1,376 @@
+package router_test
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/openrealm/openiam/internal/jit"
+	"github.com/openrealm/openiam/internal/models"
+	"github.com/openrealm/openiam/internal/notify"
+	"github.com/openrealm/openiam/internal/rbac"
+	"github.com/openrealm/openiam/internal/totp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestTOTPBindMFALoginAndRecoveryCode(t *testing.T) {
+	env := setupTestEnv(t, "")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
+
+	// 注册并登录普通用户 alice
+	regW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "totpalice",
+		"email":    "totpalice@openrealm.local",
+		"password": "Alice@123456",
+	}, "")
+	require.Equal(t, http.StatusCreated, regW.Code)
+	_ = adminToken
+	aliceToken, _ := loginAs(t, env.engine, "totpalice", "Alice@123456")
+
+	// 1. 生成 TOTP 密钥与 otpauth URI
+	setupW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/totp/setup", nil, aliceToken)
+	require.Equal(t, http.StatusOK, setupW.Code, setupW.Body.String())
+	var setupResp struct {
+		Data struct {
+			Secret     string `json:"secret"`
+			OtpAuthURI string `json:"otpauth_uri"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(setupW.Body.Bytes(), &setupResp))
+	require.NotEmpty(t, setupResp.Data.Secret)
+
+	// 2. 用合法 TOTP 动态码完成绑定并获取恢复码
+	code, err := totp.GenerateCode(setupResp.Data.Secret, time.Now())
+	require.NoError(t, err)
+	bindW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/totp/verify-bind", map[string]string{
+		"code": code,
+	}, aliceToken)
+	require.Equal(t, http.StatusOK, bindW.Code, bindW.Body.String())
+	var bindResp struct {
+		Data struct {
+			Enabled       bool     `json:"enabled"`
+			RecoveryCodes []string `json:"recovery_codes"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(bindW.Body.Bytes(), &bindResp))
+	require.True(t, bindResp.Data.Enabled)
+	require.Len(t, bindResp.Data.RecoveryCodes, 10)
+
+	// 3. 登录必须触发 MFA 挑战
+	loginW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"username": "totpalice",
+		"password": "Alice@123456",
+	}, "")
+	require.Equal(t, http.StatusOK, loginW.Code)
+	var mfaResp struct {
+		Data struct {
+			MFARequired bool     `json:"mfa_required"`
+			MFAToken    string   `json:"mfa_token"`
+			Methods     []string `json:"methods"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(loginW.Body.Bytes(), &mfaResp))
+	require.True(t, mfaResp.Data.MFARequired)
+	require.NotEmpty(t, mfaResp.Data.MFAToken)
+
+	// 4. 使用一次性恢复码通过 MFA，第二次再使用同一个恢复码应失败
+	mfaW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/mfa/verify", map[string]string{
+		"mfa_token": mfaResp.Data.MFAToken,
+		"method":    "recovery_code",
+		"code":      bindResp.Data.RecoveryCodes[0],
+	}, "")
+	require.Equal(t, http.StatusOK, mfaW.Code, mfaW.Body.String())
+	assert.Contains(t, mfaW.Body.String(), `"access_token"`)
+
+	// 验证解绑
+	freshCode, _ := totp.GenerateCode(setupResp.Data.Secret, time.Now())
+	unbindW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/totp/unbind", map[string]string{
+		"code": freshCode,
+	}, aliceToken)
+	require.Equal(t, http.StatusOK, unbindW.Code)
+}
+
+func TestOTPRateLimitCostAlertAndDegradation(t *testing.T) {
+	env := setupTestEnv(t, "")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
+
+	// 公开接口只会向已注册且手机号匹配的活跃账号真正发送验证码（未知地址一律返回统一响应），因此先创建带手机号的账号
+	regOTP := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "otpsmsuser",
+		"email":    "otpsmsuser@openrealm.local",
+		"password": "OtpSms@123456",
+	}, "")
+	require.Equal(t, http.StatusCreated, regOTP.Code, regOTP.Body.String())
+	require.NoError(t, env.db.Model(&models.User{}).Where("username = ?", "otpsmsuser").Update("phone", "+8613800001111").Error)
+
+	// 调整 OTP 参数便于测试：冷却 60 秒、每小时最多 2 次、单条短信 60 分、日预算 50 分（立即触发告警）
+	updW := doJSON(t, env.engine, http.MethodPut, "/api/v1/system/settings", map[string]interface{}{
+		"settings": map[string]string{
+			"otp.cooldown_seconds":       "60",
+			"otp.max_per_hour_target":    "2",
+			"otp.sms_cost_cents":         "60",
+			"otp.sms_daily_budget_cents": "50",
+		},
+	}, adminToken)
+	require.Equal(t, http.StatusOK, updW.Code)
+
+	// 启用内置 console-sms-default 插件
+	var smsInst models.PluginInstance
+	require.NoError(t, env.db.Where("name = ?", "console-sms-default").First(&smsInst).Error)
+	enW := doJSON(t, env.engine, http.MethodPut, fmt.Sprintf("/api/v1/plugins/%d", smsInst.ID), map[string]interface{}{
+		"enabled": true,
+	}, adminToken)
+	require.Equal(t, http.StatusOK, enW.Code)
+
+	// 1. 首次发送短信 OTP 成功并触发管理员成本告警
+	send1 := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/otp/send", map[string]string{
+		"scene":   "login",
+		"channel": "sms",
+		"target":  "+8613800001111",
+	}, "")
+	require.Equal(t, http.StatusOK, send1.Code, send1.Body.String())
+
+	// 检查管理员是否收到 system_notice 成本告警
+	notifW := doJSON(t, env.engine, http.MethodGet, "/api/v1/notifications?category=system_notice", nil, adminToken)
+	require.Equal(t, http.StatusOK, notifW.Code)
+	assert.Contains(t, notifW.Body.String(), "短信日预算成本告警")
+
+	// 2. 冷却期内第二次向同一手机号发送被频控拦截
+	send2 := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/otp/send", map[string]string{
+		"scene":   "login",
+		"channel": "sms",
+		"target":  "+8613800001111",
+	}, "")
+	assert.Equal(t, http.StatusBadRequest, send2.Code)
+	assert.Contains(t, send2.Body.String(), "频繁")
+}
+
+func TestRiskAdaptiveSessionsAndCapLocalPlugin(t *testing.T) {
+	env := setupTestEnv(t, "")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
+
+	// 地理位置请求头默认不被采信（可被客户端伪造），此处通过系统设置模拟由前置网关注入并覆盖该头的部署环境
+	setGeo := doJSON(t, env.engine, http.MethodPut, "/api/v1/system/settings", map[string]interface{}{
+		"settings": map[string]string{
+			"risk.trust_geo_header": "true",
+		},
+	}, adminToken)
+	require.Equal(t, http.StatusOK, setGeo.Code, setGeo.Body.String())
+
+	listSet := doJSON(t, env.engine, http.MethodGet, "/api/v1/system/settings", nil, adminToken)
+	require.Equal(t, http.StatusOK, listSet.Code)
+	assert.Contains(t, listSet.Body.String(), "security.allow_private_upstream")
+	assert.Contains(t, listSet.Body.String(), "risk.trust_geo_header")
+
+	// 创建测试账号 rick，并先用设备 A 登录
+	regW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "riskuser",
+		"email":    "riskuser@openrealm.local",
+		"password": "RiskUser@123",
+	}, "")
+	require.Equal(t, http.StatusCreated, regW.Code)
+
+	loginA := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"username": "riskuser",
+		"password": "RiskUser@123",
+	}, "", map[string]string{"X-Device-Fingerprint": "dev_A", "X-Geo-Location": "Beijing"})
+	require.Equal(t, http.StatusOK, loginA.Code)
+	var tokA struct {
+		Data struct {
+			AccessToken string `json:"access_token"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(loginA.Body.Bytes(), &tokA))
+
+	// 使用异地 + 新设备 B 登录：风险分 30 + 20 = 50 >= 30（medium），应生成风险事件并向用户发系统消息
+	loginB := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"username": "riskuser",
+		"password": "RiskUser@123",
+	}, "", map[string]string{"X-Device-Fingerprint": "dev_B", "X-Geo-Location": "Shanghai"})
+	require.Equal(t, http.StatusOK, loginB.Code)
+
+	riskW := doJSON(t, env.engine, http.MethodGet, "/api/v1/risk-events", nil, adminToken)
+	require.Equal(t, http.StatusOK, riskW.Code)
+	assert.Contains(t, riskW.Body.String(), "Shanghai")
+
+	msgW := doJSON(t, env.engine, http.MethodGet, "/api/v1/notifications?category=system_message", nil, tokA.Data.AccessToken)
+	require.Equal(t, http.StatusOK, msgW.Code)
+	assert.Contains(t, msgW.Body.String(), "账号安全提醒")
+
+	// 查询在线会话，并单会话下线其中之一，验证该令牌立即失效
+	sessW := doJSON(t, env.engine, http.MethodGet, "/api/v1/auth/sessions", nil, tokA.Data.AccessToken)
+	require.Equal(t, http.StatusOK, sessW.Code)
+	var sessResp struct {
+		Data []struct {
+			SessionID string `json:"session_id"`
+			IsCurrent bool   `json:"is_current"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(sessW.Body.Bytes(), &sessResp))
+	require.GreaterOrEqual(t, len(sessResp.Data), 2)
+
+	var currentSID string
+	for _, s := range sessResp.Data {
+		if s.IsCurrent {
+			currentSID = s.SessionID
+		}
+	}
+	require.NotEmpty(t, currentSID)
+	kickW := doJSON(t, env.engine, http.MethodDelete, "/api/v1/auth/sessions/"+currentSID, nil, tokA.Data.AccessToken)
+	require.Equal(t, http.StatusOK, kickW.Code)
+
+	meAfterKick := doJSON(t, env.engine, http.MethodGet, "/api/v1/auth/me", nil, tokA.Data.AccessToken)
+	assert.Equal(t, http.StatusUnauthorized, meAfterKick.Code)
+
+	// 测试 Cap.js 本地 PoW 插件：降低难度为 2 方便测试快速求解并启用登录保护
+	var capInst models.PluginInstance
+	require.NoError(t, env.db.Where("name = ?", "cap-default").First(&capInst).Error)
+	capUpd := doJSON(t, env.engine, http.MethodPut, fmt.Sprintf("/api/v1/plugins/%d", capInst.ID), map[string]interface{}{
+		"enabled": true,
+		"config": map[string]string{
+			"mode":            "local",
+			"challenge_count": "4",
+			"difficulty":      "2",
+		},
+	}, adminToken)
+	require.Equal(t, http.StatusOK, capUpd.Code)
+	setCap := doJSON(t, env.engine, http.MethodPut, "/api/v1/system/settings", map[string]interface{}{
+		"settings": map[string]string{"captcha.protect_login": "true"},
+	}, adminToken)
+	require.Equal(t, http.StatusOK, setCap.Code)
+
+	// 无 captcha_token 登录被拒绝
+	noCapW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"username": "riskuser",
+		"password": "RiskUser@123",
+	}, "")
+	assert.Equal(t, http.StatusBadRequest, noCapW.Code)
+
+	// 拉取 challenge -> 求解 PoW -> redeem 拿到一次性 token -> 登录成功
+	chW := doJSON(t, env.engine, http.MethodPost, "/api/v1/captcha/cap/challenge", map[string]any{}, "")
+	require.Equal(t, http.StatusOK, chW.Code)
+	var chResp struct {
+		Challenge struct {
+			C int    `json:"c"`
+			S string `json:"s"`
+			D int    `json:"d"`
+		} `json:"challenge"`
+		Token string `json:"token"`
+	}
+	require.NoError(t, json.Unmarshal(chW.Body.Bytes(), &chResp))
+
+	sols := make([]int64, chResp.Challenge.C)
+	for i := 0; i < chResp.Challenge.C; i++ {
+		var nonce int64
+		for {
+			sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%d", chResp.Challenge.S, i, nonce)))
+			if hex.EncodeToString(sum[:])[:chResp.Challenge.D] == "00" {
+				sols[i] = nonce
+				break
+			}
+			nonce++
+		}
+	}
+	rdW := doJSON(t, env.engine, http.MethodPost, "/api/v1/captcha/cap/redeem", map[string]any{
+		"token":     chResp.Token,
+		"solutions": sols,
+	}, "")
+	require.Equal(t, http.StatusOK, rdW.Code, rdW.Body.String())
+	var rdResp struct {
+		Token string `json:"token"`
+	}
+	require.NoError(t, json.Unmarshal(rdW.Body.Bytes(), &rdResp))
+	require.NotEmpty(t, rdResp.Token)
+
+	okCapLogin := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"username":      "riskuser",
+		"password":      "RiskUser@123",
+		"captcha_token": rdResp.Token,
+	}, "")
+	require.Equal(t, http.StatusOK, okCapLogin.Code, okCapLogin.Body.String())
+}
+
+func TestPermissionSimulatorJITNotificationsAndAdminTiers(t *testing.T) {
+	env := setupTestEnv(t, "")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
+
+	// 1. 权限模拟器：模拟给 viewer 添加 orders:read，不污染线上 Casbin 策略
+	var viewer models.User
+	doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "simuser",
+		"email":    "simuser@openrealm.local",
+		"password": "SimUser@1234",
+	}, "")
+	require.NoError(t, env.db.Where("username = ?", "simuser").First(&viewer).Error)
+
+	simW := doJSON(t, env.engine, http.MethodPost, "/api/v1/permissions/simulate", map[string]any{
+		"user_id":  viewer.ID,
+		"domain":   rbac.DefaultDomain,
+		"resource": "orders",
+		"action":   "read",
+		"draft": map[string]any{
+			"add_policies": []map[string]string{
+				{"role": "viewer", "domain": rbac.DefaultDomain, "resource": "orders", "action": "read"},
+			},
+		},
+	}, adminToken)
+	require.Equal(t, http.StatusOK, simW.Code, simW.Body.String())
+	assert.Contains(t, simW.Body.String(), `"current":false`)
+	assert.Contains(t, simW.Body.String(), `"simulated":true`)
+	assert.Contains(t, simW.Body.String(), `"effect":"granted"`)
+
+	realAllowed, _ := env.enforcer.Enforce(viewer.ID, rbac.DefaultDomain, "orders", "read")
+	assert.False(t, realAllowed, "simulation must not mutate live Casbin policies")
+
+	// 2. JIT 临时权限授予与到期自动回收
+	jitW := doJSON(t, env.engine, http.MethodPost, "/api/v1/jit-grants", map[string]any{
+		"user_id":     viewer.ID,
+		"domain_code": rbac.DefaultDomain,
+		"role_code":   "auditor",
+		"reason":      "临时审计协助",
+		"ttl_minutes": 30,
+	}, adminToken)
+	require.Equal(t, http.StatusCreated, jitW.Code, jitW.Body.String())
+	var jitResp struct {
+		Data models.TempRoleGrant `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(jitW.Body.Bytes(), &jitResp))
+	assert.Equal(t, "active", jitResp.Data.Status)
+
+	canAudit, _ := env.enforcer.Enforce(viewer.ID, rbac.DefaultDomain, "audit_logs", "read")
+	assert.True(t, canAudit)
+
+	// 模拟时间到期并运行一次 JIT 调度器，应自动撤销 auditor 角色
+	require.NoError(t, env.db.Model(&models.TempRoleGrant{}).Where("id = ?", jitResp.Data.ID).
+		Update("expires_at", time.Now().Add(-time.Minute)).Error)
+	notifySvc := notify.NewService(env.db, nil, env.enforcer, nil)
+	jitSvc := jit.NewService(env.db, env.enforcer, notifySvc, nil, nil)
+	_, expired := jitSvc.ProcessDueGrants(t.Context())
+	assert.Equal(t, 1, expired)
+
+	canAuditAfter, _ := env.enforcer.Enforce(viewer.ID, rbac.DefaultDomain, "audit_logs", "read")
+	assert.False(t, canAuditAfter)
+
+	// 3. 管理员分级验证（platform_admin vs user）与模板/公告/退信接口
+	adminMeW := doJSON(t, env.engine, http.MethodGet, "/api/v1/auth/me", nil, adminToken)
+	require.Equal(t, http.StatusOK, adminMeW.Code)
+	assert.Contains(t, adminMeW.Body.String(), `"admin_tier":"platform_admin"`)
+
+	simToken, _ := loginAs(t, env.engine, "simuser", "SimUser@1234")
+	userMeW := doJSON(t, env.engine, http.MethodGet, "/api/v1/auth/me", nil, simToken)
+	require.Equal(t, http.StatusOK, userMeW.Code)
+	assert.Contains(t, userMeW.Body.String(), `"admin_tier":"user"`)
+
+	// 普通用户禁止访问平台插件与模板管理接口
+	denyPluginW := doJSON(t, env.engine, http.MethodGet, "/api/v1/plugins", nil, simToken)
+	assert.Equal(t, http.StatusForbidden, denyPluginW.Code)
+
+	tplW := doJSON(t, env.engine, http.MethodGet, "/api/v1/notifications/templates", nil, adminToken)
+	require.Equal(t, http.StatusOK, tplW.Code)
+	assert.Contains(t, tplW.Body.String(), "otp_verify")
+}

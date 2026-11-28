@@ -7,30 +7,38 @@ import {
   Button,
   Card,
   CardContent,
+  Chip,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
   Divider,
+  FormControlLabel,
   Link,
+  Radio,
+  RadioGroup,
   Stack,
   TextField,
   Typography,
   useTheme,
 } from '@mui/material';
 import {
+  ArrowBack as BackIcon,
   Fingerprint as PasskeyIcon,
   GitHub as GitHubIcon,
   Google as GoogleIcon,
   Login as LoginIcon,
   PersonAdd as RegisterIcon,
+  Send as SendIcon,
+  Shield as RiskIcon,
   VerifiedUser as ShieldIcon,
   VpnKey as OAuthIcon,
 } from '@mui/icons-material';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
-import { useAuth } from '../context/AuthContext';
+import { CapWidget } from '../components/CapWidget';
+import { LoginStepResult, useAuth } from '../context/AuthContext';
 import { useSite } from '../context/SiteContext';
 import { MOTION_SPEED_SCALE, useThemeStore } from '../store/themeStore';
 import { PublicProvider } from '../types/api';
@@ -38,17 +46,40 @@ import { getPasskeyAssertion, isWebAuthnSupported } from '../utils/webauthn';
 
 const MotionBox = motion.create(Box);
 
+const MFA_METHOD_LABELS: Record<string, string> = {
+  totp: '验证器动态码（TOTP）',
+  recovery_code: '备用一次性恢复码',
+  email_otp: '邮箱安全验证码',
+  sms_otp: '手机短信验证码',
+};
+
 export const LoginPage: React.FC = () => {
   const theme = useTheme();
   const motionSpeed = useThemeStore((s) => s.motionSpeed);
   const scale = MOTION_SPEED_SCALE[motionSpeed] ?? 1;
   const { siteInfo } = useSite();
 
-  const [tab, setTab] = useState<'login' | 'register'>('login');
+  const [tab, setTab] = useState<'login' | 'otp' | 'register'>('login');
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
+  const [captchaToken, setCaptchaToken] = useState('');
+  const [captchaReset, setCaptchaReset] = useState(0);
+
+  // OTP 验证码登录状态
+  const [otpChannel, setOtpChannel] = useState<'email' | 'sms'>('email');
+  const [otpTarget, setOtpTarget] = useState('');
+  const [otpCode, setOtpCode] = useState('');
+  const [otpCooldown, setOtpCooldown] = useState(0);
+  const [otpSending, setOtpSending] = useState(false);
+
+  // MFA 二步验证状态
+  const [mfaChallenge, setMfaChallenge] = useState<LoginStepResult | null>(null);
+  const [mfaMethod, setMfaMethod] = useState<string>('totp');
+  const [mfaCode, setMfaCode] = useState('');
+  const [mfaSendCooldown, setMfaSendCooldown] = useState(0);
+
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -77,7 +108,6 @@ export const LoginPage: React.FC = () => {
       .catch(() => setProviders([]));
   }, []);
 
-  // 从改密页回来时给一条明确的成功提示，避免用户以为没保存成功。
   useEffect(() => {
     if (searchParams.get('changed')) {
       setSuccessMsg('密码已修改，请使用新密码重新登录');
@@ -90,6 +120,18 @@ export const LoginPage: React.FC = () => {
     }
   }, [siteInfo.allow_public_register, tab]);
 
+  useEffect(() => {
+    if (otpCooldown <= 0) return;
+    const t = setTimeout(() => setOtpCooldown((c) => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [otpCooldown]);
+
+  useEffect(() => {
+    if (mfaSendCooldown <= 0) return;
+    const t = setTimeout(() => setMfaSendCooldown((c) => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [mfaSendCooldown]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -97,13 +139,90 @@ export const LoginPage: React.FC = () => {
     setSubmitting(true);
     try {
       if (tab === 'login') {
-        const forced = await loginWithCredentials(username, password);
-        navigate(forced ? '/change-password' : redirectTarget, { replace: true });
+        const res = await loginWithCredentials(username, password, captchaToken);
+        if (res.mfaRequired && res.mfaToken) {
+          setMfaChallenge(res);
+          setMfaMethod(res.methods?.[0] || 'totp');
+          setMfaCode('');
+          return;
+        }
+        navigate(res.mustChangePassword ? '/change-password' : redirectTarget, { replace: true });
+      } else if (tab === 'otp') {
+        const data = await api.auth.otpLogin({ target: otpTarget.trim(), code: otpCode.trim(), captcha_token: captchaToken });
+        await completeOAuthLogin(data.access_token);
+        navigate(redirectTarget, { replace: true });
       } else {
-        await api.auth.register({ username, email, password, display_name: displayName });
+        await api.auth.register({
+          username,
+          email,
+          password,
+          display_name: displayName,
+          captcha_token: captchaToken,
+        });
         setSuccessMsg('注册成功，请使用账号密码登录');
         setTab('login');
+        setCaptchaReset((n) => n + 1);
       }
+    } catch (err) {
+      setError((err as Error).message);
+      setCaptchaReset((n) => n + 1);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleSendLoginOTP = async () => {
+    setError('');
+    setSuccessMsg('');
+    if (!otpTarget.trim()) {
+      setError(otpChannel === 'sms' ? '请输入绑定手机号' : '请输入绑定邮箱');
+      return;
+    }
+    setOtpSending(true);
+    try {
+      const res = await api.auth.sendOTP({
+        scene: 'login',
+        channel: otpChannel,
+        target: otpTarget.trim(),
+        captcha_token: captchaToken,
+      });
+      setSuccessMsg(res?.message || '验证码已发送');
+      setOtpCooldown(60);
+      setCaptchaReset((n) => n + 1);
+    } catch (err) {
+      setError((err as Error).message);
+      setCaptchaReset((n) => n + 1);
+    } finally {
+      setOtpSending(false);
+    }
+  };
+
+  const handleSendMFACode = async (channel: 'sms' | 'email') => {
+    if (!mfaChallenge?.mfaToken) return;
+    setError('');
+    setSuccessMsg('');
+    try {
+      const res = await api.auth.sendMFACode(mfaChallenge.mfaToken, channel);
+      setSuccessMsg(res?.message || '验证码已发送');
+      setMfaSendCooldown(60);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const handleVerifyMFA = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!mfaChallenge?.mfaToken) return;
+    setError('');
+    setSubmitting(true);
+    try {
+      const data = await api.auth.verifyMFA({
+        mfa_token: mfaChallenge.mfaToken,
+        method: mfaMethod,
+        code: mfaCode.trim(),
+      });
+      await completeOAuthLogin(data.access_token);
+      navigate(redirectTarget, { replace: true });
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -202,6 +321,10 @@ export const LoginPage: React.FC = () => {
       ? { duration: 0 }
       : { type: 'spring' as const, stiffness: 380 / scale, damping: 32, mass: 0.9 };
 
+  const visibleTabs: ('login' | 'otp' | 'register')[] = siteInfo.allow_public_register
+    ? ['login', 'otp', 'register']
+    : ['login', 'otp'];
+
   return (
     <Box
       sx={{
@@ -219,7 +342,7 @@ export const LoginPage: React.FC = () => {
         initial={{ opacity: 0, y: 18, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         transition={springTransition}
-        sx={{ width: '100%', maxWidth: 440 }}
+        sx={{ width: '100%', maxWidth: 450 }}
       >
         {siteInfo.announcement_enabled && siteInfo.announcement_content && (
           <Alert severity={siteInfo.announcement_type || 'info'} sx={{ mb: 2 }}>
@@ -280,235 +403,378 @@ export const LoginPage: React.FC = () => {
               </Box>
             </Stack>
 
-            {/* 灵动弹性滑动胶囊 Tabs */}
-            {siteInfo.allow_public_register && (
-              <Box
-                sx={{
-                  display: 'grid',
-                  gridTemplateColumns: '1fr 1fr',
-                  p: 0.5,
-                  mb: 2.5,
-                  borderRadius: `${Math.max(4, radius - 2)}px`,
-                  bgcolor: alpha(theme.palette.text.primary, 0.05),
-                  position: 'relative',
-                }}
-              >
-                {(['login', 'register'] as const).map((item) => {
-                  const active = tab === item;
-                  return (
-                    <Box
-                      key={item}
-                      onClick={() => {
-                        setTab(item);
-                        setError('');
-                      }}
-                      sx={{
-                        position: 'relative',
-                        py: 0.95,
-                        textAlign: 'center',
-                        cursor: 'pointer',
-                        userSelect: 'none',
-                        zIndex: 1,
-                      }}
+            {mfaChallenge ? (
+              /* MFA 二步验证视图（含风险提示） */
+              <Box component="form" onSubmit={handleVerifyMFA}>
+                <Stack spacing={2}>
+                  <Alert
+                    severity={mfaChallenge.riskLevel === 'high' ? 'warning' : 'info'}
+                    icon={<RiskIcon fontSize="small" />}
+                  >
+                    <AlertTitle>
+                      {mfaChallenge.riskLevel === 'high' ? '高风险登录二次安全验证' : '多因素身份验证'}
+                    </AlertTitle>
+                    {mfaChallenge.riskReasons && mfaChallenge.riskReasons.length > 0
+                      ? `检测到环境风险：${mfaChallenge.riskReasons.join('；')}。请完成二次身份校验。`
+                      : '该账号已开启多因素认证，请完成二次校验后继续登录。'}
+                  </Alert>
+
+                  {error && <Alert severity="error">{error}</Alert>}
+                  {successMsg && <Alert severity="success">{successMsg}</Alert>}
+
+                  <RadioGroup
+                    value={mfaMethod}
+                    onChange={(e) => {
+                      setMfaMethod(e.target.value);
+                      setError('');
+                    }}
+                  >
+                    {(mfaChallenge.methods || []).map((m) => (
+                      <FormControlLabel
+                        key={m}
+                        value={m}
+                        control={<Radio size="small" />}
+                        label={
+                          <Stack direction="row" spacing={1} alignItems="center">
+                            <Typography variant="body2">{MFA_METHOD_LABELS[m] || m}</Typography>
+                            {m === 'email_otp' && mfaChallenge.emailHint && (
+                              <Chip size="small" label={mfaChallenge.emailHint} />
+                            )}
+                            {m === 'sms_otp' && mfaChallenge.phoneHint && (
+                              <Chip size="small" label={mfaChallenge.phoneHint} />
+                            )}
+                          </Stack>
+                        }
+                      />
+                    ))}
+                  </RadioGroup>
+
+                  {(mfaMethod === 'email_otp' || mfaMethod === 'sms_otp') && (
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      startIcon={<SendIcon />}
+                      disabled={mfaSendCooldown > 0}
+                      onClick={() => handleSendMFACode(mfaMethod === 'sms_otp' ? 'sms' : 'email')}
                     >
-                      {active && (
-                        <MotionBox
-                          layoutId="auth-tab-pill"
-                          transition={springTransition}
-                          sx={{
-                            position: 'absolute',
-                            inset: 0,
-                            borderRadius: `${Math.max(3, radius - 4)}px`,
-                            bgcolor: 'background.paper',
-                            boxShadow:
-                              theme.palette.mode === 'dark'
-                                ? '0 2px 8px rgba(0,0,0,0.45)'
-                                : '0 2px 8px rgba(15,23,42,0.08)',
-                            zIndex: -1,
-                          }}
-                        />
-                      )}
-                      <Typography
-                        variant="body2"
-                        fontWeight={active ? 600 : 500}
-                        color={active ? 'primary.main' : 'text.secondary'}
-                      >
-                        {item === 'login' ? '账号登录' : '注册账号'}
-                      </Typography>
-                    </Box>
-                  );
-                })}
-              </Box>
-            )}
+                      {mfaSendCooldown > 0 ? `${mfaSendCooldown} 秒后可重发` : '发送一次性验证码'}
+                    </Button>
+                  )}
 
-            <AnimatePresence mode="popLayout">
-              {error && (
-                <MotionBox
-                  key="error"
-                  initial={{ opacity: 0, y: -6, height: 0 }}
-                  animate={{ opacity: 1, y: 0, height: 'auto' }}
-                  exit={{ opacity: 0, y: -6, height: 0 }}
-                  transition={springTransition}
-                  sx={{ mb: 2, overflow: 'hidden' }}
-                >
-                  <Alert severity="error">{error}</Alert>
-                </MotionBox>
-              )}
-              {successMsg && (
-                <MotionBox
-                  key="success"
-                  initial={{ opacity: 0, y: -6, height: 0 }}
-                  animate={{ opacity: 1, y: 0, height: 'auto' }}
-                  exit={{ opacity: 0, y: -6, height: 0 }}
-                  transition={springTransition}
-                  sx={{ mb: 2, overflow: 'hidden' }}
-                >
-                  <Alert severity="success">{successMsg}</Alert>
-                </MotionBox>
-              )}
-            </AnimatePresence>
-
-            <Box component="form" onSubmit={handleSubmit}>
-              <Stack spacing={2}>
-                <MotionBox layout transition={springTransition}>
                   <TextField
-                    label={tab === 'login' ? '用户名或邮箱' : '用户名'}
-                    value={username}
-                    onChange={(e) => setUsername(e.target.value)}
-                    required
-                    fullWidth
+                    label={mfaMethod === 'recovery_code' ? '8 位备用恢复码' : '6 位动态验证码'}
                     size="small"
+                    fullWidth
+                    required
+                    autoFocus
+                    value={mfaCode}
+                    onChange={(e) => setMfaCode(e.target.value)}
                   />
-                </MotionBox>
 
-                <AnimatePresence initial={false}>
-                  {tab === 'register' && (
+                  <Button type="submit" variant="contained" size="large" disabled={submitting} fullWidth>
+                    {submitting ? '验证中...' : '完成验证并登录'}
+                  </Button>
+
+                  <Button
+                    size="small"
+                    startIcon={<BackIcon />}
+                    onClick={() => {
+                      setMfaChallenge(null);
+                      setError('');
+                      setSuccessMsg('');
+                    }}
+                  >
+                    返回重新登录
+                  </Button>
+                </Stack>
+              </Box>
+            ) : (
+              <>
+                {/* 灵动弹性滑动胶囊 Tabs */}
+                <Box
+                  sx={{
+                    display: 'grid',
+                    gridTemplateColumns: `repeat(${visibleTabs.length}, 1fr)`,
+                    p: 0.5,
+                    mb: 2.5,
+                    borderRadius: `${Math.max(4, radius - 2)}px`,
+                    bgcolor: alpha(theme.palette.text.primary, 0.05),
+                    position: 'relative',
+                  }}
+                >
+                  {visibleTabs.map((item) => {
+                    const active = tab === item;
+                    return (
+                      <Box
+                        key={item}
+                        onClick={() => {
+                          setTab(item);
+                          setError('');
+                          setSuccessMsg('');
+                        }}
+                        sx={{
+                          position: 'relative',
+                          py: 0.9,
+                          textAlign: 'center',
+                          cursor: 'pointer',
+                          userSelect: 'none',
+                          zIndex: 1,
+                        }}
+                      >
+                        {active && (
+                          <MotionBox
+                            layoutId="auth-tab-pill"
+                            transition={springTransition}
+                            sx={{
+                              position: 'absolute',
+                              inset: 0,
+                              borderRadius: `${Math.max(3, radius - 4)}px`,
+                              bgcolor: 'background.paper',
+                              boxShadow:
+                                theme.palette.mode === 'dark'
+                                  ? '0 2px 8px rgba(0,0,0,0.45)'
+                                  : '0 2px 8px rgba(15,23,42,0.08)',
+                              zIndex: -1,
+                            }}
+                          />
+                        )}
+                        <Typography
+                          variant="body2"
+                          fontWeight={active ? 600 : 500}
+                          color={active ? 'primary.main' : 'text.secondary'}
+                        >
+                          {item === 'login' ? '密码登录' : item === 'otp' ? '验证码登录' : '注册账号'}
+                        </Typography>
+                      </Box>
+                    );
+                  })}
+                </Box>
+
+                <AnimatePresence mode="popLayout">
+                  {error && (
                     <MotionBox
-                      key="register-fields"
-                      initial={{ opacity: 0, height: 0 }}
-                      animate={{ opacity: 1, height: 'auto' }}
-                      exit={{ opacity: 0, height: 0 }}
+                      key="error"
+                      initial={{ opacity: 0, y: -6, height: 0 }}
+                      animate={{ opacity: 1, y: 0, height: 'auto' }}
+                      exit={{ opacity: 0, y: -6, height: 0 }}
                       transition={springTransition}
-                      sx={{ overflow: 'hidden' }}
+                      sx={{ mb: 2, overflow: 'hidden' }}
                     >
-                      <Stack spacing={2} sx={{ pt: 0.5 }}>
-                        <TextField
-                          label="邮箱"
-                          type="email"
-                          value={email}
-                          onChange={(e) => setEmail(e.target.value)}
-                          required
-                          fullWidth
-                          size="small"
-                        />
-                        <TextField
-                          label="显示名称"
-                          value={displayName}
-                          onChange={(e) => setDisplayName(e.target.value)}
-                          fullWidth
-                          size="small"
-                        />
-                      </Stack>
+                      <Alert severity="error">{error}</Alert>
+                    </MotionBox>
+                  )}
+                  {successMsg && (
+                    <MotionBox
+                      key="success"
+                      initial={{ opacity: 0, y: -6, height: 0 }}
+                      animate={{ opacity: 1, y: 0, height: 'auto' }}
+                      exit={{ opacity: 0, y: -6, height: 0 }}
+                      transition={springTransition}
+                      sx={{ mb: 2, overflow: 'hidden' }}
+                    >
+                      <Alert severity="success">{successMsg}</Alert>
                     </MotionBox>
                   )}
                 </AnimatePresence>
 
-                <MotionBox layout transition={springTransition}>
-                  <TextField
-                    label="密码"
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    required
-                    fullWidth
-                    size="small"
-                  />
-                  {tab === 'login' && siteInfo.smtp_enabled && (
-                    <Box sx={{ textAlign: 'right', mt: 0.5 }}>
-                      <Link
-                        component="button"
-                        type="button"
-                        variant="caption"
-                        underline="hover"
-                        onClick={() => {
-                          setResetError('');
-                          setResetStep('email');
-                          setResetOpen(true);
-                        }}
-                      >
-                        忘记密码？
-                      </Link>
-                    </Box>
-                  )}
-                </MotionBox>
+                <Box component="form" onSubmit={handleSubmit}>
+                  <Stack spacing={2}>
+                    {tab === 'otp' ? (
+                      <>
+                        <Stack direction="row" spacing={1}>
+                          <Chip
+                            label="邮箱验证码"
+                            color={otpChannel === 'email' ? 'primary' : 'default'}
+                            variant={otpChannel === 'email' ? 'filled' : 'outlined'}
+                            onClick={() => setOtpChannel('email')}
+                          />
+                          <Chip
+                            label="手机短信验证码"
+                            color={otpChannel === 'sms' ? 'primary' : 'default'}
+                            variant={otpChannel === 'sms' ? 'filled' : 'outlined'}
+                            onClick={() => setOtpChannel('sms')}
+                          />
+                        </Stack>
+                        <TextField
+                          label={otpChannel === 'sms' ? '绑定手机号' : '绑定邮箱'}
+                          value={otpTarget}
+                          onChange={(e) => setOtpTarget(e.target.value)}
+                          required
+                          fullWidth
+                          size="small"
+                        />
+                        <Stack direction="row" spacing={1}>
+                          <TextField
+                            label="6 位验证码"
+                            value={otpCode}
+                            onChange={(e) => setOtpCode(e.target.value)}
+                            required
+                            fullWidth
+                            size="small"
+                          />
+                          <Button
+                            variant="outlined"
+                            onClick={handleSendLoginOTP}
+                            disabled={otpSending || otpCooldown > 0}
+                            sx={{ whiteSpace: 'nowrap', minWidth: 112 }}
+                          >
+                            {otpCooldown > 0 ? `${otpCooldown}s` : otpSending ? '发送中' : '获取验证码'}
+                          </Button>
+                        </Stack>
+                        <CapWidget scene="otp" onToken={setCaptchaToken} resetSignal={captchaReset} />
+                      </>
+                    ) : (
+                      <>
+                        <MotionBox layout transition={springTransition}>
+                          <TextField
+                            label={tab === 'login' ? '用户名或邮箱' : '用户名'}
+                            value={username}
+                            onChange={(e) => setUsername(e.target.value)}
+                            required
+                            fullWidth
+                            size="small"
+                          />
+                        </MotionBox>
 
-                <MotionBox
-                  layout
-                  transition={springTransition}
-                  whileHover={scale === 0 ? undefined : { y: -1.5 }}
-                  whileTap={scale === 0 ? undefined : { scale: 0.985 }}
-                >
-                  <Button
-                    type="submit"
-                    variant="contained"
-                    size="large"
-                    disabled={submitting}
-                    startIcon={tab === 'login' ? <LoginIcon /> : <RegisterIcon />}
-                    fullWidth
-                    sx={{ py: 1.15 }}
-                  >
-                    {submitting ? '处理中...' : tab === 'login' ? '登 录' : '注 册'}
-                  </Button>
-                </MotionBox>
+                        <AnimatePresence initial={false}>
+                          {tab === 'register' && (
+                            <MotionBox
+                              key="register-fields"
+                              initial={{ opacity: 0, height: 0 }}
+                              animate={{ opacity: 1, height: 'auto' }}
+                              exit={{ opacity: 0, height: 0 }}
+                              transition={springTransition}
+                              sx={{ overflow: 'hidden' }}
+                            >
+                              <Stack spacing={2} sx={{ pt: 0.5 }}>
+                                <TextField
+                                  label="邮箱"
+                                  type="email"
+                                  value={email}
+                                  onChange={(e) => setEmail(e.target.value)}
+                                  required
+                                  fullWidth
+                                  size="small"
+                                />
+                                <TextField
+                                  label="显示名称"
+                                  value={displayName}
+                                  onChange={(e) => setDisplayName(e.target.value)}
+                                  fullWidth
+                                  size="small"
+                                />
+                              </Stack>
+                            </MotionBox>
+                          )}
+                        </AnimatePresence>
 
-                {tab === 'login' && isWebAuthnSupported() && (
-                  <MotionBox
-                    layout
-                    transition={springTransition}
-                    whileHover={scale === 0 ? undefined : { y: -1 }}
-                    whileTap={scale === 0 ? undefined : { scale: 0.985 }}
-                  >
-                    <Button
-                      type="button"
-                      variant="outlined"
-                      fullWidth
-                      disabled={passkeyLoading}
-                      startIcon={<PasskeyIcon />}
-                      onClick={handlePasskeyLogin}
-                    >
-                      {passkeyLoading ? '等待设备验证...' : '使用通行密钥登录'}
-                    </Button>
-                  </MotionBox>
-                )}
-              </Stack>
-            </Box>
+                        <MotionBox layout transition={springTransition}>
+                          <TextField
+                            label="密码"
+                            type="password"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            required
+                            fullWidth
+                            size="small"
+                          />
+                          {tab === 'login' && siteInfo.smtp_enabled && (
+                            <Box sx={{ textAlign: 'right', mt: 0.5 }}>
+                              <Link
+                                component="button"
+                                type="button"
+                                variant="caption"
+                                underline="hover"
+                                onClick={() => {
+                                  setResetError('');
+                                  setResetStep('email');
+                                  setResetOpen(true);
+                                }}
+                              >
+                                忘记密码？
+                              </Link>
+                            </Box>
+                          )}
+                        </MotionBox>
 
-            {providers.length > 0 && (
-              <MotionBox layout transition={springTransition}>
-                <Divider sx={{ my: 2.5 }}>
-                  <Typography variant="caption" color="text.secondary">
-                    第三方登录
-                  </Typography>
-                </Divider>
-                <Stack spacing={1.2}>
-                  {providers.map((p) => (
+                        {/* Cap.js 人机验证插件插槽 */}
+                        <CapWidget
+                          scene={tab === 'register' ? 'register' : 'login'}
+                          onToken={setCaptchaToken}
+                          resetSignal={captchaReset}
+                        />
+                      </>
+                    )}
+
                     <MotionBox
-                      key={p.name}
-                      whileHover={scale === 0 ? undefined : { y: -1 }}
+                      layout
+                      transition={springTransition}
+                      whileHover={scale === 0 ? undefined : { y: -1.5 }}
                       whileTap={scale === 0 ? undefined : { scale: 0.985 }}
                     >
                       <Button
-                        variant="outlined"
+                        type="submit"
+                        variant="contained"
+                        size="large"
+                        disabled={submitting}
+                        startIcon={tab === 'register' ? <RegisterIcon /> : <LoginIcon />}
                         fullWidth
-                        startIcon={providerIcon(p.plugin_type)}
-                        onClick={() => handleOAuthLogin(p.name)}
+                        sx={{ py: 1.15 }}
                       >
-                        使用 {p.display_name} 登录
+                        {submitting ? '处理中...' : tab === 'register' ? '注 册' : '登 录'}
                       </Button>
                     </MotionBox>
-                  ))}
-                </Stack>
-              </MotionBox>
+
+                    {tab === 'login' && isWebAuthnSupported() && (
+                      <MotionBox
+                        layout
+                        transition={springTransition}
+                        whileHover={scale === 0 ? undefined : { y: -1 }}
+                        whileTap={scale === 0 ? undefined : { scale: 0.985 }}
+                      >
+                        <Button
+                          type="button"
+                          variant="outlined"
+                          fullWidth
+                          disabled={passkeyLoading}
+                          startIcon={<PasskeyIcon />}
+                          onClick={handlePasskeyLogin}
+                        >
+                          {passkeyLoading ? '等待设备验证...' : '使用通行密钥登录'}
+                        </Button>
+                      </MotionBox>
+                    )}
+                  </Stack>
+                </Box>
+
+                {providers.length > 0 && (
+                  <MotionBox layout transition={springTransition}>
+                    <Divider sx={{ my: 2.5 }}>
+                      <Typography variant="caption" color="text.secondary">
+                        第三方登录
+                      </Typography>
+                    </Divider>
+                    <Stack spacing={1.2}>
+                      {providers.map((p) => (
+                        <MotionBox
+                          key={p.name}
+                          whileHover={scale === 0 ? undefined : { y: -1 }}
+                          whileTap={scale === 0 ? undefined : { scale: 0.985 }}
+                        >
+                          <Button
+                            variant="outlined"
+                            fullWidth
+                            startIcon={providerIcon(p.plugin_type)}
+                            onClick={() => handleOAuthLogin(p.name)}
+                          >
+                            使用 {p.display_name} 登录
+                          </Button>
+                        </MotionBox>
+                      ))}
+                    </Stack>
+                  </MotionBox>
+                )}
+              </>
             )}
 
             <Typography variant="caption" color="text.secondary" display="block" textAlign="center" mt={2.5}>
@@ -541,9 +807,7 @@ export const LoginPage: React.FC = () => {
               </>
             ) : (
               <>
-                <Alert severity="info">
-                  验证码已发送至 {resetEmail}，请在 10 分钟内完成验证。
-                </Alert>
+                <Alert severity="info">验证码已发送至 {resetEmail}，请在 10 分钟内完成验证。</Alert>
                 <TextField
                   label="6 位验证码"
                   size="small"

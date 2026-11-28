@@ -441,32 +441,17 @@ func (h *PasskeyHandler) FinishPasskeyLogin(c *gin.Context) {
 		"last_login_ip": c.ClientIP(),
 	}).Error
 
-	accessToken, _, _, err := h.jwtMgr.GenerateAccessToken(
-		matchedUser.user.ID,
-		matchedUser.user.Username,
-		matchedUser.user.Email,
-		"openid profile email",
-		"",
-	)
+	accessToken, refreshToken, _, expiresIn, err := createSessionAndTokens(c, h.db, h.jwtMgr, h.stateStore, h.settingsSvc, matchedUser.user)
 	if err != nil {
-		Fail(c, http.StatusInternalServerError, "签发令牌失败")
+		Fail(c, http.StatusInternalServerError, "签发令牌与保存会话失败")
 		return
 	}
 
 	snap := h.settingsSvc.Snapshot()
-	refreshToken := uuid.NewString()
-	if err := h.stateStore.SaveRefreshToken(c.Request.Context(), refreshToken, security.RefreshTokenRecord{
-		UserID:   matchedUser.user.ID,
-		Username: matchedUser.user.Username,
-	}, snap.JWTRefreshTTL); err != nil {
-		Fail(c, http.StatusInternalServerError, "保存会话失败")
-		return
-	}
-
 	setRefreshCookie(c, refreshToken, snap.JWTRefreshTTL)
 	resp := gin.H{
 		"access_token": accessToken,
-		"expires_in":   int64(h.jwtMgr.AccessTTL().Seconds()),
+		"expires_in":   expiresIn,
 		"user":         matchedUser.user,
 	}
 	if c.GetHeader("X-Token-Delivery") == "body" {

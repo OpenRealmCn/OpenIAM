@@ -59,6 +59,14 @@ func TestMigrationsMatchExpectedSchemaVersion(t *testing.T) {
 		models.SystemVersionHistory{}.TableName(),
 		models.SystemSetting{}.TableName(),
 		models.UserPasskey{}.TableName(),
+		models.UserTOTP{}.TableName(),
+		models.UserSession{}.TableName(),
+		models.Notification{}.TableName(),
+		models.NotificationTemplate{}.TableName(),
+		models.NotificationDelivery{}.TableName(),
+		models.RiskEvent{}.TableName(),
+		models.TempRoleGrant{}.TableName(),
+		models.PluginInstance{}.TableName(),
 	}
 	for _, tbl := range tableNames {
 		assert.Contains(t, sqlText, "CREATE TABLE IF NOT EXISTS "+tbl, "migration SQL missing table %s", tbl)

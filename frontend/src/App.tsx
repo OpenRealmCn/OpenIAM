@@ -9,6 +9,7 @@ import { SiteProvider } from './context/SiteContext';
 import { MOTION_SPEED_SCALE, useThemeStore } from './store/themeStore';
 import { buildOpenIAMTheme } from './theme/theme';
 import { AppLayout } from './components/AppLayout';
+import { CapabilityGuard } from './components/CapabilityGuard';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { LoginPage } from './pages/LoginPage';
 import { ChangePasswordPage } from './pages/ChangePasswordPage';
@@ -26,12 +27,23 @@ import { IdentityProvidersPage } from './pages/IdentityProvidersPage';
 import { AuditLogsPage } from './pages/AuditLogsPage';
 import { SystemSettingsPage } from './pages/SystemSettingsPage';
 import { SystemVersionPage } from './pages/SystemVersionPage';
+import { JitGrantsPage } from './pages/JitGrantsPage';
+import { SessionsPage } from './pages/SessionsPage';
+import { NotificationsPage } from './pages/NotificationsPage';
+import { PluginsPage } from './pages/PluginsPage';
+import { RiskEventsPage } from './pages/RiskEventsPage';
 
 dayjs.locale('zh-cn');
 
 const HomeEntry: React.FC = () => {
-  const { isAdmin } = useAuth();
-  return isAdmin ? <DashboardPage /> : <UserPortalPage />;
+  const { adminTier } = useAuth();
+  if (adminTier === 'platform_admin' || adminTier === 'domain_admin') {
+    return <DashboardPage />;
+  }
+  if (adminTier === 'auditor') {
+    return <AuditLogsPage />;
+  }
+  return <UserPortalPage />;
 };
 
 export const App: React.FC = () => {
@@ -93,15 +105,104 @@ export const App: React.FC = () => {
                   <Route index element={<HomeEntry />} />
                   <Route path="portal" element={<UserPortalPage />} />
                   <Route path="profile" element={<ProfilePage />} />
-                  <Route path="users" element={<UsersPage />} />
-                  <Route path="domains" element={<DomainsPage />} />
-                  <Route path="roles" element={<RolesPage />} />
-                  <Route path="permissions" element={<PermissionsPage />} />
+                  <Route path="notifications" element={<NotificationsPage />} />
                   <Route path="oauth-apps" element={<OAuthAppsPage />} />
-                  <Route path="identity-providers" element={<IdentityProvidersPage />} />
-                  <Route path="audit-logs" element={<AuditLogsPage />} />
-                  <Route path="system-settings" element={<SystemSettingsPage />} />
-                  <Route path="system-version" element={<SystemVersionPage />} />
+                  <Route
+                    path="users"
+                    element={
+                      <CapabilityGuard cap="users:read">
+                        <UsersPage />
+                      </CapabilityGuard>
+                    }
+                  />
+                  <Route
+                    path="domains"
+                    element={
+                      <CapabilityGuard tiers={['platform_admin']}>
+                        <DomainsPage />
+                      </CapabilityGuard>
+                    }
+                  />
+                  <Route
+                    path="roles"
+                    element={
+                      <CapabilityGuard cap="roles:read">
+                        <RolesPage />
+                      </CapabilityGuard>
+                    }
+                  />
+                  <Route
+                    path="permissions"
+                    element={
+                      <CapabilityGuard cap="permissions:read">
+                        <PermissionsPage />
+                      </CapabilityGuard>
+                    }
+                  />
+                  <Route
+                    path="jit-grants"
+                    element={
+                      <CapabilityGuard cap="jit:read">
+                        <JitGrantsPage />
+                      </CapabilityGuard>
+                    }
+                  />
+                  <Route
+                    path="sessions"
+                    element={
+                      <CapabilityGuard cap="sessions:read">
+                        <SessionsPage />
+                      </CapabilityGuard>
+                    }
+                  />
+                  <Route
+                    path="risk-events"
+                    element={
+                      <CapabilityGuard cap="risk:read">
+                        <RiskEventsPage />
+                      </CapabilityGuard>
+                    }
+                  />
+                  <Route
+                    path="identity-providers"
+                    element={
+                      <CapabilityGuard tiers={['platform_admin']}>
+                        <IdentityProvidersPage />
+                      </CapabilityGuard>
+                    }
+                  />
+                  <Route
+                    path="plugins"
+                    element={
+                      <CapabilityGuard tiers={['platform_admin']}>
+                        <PluginsPage />
+                      </CapabilityGuard>
+                    }
+                  />
+                  <Route
+                    path="audit-logs"
+                    element={
+                      <CapabilityGuard cap="audit_logs:read">
+                        <AuditLogsPage />
+                      </CapabilityGuard>
+                    }
+                  />
+                  <Route
+                    path="system-settings"
+                    element={
+                      <CapabilityGuard tiers={['platform_admin']}>
+                        <SystemSettingsPage />
+                      </CapabilityGuard>
+                    }
+                  />
+                  <Route
+                    path="system-version"
+                    element={
+                      <CapabilityGuard cap="system:read">
+                        <SystemVersionPage />
+                      </CapabilityGuard>
+                    }
+                  />
                 </Route>
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>

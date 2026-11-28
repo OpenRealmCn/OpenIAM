@@ -325,3 +325,29 @@ func (h *PermissionHandler) CheckPolicy(c *gin.Context) {
 		"roles":   roles,
 	})
 }
+
+type simulatePolicyReq struct {
+	UserID   uint64               `json:"user_id" binding:"required"`
+	Domain   string               `json:"domain" binding:"required"`
+	Resource string               `json:"resource" binding:"required"`
+	Action   string               `json:"action" binding:"required"`
+	Draft    rbac.SimulationDraft `json:"draft"`
+}
+
+// SimulatePolicy 权限模拟器与变更预演：在不修改真实策略库的前提下，模拟策略/角色变更前后某用户的权限判定变化。
+func (h *PermissionHandler) SimulatePolicy(c *gin.Context) {
+	var req simulatePolicyReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		Fail(c, http.StatusBadRequest, "参数无效: "+err.Error())
+		return
+	}
+	if req.UserID != CurrentUserID(c) && !requireDomainPermission(c, h.enforcer, req.Domain, "permissions", "read") {
+		return
+	}
+	res, err := h.enforcer.Simulate(req.UserID, strings.TrimSpace(req.Domain), strings.TrimSpace(req.Resource), strings.TrimSpace(req.Action), req.Draft)
+	if err != nil {
+		Fail(c, http.StatusInternalServerError, "权限模拟失败: "+err.Error())
+		return
+	}
+	OK(c, res)
+}

@@ -32,7 +32,10 @@ import { SystemSetting } from '../types/api';
 
 const categoryMeta: Record<string, { label: string; desc: string }> = {
   site: { label: '站点与公告', desc: '配置站点名称、全局图标、浏览器标签图标、页脚版权与全站首页公告' },
-  smtp: { label: '邮件服务', desc: '配置 SMTP 发件服务器，用于发送测试邮件与找回密码验证码' },
+  smtp: { label: '邮件服务', desc: '配置 SMTP 发件服务器，用于发送测试邮件、邮箱验证码与找回密码' },
+  otp: { label: '验证码与防刷', desc: '配置短信与邮件验证码的频控阈值、单条成本折算、日预算告警及异常降级策略' },
+  risk: { label: '风险自适应认证', desc: '配置 IP 信誉、异地、设备变化等维度的风险阈值与处置动作' },
+  captcha: { label: '人机验证策略', desc: '配置登录、注册、发送验证码场景是否启用人机验证（在插件中心管理 Cap 模式）' },
   security: { label: '登录与安全', desc: '管理账号锁定阈值、锁定时长及用户公开注册开关' },
   jwt: { label: '令牌设置', desc: '配置访问令牌与刷新令牌的签发方及有效期' },
   ratelimit: { label: '请求限流', desc: '配置按来源 IP 的接口频率保护规则' },
@@ -41,7 +44,7 @@ const categoryMeta: Record<string, { label: string; desc: string }> = {
   server: { label: '跨域设置', desc: '配置允许访问平台接口的前端来源域名' },
 };
 
-const categoryOrder = ['site', 'smtp', 'security', 'jwt', 'ratelimit', 'oauth_server', 'oauth_plugin', 'server'];
+const categoryOrder = ['site', 'smtp', 'otp', 'risk', 'captcha', 'security', 'jwt', 'ratelimit', 'oauth_server', 'oauth_plugin', 'server'];
 
 const SELECT_OPTIONS: Record<string, { value: string; label: string }[]> = {
   'site.announcement_type': [
@@ -54,6 +57,11 @@ const SELECT_OPTIONS: Record<string, { value: string; label: string }[]> = {
     { value: 'starttls', label: 'STARTTLS（推荐，常用端口 587）' },
     { value: 'tls', label: '隐式 SSL/TLS（常用端口 465）' },
     { value: 'none', label: '明文无加密（仅限内网中继）' },
+  ],
+  'risk.high_action': [
+    { value: 'challenge_mfa', label: '强制二次身份验证（推荐）' },
+    { value: 'notify', label: '仅写入风险日志并发送安全提醒' },
+    { value: 'block', label: '直接阻断该次登录请求' },
   ],
 };
 

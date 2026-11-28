@@ -8,7 +8,18 @@ import {
   setCurrentDomain,
   setTokens,
 } from '../api/client';
-import { Domain, User, UserIdentity } from '../types/api';
+import { AdminTier, Domain, User, UserIdentity } from '../types/api';
+
+export interface LoginStepResult {
+  mustChangePassword?: boolean;
+  mfaRequired?: boolean;
+  mfaToken?: string;
+  methods?: string[];
+  riskLevel?: string;
+  riskReasons?: string[];
+  emailHint?: string;
+  phoneHint?: string;
+}
 
 interface AuthContextValue {
   user: User | null;
@@ -16,7 +27,14 @@ interface AuthContextValue {
   identities: UserIdentity[];
   hasPassword: boolean;
   passkeyCount: number;
+  totpEnabled: boolean;
   isAdmin: boolean;
+  adminTier: AdminTier;
+  capabilities: string[];
+  hasCap: (cap: string) => boolean;
+  sessionId: string;
+  unreadNotifications: number;
+  refreshUnreadCount: () => Promise<void>;
   domains: Domain[];
   currentDomain: string;
   loading: boolean;
@@ -24,7 +42,7 @@ interface AuthContextValue {
   switchDomain: (domainCode: string) => void;
   refreshProfile: () => Promise<void>;
   refreshDomains: () => Promise<void>;
-  loginWithCredentials: (username: string, password: string) => Promise<boolean>;
+  loginWithCredentials: (username: string, password: string, captchaToken?: string) => Promise<LoginStepResult>;
   completeOAuthLogin: (accessToken: string) => Promise<void>;
   logout: () => Promise<void>;
 }
@@ -37,7 +55,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [identities, setIdentities] = useState<UserIdentity[]>([]);
   const [hasPassword, setHasPassword] = useState<boolean>(true);
   const [passkeyCount, setPasskeyCount] = useState<number>(0);
+  const [totpEnabled, setTotpEnabled] = useState<boolean>(false);
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
+  const [adminTier, setAdminTier] = useState<AdminTier>('user');
+  const [capabilities, setCapabilities] = useState<string[]>([]);
+  const [sessionId, setSessionId] = useState<string>('');
+  const [unreadNotifications, setUnreadNotifications] = useState<number>(0);
   const [domains, setDomains] = useState<Domain[]>([]);
   const [currentDomain, setDomainState] = useState<string>(getCurrentDomain());
   const [loading, setLoading] = useState<boolean>(true);
@@ -49,7 +72,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIdentities([]);
     setHasPassword(true);
     setPasskeyCount(0);
+    setTotpEnabled(false);
     setIsAdmin(false);
+    setAdminTier('user');
+    setCapabilities([]);
+    setSessionId('');
+    setUnreadNotifications(0);
     setDomains([]);
     setMustChangePassword(false);
   }, []);
@@ -60,6 +88,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setDomains(list || []);
     } catch {
       // ignore if unauthorized
+    }
+  }, []);
+
+  const refreshUnreadCount = useCallback(async () => {
+    if (!getAccessToken()) return;
+    try {
+      const res = await api.notifications.unreadCount();
+      setUnreadNotifications(Number(res?.total || 0));
+    } catch {
+      // ignore
     }
   }, []);
 
@@ -78,7 +116,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setIdentities(data.identities || []);
       setHasPassword(Boolean(data.has_password));
       setPasskeyCount(Number(data.passkey_count || 0));
+      setTotpEnabled(Boolean(data.totp_enabled));
       setIsAdmin(Boolean(data.is_admin));
+      setAdminTier((data.admin_tier as AdminTier) || (data.is_admin ? 'domain_admin' : 'user'));
+      setCapabilities(Array.isArray(data.capabilities) ? data.capabilities : []);
+      setSessionId(data.session_id || '');
+      setUnreadNotifications(Number(data.unread_notifications || 0));
       if (!data.user?.must_change_password) {
         await refreshDomains();
       }
@@ -94,14 +137,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     refreshProfile();
   }, [refreshProfile]);
 
-  const switchDomain = (domainCode: string) => {
-    setCurrentDomain(domainCode);
-    setDomainState(domainCode);
-  };
+  const switchDomain = useCallback(
+    (domainCode: string) => {
+      setCurrentDomain(domainCode);
+      setDomainState(domainCode);
+      // 切换业务域后重新计算当前域的管理员等级与精细化权限集合
+      void refreshProfile();
+    },
+    [refreshProfile],
+  );
 
-  // 返回是否处于强制改密状态，交给调用方决定跳改密页还是进控制台。
-  const loginWithCredentials = async (username: string, password: string): Promise<boolean> => {
-    const data = await api.auth.login(username, password);
+  const loginWithCredentials = async (
+    username: string,
+    password: string,
+    captchaToken?: string,
+  ): Promise<LoginStepResult> => {
+    const data = await api.auth.login(username, password, captchaToken);
+    if (data.mfa_required) {
+      return {
+        mfaRequired: true,
+        mfaToken: data.mfa_token,
+        methods: data.methods || [],
+        riskLevel: data.risk_level,
+        riskReasons: data.risk_reasons || [],
+        emailHint: data.email_hint,
+        phoneHint: data.phone_hint,
+      };
+    }
     setTokens(data.access_token);
     setUser(data.user);
     setRoles(data.roles || {});
@@ -110,7 +172,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!forced) {
       await refreshProfile();
     }
-    return forced;
+    return { mustChangePassword: forced };
   };
 
   const completeOAuthLogin = useCallback(
@@ -132,6 +194,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const hasCap = useCallback(
+    (cap: string) => {
+      if (adminTier === 'platform_admin') return true;
+      return capabilities.includes(cap);
+    },
+    [adminTier, capabilities],
+  );
+
   return (
     <AuthContext.Provider
       value={{
@@ -140,7 +210,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         identities,
         hasPassword,
         passkeyCount,
+        totpEnabled,
         isAdmin,
+        adminTier,
+        capabilities,
+        hasCap,
+        sessionId,
+        unreadNotifications,
+        refreshUnreadCount,
         domains,
         currentDomain,
         loading,

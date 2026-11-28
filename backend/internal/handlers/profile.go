@@ -22,6 +22,7 @@ import (
 type updateProfileReq struct {
 	DisplayName string `json:"display_name"`
 	AvatarURL   string `json:"avatar_url"`
+	Phone       string `json:"phone"`
 }
 
 func hasAllowedAvatarExt(p string) bool {
@@ -93,11 +94,28 @@ func (h *AuthHandler) UpdateProfile(c *gin.Context) {
 	}
 	displayName := strings.TrimSpace(req.DisplayName)
 	avatarURL := strings.TrimSpace(req.AvatarURL)
+	phone := strings.TrimSpace(req.Phone)
 	if len(displayName) > 128 {
 		Fail(c, http.StatusBadRequest, "显示名称不能超过 128 个字符")
 		return
 	}
+	if len(phone) > 32 {
+		Fail(c, http.StatusBadRequest, "手机号长度不能超过 32 个字符")
+		return
+	}
 	uid := CurrentUserID(c)
+	if phone != "" {
+		if !phonePattern.MatchString(phone) {
+			Fail(c, http.StatusBadRequest, "手机号格式无效（可含前导 +，6~20 位数字）")
+			return
+		}
+		var phoneCount int64
+		h.db.Model(&models.User{}).Where("phone = ? AND id <> ?", phone, uid).Count(&phoneCount)
+		if phoneCount > 0 {
+			Fail(c, http.StatusConflict, "该手机号已被其他账号使用")
+			return
+		}
+	}
 	if errMsg := validateAvatarURL(avatarURL, h.isAdminUser(uid)); errMsg != "" {
 		Fail(c, http.StatusBadRequest, errMsg)
 		return
@@ -110,15 +128,18 @@ func (h *AuthHandler) UpdateProfile(c *gin.Context) {
 	before := map[string]interface{}{
 		"display_name": user.DisplayName,
 		"avatar_url":   user.AvatarURL,
+		"phone":        user.Phone,
 	}
 
 	if displayName != "" {
 		user.DisplayName = displayName
 	}
 	user.AvatarURL = avatarURL
+	user.Phone = phone
 	if err := h.db.Model(&user).Updates(map[string]interface{}{
 		"display_name": user.DisplayName,
 		"avatar_url":   user.AvatarURL,
+		"phone":        user.Phone,
 	}).Error; err != nil {
 		Fail(c, http.StatusInternalServerError, "更新个人资料失败")
 		return
@@ -133,6 +154,7 @@ func (h *AuthHandler) UpdateProfile(c *gin.Context) {
 		After: map[string]interface{}{
 			"display_name": user.DisplayName,
 			"avatar_url":   user.AvatarURL,
+			"phone":        user.Phone,
 		},
 		Status: "success",
 	})
@@ -234,6 +256,11 @@ func (h *AuthHandler) RequestPasswordReset(mailSvc *mailer.Service) gin.HandlerF
 		}
 
 		email := strings.ToLower(strings.TrimSpace(req.Email))
+		// 按邮箱与来源 IP 限频（对存在与不存在的邮箱一视同仁），防止被用来轰炸邮箱或枚举账号
+		if rlErr := h.stateStore.CheckAndIncrOTPRate(c.Request.Context(), "pwd_reset:"+email, c.ClientIP(), 60, 5, 20); rlErr != nil {
+			OK(c, gin.H{"sent": true, "message": "如果该邮箱已注册，我们已向其发送了重置密码验证码"})
+			return
+		}
 		var user models.User
 		if err := h.db.Where("LOWER(email) = ? AND status = ?", email, "active").First(&user).Error; err != nil {
 			// 统一返回成功提示，防止邮箱枚举
@@ -296,6 +323,10 @@ func (h *AuthHandler) ConfirmPasswordReset(c *gin.Context) {
 		return
 	}
 
+	if security.IsLegacyDefaultPassword(req.NewPassword) {
+		Fail(c, http.StatusBadRequest, "新密码不能使用历史默认口令")
+		return
+	}
 	hash, err := security.HashPassword(req.NewPassword)
 	if err != nil {
 		Fail(c, http.StatusInternalServerError, "密码加密失败")
@@ -305,7 +336,10 @@ func (h *AuthHandler) ConfirmPasswordReset(c *gin.Context) {
 		Fail(c, http.StatusInternalServerError, "更新密码失败")
 		return
 	}
-	_ = h.stateStore.RevokeUserTokens(c.Request.Context(), user.ID)
+	if rvErr := h.stateStore.RevokeUserTokens(c.Request.Context(), user.ID); rvErr != nil {
+		Fail(c, http.StatusInternalServerError, "密码已重置，但撤销旧会话失败，请重试")
+		return
+	}
 
 	h.auditSvc.RecordFromContext(c, audit.Entry{
 		ActorID:       user.ID,

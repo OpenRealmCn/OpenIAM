@@ -12,6 +12,7 @@ export interface User {
   id: number;
   username: string;
   email: string;
+  phone?: string;
   display_name: string;
   avatar_url: string;
   status: string;
@@ -23,6 +24,8 @@ export interface User {
   updated_at: string;
   roles?: Record<string, string[]>;
 }
+
+export type AdminTier = 'platform_admin' | 'domain_admin' | 'auditor' | 'user';
 
 export interface PolicyRule {
   role: string;
@@ -188,4 +191,159 @@ export interface UserPasskey {
   name: string;
   last_used_at: string | null;
   created_at: string;
+}
+
+export interface TOTPStatus {
+  enabled: boolean;
+  verified_at: string | null;
+  remaining_recovery_codes: number;
+}
+
+export interface UserSession {
+  id: number;
+  session_id: string;
+  user_id: number;
+  username?: string;
+  email?: string;
+  device_name: string;
+  device_fingerprint: string;
+  user_agent: string;
+  ip_address: string;
+  location: string;
+  last_active_at: string;
+  expires_at: string;
+  created_at: string;
+  is_current?: boolean;
+}
+
+export interface NotificationItem {
+  id: number;
+  user_id: number;
+  category: 'system_message' | 'announcement' | 'system_notice';
+  level: 'info' | 'warning' | 'security' | 'error';
+  title: string;
+  content: string;
+  metadata?: Record<string, unknown> | null;
+  is_read: boolean;
+  read_at: string | null;
+  expires_at: string | null;
+  created_at: string;
+}
+
+export interface NotificationTemplate {
+  id: number;
+  code: string;
+  name: string;
+  channel: 'email' | 'sms' | 'in_app';
+  subject: string;
+  body: string;
+  variables: string[];
+  enabled: boolean;
+  updated_at: string;
+}
+
+export interface NotificationDelivery {
+  id: number;
+  template_code: string;
+  channel: string;
+  recipient: string;
+  user_id: number;
+  subject: string;
+  status: 'sent' | 'failed' | 'bounced' | 'degraded';
+  provider_name: string;
+  cost_cents: number;
+  error_message: string;
+  bounce_reason: string;
+  bounced_at: string | null;
+  created_at: string;
+}
+
+export interface RiskEvent {
+  id: number;
+  user_id: number;
+  username: string;
+  ip_address: string;
+  location: string;
+  device_fingerprint: string;
+  user_agent: string;
+  risk_score: number;
+  risk_level: 'low' | 'medium' | 'high';
+  reasons: string[];
+  action_taken: string;
+  created_at: string;
+}
+
+export interface TempRoleGrant {
+  id: number;
+  user_id: number;
+  username?: string;
+  domain_code: string;
+  role_code: string;
+  reason: string;
+  granted_by: number;
+  starts_at: string;
+  expires_at: string;
+  status: 'pending' | 'active' | 'expired' | 'revoked';
+  activated_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+}
+
+export interface UnifiedPluginConfigField {
+  key: string;
+  label: string;
+  type: 'text' | 'password' | 'url' | 'select' | 'number' | 'bool';
+  required: boolean;
+  default?: string;
+  placeholder?: string;
+  description?: string;
+  options?: { value: string; label: string }[];
+}
+
+export interface PluginDriverMeta {
+  slot: 'captcha' | 'sms' | 'notification' | 'risk' | 'oauth';
+  type: string;
+  display_name: string;
+  description: string;
+  fields: UnifiedPluginConfigField[];
+}
+
+export interface PluginInstance {
+  id: number;
+  name: string;
+  slot: 'captcha' | 'sms' | 'notification' | 'risk' | 'oauth';
+  plugin_type: string;
+  display_name: string;
+  config: Record<string, unknown>;
+  enabled: boolean;
+  priority: number;
+  health_status: string;
+  last_checked_at: string | null;
+  updated_at: string;
+}
+
+export interface CaptchaPublicConfig {
+  enabled: boolean;
+  mode: 'local' | 'remote' | '';
+  remote_endpoint?: string;
+  protect_login: boolean;
+  protect_register: boolean;
+  protect_otp: boolean;
+}
+
+export interface SimulationDraft {
+  add_policies: PolicyRule[];
+  remove_policies: PolicyRule[];
+  add_roles: { user_id?: number; role: string; domain?: string }[];
+  remove_roles: { user_id?: number; role: string; domain?: string }[];
+}
+
+export interface SimulationResult {
+  current: boolean;
+  simulated: boolean;
+  effect: 'unchanged' | 'granted' | 'revoked';
+  roles_before: string[];
+  roles_after: string[];
+  matched_policies_before: PolicyRule[];
+  matched_policies_after: PolicyRule[];
 }

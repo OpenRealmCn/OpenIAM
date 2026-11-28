@@ -19,6 +19,28 @@ func isSuperAdmin(enforcer *rbac.Enforcer, userID uint64) bool {
 	return enforcer.IsSuperAdmin(userID)
 }
 
+// domainUserIDs 返回指定域内通过 Casbin g 规则拥有至少一个角色的全部用户 ID 列表。
+func domainUserIDs(enforcer *rbac.Enforcer, domain string) []uint64 {
+	if enforcer == nil || domain == "" {
+		return nil
+	}
+	groupings, err := enforcer.GetGroupingsForDomain(domain)
+	if err != nil {
+		return nil
+	}
+	seen := make(map[uint64]bool)
+	out := make([]uint64, 0, len(groupings))
+	for _, g := range groupings {
+		if len(g) >= 1 {
+			if uid, ok := rbac.ParseUserIDFromSubject(g[0]); ok && !seen[uid] {
+				seen[uid] = true
+				out = append(out, uid)
+			}
+		}
+	}
+	return out
+}
+
 // requireDomainPermission 校验当前用户在「目标域」（而非请求头声明的域）拥有指定权限，防止跨域越权。
 func requireDomainPermission(c *gin.Context, enforcer *rbac.Enforcer, domain, resource, action string) bool {
 	uid := CurrentUserID(c)

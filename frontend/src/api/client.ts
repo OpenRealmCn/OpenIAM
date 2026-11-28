@@ -1,4 +1,5 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
+import { getDeviceFingerprint } from '../utils/device';
 
 const DOMAIN_KEY = 'openiam_current_domain';
 const LEGACY_TOKEN_KEYS = ['openiam_access_token', 'openiam_refresh_token'];
@@ -47,6 +48,7 @@ http.interceptors.request.use((config: InternalAxiosRequestConfig) => {
     config.headers.Authorization = `Bearer ${token}`;
   }
   config.headers['X-OpenIAM-Domain'] = getCurrentDomain();
+  config.headers['X-Device-Fingerprint'] = getDeviceFingerprint();
   return config;
 });
 
@@ -95,15 +97,35 @@ export const api = {
     info: () => http.get('/site/info').then((r) => r.data.data),
   },
   auth: {
-    login: (username: string, password: string) =>
-      http.post('/auth/login', { username, password }).then((r) => r.data.data),
-    register: (payload: { username: string; email: string; password: string; display_name?: string }) =>
+    login: (username: string, password: string, captcha_token?: string) =>
+      http.post('/auth/login', { username, password, captcha_token }).then((r) => r.data.data),
+    register: (payload: { username: string; email: string; password: string; display_name?: string; captcha_token?: string }) =>
       http.post('/auth/register', payload).then((r) => r.data.data),
     logout: () =>
       http.post('/auth/logout', {}).then((r) => r.data.data),
     me: () => http.get('/auth/me').then((r) => r.data.data),
-    updateProfile: (payload: { display_name: string; avatar_url: string }) =>
+    updateProfile: (payload: { display_name: string; avatar_url: string; phone?: string }) =>
       http.put('/auth/me', payload).then((r) => r.data.data),
+    sendOTP: (payload: { scene?: string; channel: 'sms' | 'email'; target?: string; captcha_token?: string }) =>
+      http.post('/auth/otp/send', payload).then((r) => r.data.data),
+    otpLogin: (payload: { target: string; code: string; captcha_token?: string }) =>
+      http.post('/auth/otp/login', payload).then((r) => r.data.data),
+    sendMFACode: (mfa_token: string, channel: 'sms' | 'email') =>
+      http.post('/auth/mfa/send-code', { mfa_token, channel }).then((r) => r.data.data),
+    verifyMFA: (payload: { mfa_token: string; method: string; code: string }) =>
+      http.post('/auth/mfa/verify', payload).then((r) => r.data.data),
+    totpStatus: () => http.get('/auth/totp/status').then((r) => r.data.data),
+    totpSetup: () => http.post('/auth/totp/setup').then((r) => r.data.data),
+    totpVerifyBind: (code: string) => http.post('/auth/totp/verify-bind', { code }).then((r) => r.data.data),
+    totpUnbind: (payload: { password?: string; code?: string }) =>
+      http.post('/auth/totp/unbind', payload).then((r) => r.data.data),
+    totpRegenerateCodes: (code: string) =>
+      http.post('/auth/totp/recovery-codes/regenerate', { code }).then((r) => r.data.data),
+    mySessions: () => http.get('/auth/sessions').then((r) => r.data.data),
+    revokeMySession: (sid: string) => http.delete(`/auth/sessions/${sid}`).then((r) => r.data.data),
+    revokeAllMySessions: (keep_current = true) =>
+      http.post('/auth/sessions/revoke-all', { keep_current }).then((r) => r.data.data),
+    myRiskEvents: () => http.get('/auth/risk-events').then((r) => r.data.data),
     changePassword: (old_password: string, new_password: string) =>
       http.post('/auth/change-password', { old_password, new_password }).then((r) => r.data.data),
     requestPasswordReset: (email: string) =>
@@ -180,6 +202,13 @@ export const api = {
       http.delete('/policies', { data }).then((r) => r.data.data),
     checkPolicy: (data: { user_id: number; domain: string; resource: string; action: string }) =>
       http.post('/policies/check', data).then((r) => r.data.data),
+    simulatePolicy: (data: {
+      user_id: number;
+      domain: string;
+      resource: string;
+      action: string;
+      draft: Record<string, unknown>;
+    }) => http.post('/permissions/simulate', data).then((r) => r.data.data),
   },
   oauthClients: {
     list: (domain?: string) => http.get('/oauth-clients', { params: { domain } }).then((r) => r.data.data),
@@ -247,5 +276,65 @@ export const api = {
       http.put('/system/settings', { settings }).then((r) => r.data.data),
     testSMTP: (to: string) =>
       http.post('/system/settings/test-smtp', { to }).then((r) => r.data.data),
+    otpStats: () => http.get('/system/otp/stats').then((r) => r.data.data),
+  },
+  captcha: {
+    config: () => http.get('/captcha/config').then((r) => r.data.data),
+    capChallenge: () => http.post('/captcha/cap/challenge', {}).then((r) => r.data),
+    capRedeem: (token: string, solutions: number[]) =>
+      http.post('/captcha/cap/redeem', { token, solutions }).then((r) => r.data),
+  },
+  sessions: {
+    listAll: () => http.get('/sessions').then((r) => r.data.data),
+    revoke: (sid: string) => http.delete(`/sessions/${sid}`).then((r) => r.data.data),
+    revokeUserAll: (userId: number) => http.post(`/users/${userId}/sessions/revoke-all`, {}).then((r) => r.data.data),
+  },
+  notifications: {
+    list: (params?: { category?: string; unread_only?: boolean }) =>
+      http.get('/notifications', { params }).then((r) => r.data.data),
+    unreadCount: () => http.get('/notifications/unread-count').then((r) => r.data.data),
+    markRead: (id: number) => http.post(`/notifications/${id}/read`, {}).then((r) => r.data.data),
+    markAllRead: (category?: string) =>
+      http.post('/notifications/read-all', {}, { params: { category } }).then((r) => r.data.data),
+    createAnnouncement: (payload: { title: string; content: string; level?: string; expires_at?: string }) =>
+      http.post('/notifications/announcements', payload).then((r) => r.data.data),
+    deleteAnnouncement: (id: number) => http.delete(`/notifications/announcements/${id}`).then((r) => r.data.data),
+    listTemplates: () => http.get('/notifications/templates').then((r) => r.data.data),
+    createTemplate: (payload: Record<string, unknown>) =>
+      http.post('/notifications/templates', payload).then((r) => r.data.data),
+    updateTemplate: (id: number, payload: Record<string, unknown>) =>
+      http.put(`/notifications/templates/${id}`, payload).then((r) => r.data.data),
+    deleteTemplate: (id: number) => http.delete(`/notifications/templates/${id}`).then((r) => r.data.data),
+    previewTemplate: (payload: { subject: string; body: string; vars: Record<string, string> }) =>
+      http.post('/notifications/templates/preview', payload).then((r) => r.data.data),
+    listDeliveries: (params?: { channel?: string; status?: string; recipient?: string }) =>
+      http.get('/notifications/deliveries', { params }).then((r) => r.data.data),
+    markBounced: (id: number, reason: string) =>
+      http.post(`/notifications/deliveries/${id}/bounce`, { reason }).then((r) => r.data.data),
+  },
+  jit: {
+    list: (params?: { domain?: string; status?: string }) =>
+      http.get('/jit-grants', { params }).then((r) => r.data.data),
+    create: (payload: {
+      user_id: number;
+      domain_code?: string;
+      role_code: string;
+      reason?: string;
+      starts_at?: string;
+      expires_at?: string;
+      ttl_minutes?: number;
+    }) => http.post('/jit-grants', payload).then((r) => r.data.data),
+    revoke: (id: number) => http.post(`/jit-grants/${id}/revoke`, {}).then((r) => r.data.data),
+  },
+  risk: {
+    list: (params?: { risk_level?: string }) => http.get('/risk-events', { params }).then((r) => r.data.data),
+  },
+  plugins: {
+    drivers: (slot?: string) => http.get('/plugins/drivers', { params: { slot } }).then((r) => r.data.data),
+    list: (slot?: string) => http.get('/plugins', { params: { slot } }).then((r) => r.data.data),
+    create: (payload: Record<string, unknown>) => http.post('/plugins', payload).then((r) => r.data.data),
+    update: (id: number, payload: Record<string, unknown>) =>
+      http.put(`/plugins/${id}`, payload).then((r) => r.data.data),
+    test: (id: number) => http.post(`/plugins/${id}/test`, {}).then((r) => r.data.data),
   },
 };

@@ -18,15 +18,15 @@ import {
 import {
   AccountTree as TreeIcon,
   Add as AddIcon,
-  CheckCircle as CheckIcon,
   Delete as DeleteIcon,
+  Science as SimIcon,
 } from '@mui/icons-material';
 import { DataGrid, GridActionsCellItem, GridColDef, GridToolbar } from '@mui/x-data-grid';
 import { SimpleTreeView } from '@mui/x-tree-view/SimpleTreeView';
 import { TreeItem } from '@mui/x-tree-view/TreeItem';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
-import { Permission, PolicyRule } from '../types/api';
+import { Permission, PolicyRule, SimulationResult } from '../types/api';
 
 export const PermissionsPage: React.FC = () => {
   const { currentDomain, user } = useAuth();
@@ -38,14 +38,17 @@ export const PermissionsPage: React.FC = () => {
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState({ code: '', name: '', resource: '', action: 'read', description: '' });
 
-  // 实时权限仿真校验
+  // 实时权限模拟器与策略变更预演
   const [checkForm, setCheckForm] = useState({
     user_id: String(user?.id || 1),
     domain: currentDomain,
     resource: 'users',
     action: 'read',
   });
-  const [checkResult, setCheckResult] = useState<{ allowed: boolean; roles: string[] } | null>(null);
+  const [draftAddPolicy, setDraftAddPolicy] = useState({ role: '', resource: '', action: '' });
+  const [draftAddPolicies, setDraftAddPolicies] = useState<PolicyRule[]>([]);
+  const [draftRemovePolicies, setDraftRemovePolicies] = useState<PolicyRule[]>([]);
+  const [simResult, setSimResult] = useState<SimulationResult | null>(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -108,17 +111,38 @@ export const PermissionsPage: React.FC = () => {
   };
 
   const handleCheck = async () => {
+    setError('');
     try {
-      const res = await api.permissions.checkPolicy({
+      const res = await api.permissions.simulatePolicy({
         user_id: Number(checkForm.user_id),
         domain: checkForm.domain,
         resource: checkForm.resource,
         action: checkForm.action,
+        draft: {
+          add_policies: draftAddPolicies,
+          remove_policies: draftRemovePolicies,
+          add_roles: [],
+          remove_roles: [],
+        },
       });
-      setCheckResult(res);
+      setSimResult(res);
     } catch (err) {
       setError((err as Error).message);
     }
+  };
+
+  const handleAddDraftPolicy = () => {
+    if (!draftAddPolicy.role.trim() || !draftAddPolicy.resource.trim() || !draftAddPolicy.action.trim()) return;
+    setDraftAddPolicies((prev) => [
+      ...prev,
+      {
+        role: draftAddPolicy.role.trim(),
+        domain: checkForm.domain,
+        resource: draftAddPolicy.resource.trim(),
+        action: draftAddPolicy.action.trim(),
+      },
+    ]);
+    setDraftAddPolicy({ role: '', resource: '', action: '' });
   };
 
   const permColumns: GridColDef<Permission>[] = [
@@ -174,55 +198,148 @@ export const PermissionsPage: React.FC = () => {
         </Alert>
       )}
 
-      {/* 权限校验仿真测试 */}
+      {/* 权限模拟器与策略变更预演 */}
       <Card sx={{ mb: 2.5 }}>
         <CardContent>
-          <Typography variant="subtitle1" fontWeight={600} mb={1.5}>
-            权限测试
-          </Typography>
-          <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems="center">
+          <Stack direction="row" spacing={1} alignItems="center" mb={1.5}>
+            <SimIcon color="primary" fontSize="small" />
+            <Typography variant="subtitle1" fontWeight={600}>
+              权限模拟器与变更预演（沙盒测算，不改动线上策略）
+            </Typography>
+          </Stack>
+          <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems="center" mb={2}>
             <TextField
               size="small"
               label="用户 ID"
               value={checkForm.user_id}
               onChange={(e) => setCheckForm({ ...checkForm, user_id: e.target.value })}
-              sx={{ width: { xs: '100%', md: 120 } }}
+              sx={{ width: { xs: '100%', md: 110 } }}
             />
             <TextField
               size="small"
-              label="域 (dom)"
+              label="域"
               value={checkForm.domain}
               onChange={(e) => setCheckForm({ ...checkForm, domain: e.target.value })}
+              sx={{ width: { xs: '100%', md: 140 } }}
+            />
+            <TextField
+              size="small"
+              label="资源"
+              value={checkForm.resource}
+              onChange={(e) => setCheckForm({ ...checkForm, resource: e.target.value })}
+              sx={{ width: { xs: '100%', md: 160 } }}
+            />
+            <TextField
+              size="small"
+              label="动作"
+              value={checkForm.action}
+              onChange={(e) => setCheckForm({ ...checkForm, action: e.target.value })}
+              sx={{ width: { xs: '100%', md: 130 } }}
+            />
+            <Button variant="contained" startIcon={<SimIcon />} onClick={handleCheck}>
+              运行预演
+            </Button>
+          </Stack>
+
+          {/* 假设策略变更草稿 */}
+          <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.2} alignItems="center" mb={1.5}>
+            <TextField
+              size="small"
+              label="预演追加：角色"
+              placeholder="如 viewer"
+              value={draftAddPolicy.role}
+              onChange={(e) => setDraftAddPolicy({ ...draftAddPolicy, role: e.target.value })}
+              sx={{ width: { xs: '100%', md: 140 } }}
+            />
+            <TextField
+              size="small"
+              label="资源"
+              placeholder="如 orders"
+              value={draftAddPolicy.resource}
+              onChange={(e) => setDraftAddPolicy({ ...draftAddPolicy, resource: e.target.value })}
               sx={{ width: { xs: '100%', md: 150 } }}
             />
             <TextField
               size="small"
-              label="资源 (obj)"
-              value={checkForm.resource}
-              onChange={(e) => setCheckForm({ ...checkForm, resource: e.target.value })}
-              sx={{ width: { xs: '100%', md: 180 } }}
+              label="动作"
+              placeholder="如 read"
+              value={draftAddPolicy.action}
+              onChange={(e) => setDraftAddPolicy({ ...draftAddPolicy, action: e.target.value })}
+              sx={{ width: { xs: '100%', md: 120 } }}
             />
-            <TextField
-              size="small"
-              label="动作 (act)"
-              value={checkForm.action}
-              onChange={(e) => setCheckForm({ ...checkForm, action: e.target.value })}
-              sx={{ width: { xs: '100%', md: 140 } }}
-            />
-            <Button variant="contained" startIcon={<CheckIcon />} onClick={handleCheck}>
-              测试
+            <Button size="small" variant="outlined" startIcon={<AddIcon />} onClick={handleAddDraftPolicy}>
+              加入假设授权
             </Button>
-            {checkResult && (
-              <Chip
-                color={checkResult.allowed ? 'success' : 'error'}
-                label={
-                  checkResult.allowed
-                    ? `允许放行 (角色: ${checkResult.roles?.join(', ') || 'super_admin'})`
-                    : '拒绝访问 (Deny)'
-                }
-              />
+            {(draftAddPolicies.length > 0 || draftRemovePolicies.length > 0) && (
+              <Button
+                size="small"
+                color="inherit"
+                onClick={() => {
+                  setDraftAddPolicies([]);
+                  setDraftRemovePolicies([]);
+                }}
+              >
+                清空草稿
+              </Button>
             )}
           </Stack>
+
+          {(draftAddPolicies.length > 0 || draftRemovePolicies.length > 0) && (
+            <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap mb={1.5}>
+              {draftAddPolicies.map((p, idx) => (
+                <Chip
+                  key={`add-${idx}`}
+                  size="small"
+                  color="success"
+                  variant="outlined"
+                  label={`+ ${p.role} -> ${p.resource}:${p.action}`}
+                  onDelete={() => setDraftAddPolicies((prev) => prev.filter((_, i) => i !== idx))}
+                />
+              ))}
+              {draftRemovePolicies.map((p, idx) => (
+                <Chip
+                  key={`rm-${idx}`}
+                  size="small"
+                  color="error"
+                  variant="outlined"
+                  label={`- ${p.role} -> ${p.resource}:${p.action}`}
+                  onDelete={() => setDraftRemovePolicies((prev) => prev.filter((_, i) => i !== idx))}
+                />
+              ))}
+            </Stack>
+          )}
+
+          {simResult && (
+            <Alert severity={simResult.effect === 'granted' ? 'success' : simResult.effect === 'revoked' ? 'warning' : 'info'}>
+              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ sm: 'center' }} flexWrap="wrap">
+                <Chip
+                  size="small"
+                  color={simResult.current ? 'success' : 'error'}
+                  label={`当前真实结果：${simResult.current ? '允许' : '拒绝'}`}
+                />
+                <Typography variant="body2">→</Typography>
+                <Chip
+                  size="small"
+                  color={simResult.simulated ? 'success' : 'error'}
+                  label={`预演变更后：${simResult.simulated ? '允许' : '拒绝'}`}
+                />
+                <Chip
+                  size="small"
+                  variant="outlined"
+                  label={
+                    simResult.effect === 'granted'
+                      ? '变更影响：新获得该权限'
+                      : simResult.effect === 'revoked'
+                        ? '变更影响：将失去该权限'
+                        : '变更影响：结果保持不变'
+                  }
+                />
+                <Typography variant="caption" color="text.secondary">
+                  命中角色：{simResult.roles_after?.join(', ') || '无'}
+                </Typography>
+              </Stack>
+            </Alert>
+          )}
         </CardContent>
       </Card>
 

@@ -19,7 +19,7 @@
 4. 修改或重置密码、禁用或删除用户后，旧令牌不失效：新增按用户的「令牌失效时间点」，此前签发的 Access Token 与 Refresh Token 全部失效；改密接口返回 `relogin_required`。
 5. OAuth 服务端：redirect_uri 校验限定到发起请求的客户端；PKCE 仅允许 S256；scope 限定在客户端登记范围内；授权同意请求改为原子消费，防止重放；`introspect` 和 `revoke` 要求客户端认证；`userinfo` 拒绝已禁用用户；授权类型列表为空时不再默认放行。
 6. 联合登录账号接管：外部邮箱未必经过验证，邮箱与本地账号冲突时直接拒绝，不再自动关联。
-7. 联合登录身份源 SSRF：身份源地址必须是 https 且不得指向内网或保留地址；出站请求使用受限客户端，在拨号阶段拦截内网 IP（覆盖 DNS 重绑定与重定向），带超时并限制重定向次数。确需接入内网 IdP 时，设置 `OPENIAM_OAUTH_ALLOW_PRIVATE_UPSTREAM=true`。
+7. 联合登录身份源 SSRF：身份源地址必须是 https 且不得指向内网或保留地址；出站请求使用受限客户端，在拨号阶段拦截内网 IP（覆盖 DNS 重绑定与重定向），带超时并限制重定向次数。确需接入内网 IdP 时，可在管理员面板「系统设置」开启 `security.allow_private_upstream`。
 8. 联合登录回调 `redirect_uri` 可被请求方任意覆盖：现在只允许系统配置的回调地址，或已登记 CORS 来源下的 `/oauth/callback/{provider}`。
 9. 域管理员默认权限过大：默认不再授予 `settings`、`oauth_providers`、`domains` 的写权限。
 10. 普通用户自助创建 OAuth 应用：限制授权类型、scope、回调地址（https，或本机回环 http），并强制归属默认域。
@@ -56,13 +56,27 @@
 
 新增回归测试集中在 `review_fix_test.go`，覆盖第 1、2、4、6、7 项。第 3 项（跨客户端回调地址）、第 5 项（OAuth2 令牌失效）、第 8 项（启动拒绝）没有专门测试。
 
+## 企业版功能复审（TOTP、OTP、风控、JIT、会话、插件）
+
+1. 二步验证暴力破解：`/auth/mfa/verify` 现按 mfa_token（5 次）与用户（10 次）双重计数，超限后销毁挑战并返回 429，Redis 异常时按已锁定处理。
+2. 验证码并发绕过：OTP 与密码重置验证码的错误计数改为原子自增，验证码以 DEL 返回值原子消费；密码重置验证码连续输错 5 次作废。
+3. 公开 OTP 发送接口：仅允许 login 场景，账号不存在时返回统一成功响应而不真正发送；降级提示中的邮箱已脱敏；邮件正文做 HTML 转义。
+4. OTP 登录绕过二步验证：已启用 TOTP 的账号不能仅凭邮箱或短信验证码登录。
+5. JIT 临时授权：用户已持有的角色不得再临时授权（否则到期回收会误删永久角色），有效期与生效时间均不得超过 30 天。
+6. 风控输入可伪造：`X-Geo-Location` 默认不再采信，仅在「系统设置」开启 `risk.trust_geo_header=true`（前置网关覆盖该头）时生效；设备指纹与 User-Agent 按字节截断，避免超长值导致会话写入失败。
+7. 手机号：校验格式并要求唯一。
+8. 密码重置：按邮箱与 IP 限频，邮件发送失败不再向客户端泄露细节，禁止使用历史默认口令，撤销旧会话失败时返回错误。
+9. SSRF 黑名单补充 100.64.0.0/10（含部分云厂商元数据地址）。
+
+新增回归测试在 `security_review_test.go`；原有企业功能测试因依赖旧行为已调整（OTP 测试改用带手机号的已注册账号，风控测试显式开启地理头信任）。
+
 ## 尚未修复
 
 1. Redis 默认无密码（仅绑定本机回环，但仍建议在生产环境设置 `OPENIAM_REDIS_PASSWORD`）。
 2. 缺省运行模式为 `debug`，GORM 会打印 SQL；生产环境请设置 `OPENIAM_MODE=release`（compose 默认已是 release）。
 3. DSN 强制开启 `multiStatements=true`，这是迁移所需；建议后续把迁移与业务连接拆开。
 4. 修改密码等操作的审计、令牌撤销依赖 Redis；Redis 不可用时登录与刷新会失败（有意的 fail-closed）。
-5. 联合登录插件仍信任管理员配置的外部 https 站点本身；开启 `OPENIAM_OAUTH_ALLOW_PRIVATE_UPSTREAM` 会放宽 SSRF 防护。
+5. 联合登录插件仍信任管理员配置的外部 https 站点本身；开启系统设置 `security.allow_private_upstream` 会放宽 SSRF 防护。
 
 ## 升级注意
 

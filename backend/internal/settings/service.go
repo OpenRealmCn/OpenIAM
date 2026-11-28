@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	KeySecurityMaxLoginFailures    = "security.max_login_failures"
-	KeySecurityLockoutMinutes      = "security.lockout_minutes"
-	KeySecurityAllowPublicRegister = "security.allow_public_register"
+	KeySecurityMaxLoginFailures     = "security.max_login_failures"
+	KeySecurityLockoutMinutes       = "security.lockout_minutes"
+	KeySecurityAllowPublicRegister  = "security.allow_public_register"
+	KeySecurityAllowPrivateUpstream = "security.allow_private_upstream"
 
 	KeyJWTIssuer               = "jwt.issuer"
 	KeyJWTAccessTokenTTLMin    = "jwt.access_token_ttl_minutes"
@@ -55,13 +56,35 @@ const (
 	KeySMTPFromName   = "smtp.from_name"
 	KeySMTPFromEmail  = "smtp.from_email"
 	KeySMTPEncryption = "smtp.encryption"
+
+	// 验证码频控、成本与降级
+	KeyOTPCooldownSeconds     = "otp.cooldown_seconds"
+	KeyOTPMaxPerHourTarget    = "otp.max_per_hour_target"
+	KeyOTPMaxPerIPHour        = "otp.max_per_ip_hour"
+	KeyOTPSMSCostCents        = "otp.sms_cost_cents"
+	KeyOTPSMSDailyBudgetCents = "otp.sms_daily_budget_cents"
+	KeyOTPFallbackToEmail     = "otp.fallback_to_email"
+
+	// 风险自适应认证
+	KeyRiskEnabled         = "risk.enabled"
+	KeyRiskMediumThreshold = "risk.medium_threshold"
+	KeyRiskHighThreshold   = "risk.high_threshold"
+	KeyRiskHighAction      = "risk.high_action"
+	KeyRiskBlockedIPs      = "risk.blocked_ips"
+	KeyRiskTrustGeoHeader  = "risk.trust_geo_header"
+
+	// 人机验证触发场景
+	KeyCaptchaProtectLogin    = "captcha.protect_login"
+	KeyCaptchaProtectRegister = "captcha.protect_register"
+	KeyCaptchaProtectOTP      = "captcha.protect_otp"
 )
 
 // RuntimeSettings 为从数据库加载并缓存在内存中的强类型运行时配置快照。
 type RuntimeSettings struct {
-	MaxLoginFailures    int
-	LockoutMinutes      int
-	AllowPublicRegister bool
+	MaxLoginFailures     int
+	LockoutMinutes       int
+	AllowPublicRegister  bool
+	AllowPrivateUpstream bool
 
 	JWTIssuer     string
 	JWTAccessTTL  time.Duration
@@ -99,6 +122,24 @@ type RuntimeSettings struct {
 	SMTPFromName   string
 	SMTPFromEmail  string
 	SMTPEncryption string
+
+	OTPCooldownSeconds     int
+	OTPMaxPerHourTarget    int
+	OTPMaxPerIPHour        int
+	OTPSMSCostCents        int
+	OTPSMSDailyBudgetCents int
+	OTPFallbackToEmail     bool
+
+	RiskEnabled         bool
+	RiskMediumThreshold int
+	RiskHighThreshold   int
+	RiskHighAction      string
+	RiskBlockedIPs      []string
+	RiskTrustGeoHeader  bool
+
+	CaptchaProtectLogin    bool
+	CaptchaProtectRegister bool
+	CaptchaProtectOTP      bool
 }
 
 type settingSpec struct {
@@ -134,6 +175,14 @@ var defaultSpecs = []settingSpec{
 		ValueType:   "bool",
 		Label:       "开放用户自主注册",
 		Description: "关闭后仅允许管理员在控制台创建账号。",
+	},
+	{
+		Key:         KeySecurityAllowPrivateUpstream,
+		Category:    "security",
+		DefaultVal:  "false",
+		ValueType:   "bool",
+		Label:       "允许身份源与插件访问内网地址",
+		Description: "默认关闭以防止 SSRF 攻击；仅在内网自建 IdP、Webhook 或私有 Cap 服务时开启。",
 	},
 	{
 		Key:         KeyJWTIssuer,
@@ -377,6 +426,126 @@ var defaultSpecs = []settingSpec{
 		Label:       "传输加密方式",
 		Description: "可选 starttls（推荐，端口 587）、tls（隐式 SSL/TLS，端口 465）或 none。",
 	},
+	{
+		Key:         KeyOTPCooldownSeconds,
+		Category:    "otp",
+		DefaultVal:  "60",
+		ValueType:   "int",
+		Label:       "验证码发送冷却（秒）",
+		Description: "同一账号或手机号/邮箱两次发送验证码的最小间隔秒数。",
+	},
+	{
+		Key:         KeyOTPMaxPerHourTarget,
+		Category:    "otp",
+		DefaultVal:  "5",
+		ValueType:   "int",
+		Label:       "单目标每小时发送上限",
+		Description: "同一邮箱或手机号每小时最多允许发送的验证码次数。",
+	},
+	{
+		Key:         KeyOTPMaxPerIPHour,
+		Category:    "otp",
+		DefaultVal:  "20",
+		ValueType:   "int",
+		Label:       "单 IP 每小时发送上限",
+		Description: "同一来源 IP 每小时最多发起的验证码发送请求数。",
+	},
+	{
+		Key:         KeyOTPSMSCostCents,
+		Category:    "otp",
+		DefaultVal:  "5",
+		ValueType:   "int",
+		Label:       "单条短信估算成本（分）",
+		Description: "用于统计当日短信通道消耗及触发预算告警的折算单价（人民币分）。",
+	},
+	{
+		Key:         KeyOTPSMSDailyBudgetCents,
+		Category:    "otp",
+		DefaultVal:  "5000",
+		ValueType:   "int",
+		Label:       "短信日预算告警阈值（分）",
+		Description: "当日累计短信折算费用超过该阈值时向超级管理员发送告警通知，并允许触发通道降级。",
+	},
+	{
+		Key:         KeyOTPFallbackToEmail,
+		Category:    "otp",
+		DefaultVal:  "true",
+		ValueType:   "bool",
+		Label:       "短信通道异常自动降级邮件",
+		Description: "当短信通道发送失败或超出当日预算且用户已绑定邮箱时，自动降级为邮件发送验证码。",
+	},
+	{
+		Key:         KeyRiskEnabled,
+		Category:    "risk",
+		DefaultVal:  "true",
+		ValueType:   "bool",
+		Label:       "启用风险自适应认证",
+		Description: "登录时综合评估 IP 信誉、异地、设备指纹变化与非常用时间并计算风险评分。",
+	},
+	{
+		Key:         KeyRiskMediumThreshold,
+		Category:    "risk",
+		DefaultVal:  "30",
+		ValueType:   "int",
+		Label:       "中风险评分阈值",
+		Description: "风险分达到该阈值时写入风险事件与日志，并向用户发送安全提醒。",
+	},
+	{
+		Key:         KeyRiskHighThreshold,
+		Category:    "risk",
+		DefaultVal:  "70",
+		ValueType:   "int",
+		Label:       "高风险评分阈值",
+		Description: "风险分达到该阈值时触发强管控动作（要求二次验证或直接阻断）。",
+	},
+	{
+		Key:         KeyRiskHighAction,
+		Category:    "risk",
+		DefaultVal:  "challenge_mfa",
+		ValueType:   "string",
+		Label:       "高风险处置策略",
+		Description: "可选 challenge_mfa（强制二次验证）、notify（仅告警放行）或 block（直接阻断）。",
+	},
+	{
+		Key:         KeyRiskBlockedIPs,
+		Category:    "risk",
+		DefaultVal:  "",
+		ValueType:   "string_list",
+		Label:       "高危拦截 IP 黑名单",
+		Description: "逗号分隔的高危 IP 列表，命中将直接计入高风险分并阻断/告警。",
+	},
+	{
+		Key:         KeyRiskTrustGeoHeader,
+		Category:    "risk",
+		DefaultVal:  "false",
+		ValueType:   "bool",
+		Label:       "采信前置网关地理请求头（X-Geo-Location）",
+		Description: "默认关闭以防客户端伪造登录地点绕过风控；仅当前置网关强制覆写该头时开启。",
+	},
+	{
+		Key:         KeyCaptchaProtectLogin,
+		Category:    "captcha",
+		DefaultVal:  "false",
+		ValueType:   "bool",
+		Label:       "登录启用人机验证",
+		Description: "开启后登录需先通过人机验证插槽中已启用的验证模块（如 Cap PoW）。",
+	},
+	{
+		Key:         KeyCaptchaProtectRegister,
+		Category:    "captcha",
+		DefaultVal:  "false",
+		ValueType:   "bool",
+		Label:       "注册启用人机验证",
+		Description: "开启后自助注册需先完成人机验证。",
+	},
+	{
+		Key:         KeyCaptchaProtectOTP,
+		Category:    "captcha",
+		DefaultVal:  "false",
+		ValueType:   "bool",
+		Label:       "发送验证码启用人机验证",
+		Description: "开启后请求发送短信或邮件验证码需先完成人机验证。",
+	},
 }
 
 // Service 管理持久化在数据库中的全部动态系统设置及热更新通知。
@@ -448,6 +617,7 @@ func (s *Service) Reload() error {
 		MaxLoginFailures:              parseInt(kv[KeySecurityMaxLoginFailures], 5),
 		LockoutMinutes:                parseInt(kv[KeySecurityLockoutMinutes], 15),
 		AllowPublicRegister:           parseBool(kv[KeySecurityAllowPublicRegister], true),
+		AllowPrivateUpstream:          parseBool(kv[KeySecurityAllowPrivateUpstream], false),
 		JWTIssuer:                     fallbackStr(kv[KeyJWTIssuer], "http://localhost:5173"),
 		JWTAccessTTL:                  time.Duration(parseInt(kv[KeyJWTAccessTokenTTLMin], 30)) * time.Minute,
 		JWTRefreshTTL:                 time.Duration(parseInt(kv[KeyJWTRefreshTokenTTLHours], 168)) * time.Hour,
@@ -478,6 +648,21 @@ func (s *Service) Reload() error {
 		SMTPFromName:                  fallbackStr(kv[KeySMTPFromName], "OpenIAM"),
 		SMTPFromEmail:                 strings.TrimSpace(kv[KeySMTPFromEmail]),
 		SMTPEncryption:                fallbackStr(kv[KeySMTPEncryption], "starttls"),
+		OTPCooldownSeconds:            parseInt(kv[KeyOTPCooldownSeconds], 60),
+		OTPMaxPerHourTarget:           parseInt(kv[KeyOTPMaxPerHourTarget], 5),
+		OTPMaxPerIPHour:               parseInt(kv[KeyOTPMaxPerIPHour], 20),
+		OTPSMSCostCents:               parseInt(kv[KeyOTPSMSCostCents], 5),
+		OTPSMSDailyBudgetCents:        parseInt(kv[KeyOTPSMSDailyBudgetCents], 5000),
+		OTPFallbackToEmail:            parseBool(kv[KeyOTPFallbackToEmail], true),
+		RiskEnabled:                   parseBool(kv[KeyRiskEnabled], true),
+		RiskMediumThreshold:           parseInt(kv[KeyRiskMediumThreshold], 30),
+		RiskHighThreshold:             parseInt(kv[KeyRiskHighThreshold], 70),
+		RiskHighAction:                fallbackStr(kv[KeyRiskHighAction], "challenge_mfa"),
+		RiskBlockedIPs:                splitCSV(kv[KeyRiskBlockedIPs]),
+		RiskTrustGeoHeader:            parseBool(kv[KeyRiskTrustGeoHeader], false),
+		CaptchaProtectLogin:           parseBool(kv[KeyCaptchaProtectLogin], false),
+		CaptchaProtectRegister:        parseBool(kv[KeyCaptchaProtectRegister], false),
+		CaptchaProtectOTP:             parseBool(kv[KeyCaptchaProtectOTP], false),
 	}
 
 	s.mu.Lock()

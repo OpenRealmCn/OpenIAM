@@ -18,6 +18,13 @@ var intBounds = map[string][2]int{
 	KeyOAuthServerAccessTokenTTLMin:    {1, 1440},
 	KeyOAuthServerRefreshTokenTTLHours: {1, 8760},
 	KeySMTPPort:                        {1, 65535},
+	KeyOTPCooldownSeconds:              {10, 600},
+	KeyOTPMaxPerHourTarget:             {1, 100},
+	KeyOTPMaxPerIPHour:                 {1, 500},
+	KeyOTPSMSCostCents:                 {1, 1000},
+	KeyOTPSMSDailyBudgetCents:          {1, 10000000},
+	KeyRiskMediumThreshold:             {10, 90},
+	KeyRiskHighThreshold:               {20, 100},
 }
 
 // urlKeys 为必须是合法 http(s) 绝对地址的设置项。
@@ -47,6 +54,7 @@ var optionalEmptyKeys = map[string]bool{
 	KeySMTPPassword:            true,
 	KeySMTPFromName:            true,
 	KeySMTPFromEmail:           true,
+	KeyRiskBlockedIPs:          true,
 }
 
 // secretKeys 为敏感凭据字段，返回前端与写入审计日志时自动脱敏。
@@ -111,6 +119,13 @@ func validateEnumOrSpecialSetting(key, raw string) error {
 		}
 		if _, err := mail.ParseAddress(raw); err != nil {
 			return fmt.Errorf("发件人邮箱格式无效")
+		}
+	case KeyRiskHighAction:
+		switch raw {
+		case "challenge_mfa", "notify", "block":
+			return nil
+		default:
+			return fmt.Errorf("高风险处置策略必须为 challenge_mfa、notify 或 block")
 		}
 	}
 	return nil

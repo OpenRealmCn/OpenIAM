@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net/http"
@@ -11,10 +12,15 @@ import (
 	"github.com/openrealm/openiam/internal/audit"
 	"github.com/openrealm/openiam/internal/config"
 	"github.com/openrealm/openiam/internal/database"
+	"github.com/openrealm/openiam/internal/jit"
 	"github.com/openrealm/openiam/internal/mailer"
+	"github.com/openrealm/openiam/internal/notify"
 	"github.com/openrealm/openiam/internal/oauthplugin"
 	"github.com/openrealm/openiam/internal/oauthserver"
+	"github.com/openrealm/openiam/internal/otp"
+	"github.com/openrealm/openiam/internal/plugins"
 	"github.com/openrealm/openiam/internal/rbac"
+	"github.com/openrealm/openiam/internal/risk"
 	"github.com/openrealm/openiam/internal/router"
 	"github.com/openrealm/openiam/internal/security"
 	"github.com/openrealm/openiam/internal/seed"
@@ -133,7 +139,22 @@ func main() {
 
 	auditSvc := audit.NewService(db, logger)
 	mailerSvc := mailer.NewService(settingsSvc)
-	oauthplugin.SetAllowPrivateUpstream(os.Getenv("OPENIAM_OAUTH_ALLOW_PRIVATE_UPSTREAM") == "true")
+	pluginMgr := plugins.NewManager(db, stateStore, settingsSvc)
+	if err := pluginMgr.EnsureDefaults(); err != nil {
+		logger.Fatal("failed to initialize plugin defaults", zap.Error(err))
+	}
+	notifySvc := notify.NewService(db, mailerSvc, enforcer, pluginMgr)
+	if err := notifySvc.EnsureDefaultTemplates(); err != nil {
+		logger.Fatal("failed to seed notification templates", zap.Error(err))
+	}
+	otpSvc := otp.NewService(db, stateStore, settingsSvc, mailerSvc, notifySvc, pluginMgr)
+	riskEngine := risk.NewEngine(db, stateStore, settingsSvc, notifySvc, auditSvc)
+	jitSvc := jit.NewService(db, enforcer, notifySvc, auditSvc, logger)
+
+	schedCtx, cancelSched := context.WithCancel(context.Background())
+	defer cancelSched()
+	jitSvc.StartScheduler(schedCtx, 30*time.Second)
+
 	pluginReg := oauthplugin.NewDefaultRegistry()
 	pluginSvc := oauthplugin.NewService(
 		db,
@@ -159,6 +180,11 @@ func main() {
 		MailerSvc:   mailerSvc,
 		PluginSvc:   pluginSvc,
 		OAuthSrv:    oauthSrv,
+		PluginMgr:   pluginMgr,
+		NotifySvc:   notifySvc,
+		OTPSvc:      otpSvc,
+		RiskEngine:  riskEngine,
+		JITSvc:      jitSvc,
 	})
 	if err != nil {
 		logger.Fatal("failed to setup router", zap.Error(err))

@@ -66,6 +66,17 @@ func AuthMiddleware(jwtMgr *security.JWTManager, stateStore *security.StateStore
 			}
 		}
 
+		if stateStore != nil && claims.SessionID != "" {
+			sessRevoked, sErr := stateStore.IsSessionRevoked(c.Request.Context(), claims.SessionID)
+			if sErr != nil || sessRevoked {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+					"code":    401,
+					"message": "当前设备会话已下线，请重新登录",
+				})
+				return
+			}
+		}
+
 		if db != nil && claims.UserID > 0 {
 			var user models.User
 			if err := db.Select("id, username, status, must_change_password").First(&user, claims.UserID).Error; err != nil {
@@ -98,6 +109,7 @@ func AuthMiddleware(jwtMgr *security.JWTManager, stateStore *security.StateStore
 		c.Set("username", claims.Username)
 		c.Set("email", claims.Email)
 		c.Set("jti", claims.ID)
+		c.Set("session_id", claims.SessionID)
 		c.Set("claims", claims)
 		c.Next()
 	}

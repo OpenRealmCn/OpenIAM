@@ -326,3 +326,130 @@ func (e *Enforcer) RemoveGroupingForDomain(domain string) (bool, error) {
 func (e *Enforcer) ReloadPolicy() error {
 	return e.enforcer.LoadPolicy()
 }
+
+// RoleChange 描述策略变更预演中的单条用户-角色变更。
+type RoleChange struct {
+	UserID uint64 `json:"user_id"`
+	Role   string `json:"role"`
+	Domain string `json:"domain"`
+}
+
+// SimulationDraft 描述权限模拟器的假设策略/角色变更草稿（仅在内存中运行，不落库）。
+type SimulationDraft struct {
+	AddPolicies    []PolicyRule `json:"add_policies"`
+	RemovePolicies []PolicyRule `json:"remove_policies"`
+	AddRoles       []RoleChange `json:"add_roles"`
+	RemoveRoles    []RoleChange `json:"remove_roles"`
+}
+
+// SimulationResult 为权限模拟器输出的当前判定与预演变更对比结果。
+type SimulationResult struct {
+	Current               bool         `json:"current"`
+	Simulated             bool         `json:"simulated"`
+	Effect                string       `json:"effect"` // unchanged | granted | revoked
+	RolesBefore           []string     `json:"roles_before"`
+	RolesAfter            []string     `json:"roles_after"`
+	MatchedPoliciesBefore []PolicyRule `json:"matched_policies_before"`
+	MatchedPoliciesAfter  []PolicyRule `json:"matched_policies_after"`
+}
+
+// Simulate 在内存隔离副本中应用假设策略变更并执行与 Enforce 完全一致的两道平台闸门判定，绝不触碰真实策略库。
+func (e *Enforcer) Simulate(userID uint64, domain, resource, action string, draft SimulationDraft) (*SimulationResult, error) {
+	currentAllowed, err := e.Enforce(userID, domain, resource, action)
+	if err != nil {
+		return nil, err
+	}
+	rolesBefore := e.GetRolesForUserInDomain(userID, domain)
+	matchedBefore := e.matchedPoliciesForUser(rolesBefore, domain, resource, action)
+
+	// 构建独立内存 Enforcer（无适配器，仅拷贝 p 与 g）
+	m, err := model.NewModelFromString(modelConf)
+	if err != nil {
+		return nil, err
+	}
+	simEnf, err := casbin.NewEnforcer(m)
+	if err != nil {
+		return nil, err
+	}
+	allP, _ := e.enforcer.GetPolicy()
+	for _, row := range allP {
+		if len(row) >= 4 {
+			_, _ = simEnf.AddPolicy(row[0], row[1], row[2], row[3])
+		}
+	}
+	allG, _ := e.enforcer.GetGroupingPolicy()
+	for _, row := range allG {
+		if len(row) >= 3 {
+			_, _ = simEnf.AddGroupingPolicy(row[0], row[1], row[2])
+		}
+	}
+
+	for _, r := range draft.RemovePolicies {
+		_, _ = simEnf.RemovePolicy(strings.TrimSpace(r.Role), strings.TrimSpace(r.Domain), strings.TrimSpace(r.Resource), strings.TrimSpace(r.Action))
+	}
+	for _, r := range draft.AddPolicies {
+		_, _ = simEnf.AddPolicy(strings.TrimSpace(r.Role), strings.TrimSpace(r.Domain), strings.TrimSpace(r.Resource), strings.TrimSpace(r.Action))
+	}
+	for _, g := range draft.RemoveRoles {
+		uid := g.UserID
+		if uid == 0 {
+			uid = userID
+		}
+		dom := strings.TrimSpace(g.Domain)
+		if dom == "" {
+			dom = domain
+		}
+		_, _ = simEnf.RemoveGroupingPolicy(SubjectForUser(uid), strings.TrimSpace(g.Role), dom)
+	}
+	for _, g := range draft.AddRoles {
+		uid := g.UserID
+		if uid == 0 {
+			uid = userID
+		}
+		dom := strings.TrimSpace(g.Domain)
+		if dom == "" {
+			dom = domain
+		}
+		_, _ = simEnf.AddGroupingPolicy(SubjectForUser(uid), strings.TrimSpace(g.Role), dom)
+	}
+
+	simWrapper := &Enforcer{enforcer: &casbin.SyncedEnforcer{Enforcer: simEnf}}
+	simAllowed, err := simWrapper.Enforce(userID, domain, resource, action)
+	if err != nil {
+		return nil, err
+	}
+	rolesAfter := simWrapper.GetRolesForUserInDomain(userID, domain)
+	matchedAfter := simWrapper.matchedPoliciesForUser(rolesAfter, domain, resource, action)
+
+	effect := "unchanged"
+	if !currentAllowed && simAllowed {
+		effect = "granted"
+	} else if currentAllowed && !simAllowed {
+		effect = "revoked"
+	}
+	return &SimulationResult{
+		Current:               currentAllowed,
+		Simulated:             simAllowed,
+		Effect:                effect,
+		RolesBefore:           rolesBefore,
+		RolesAfter:            rolesAfter,
+		MatchedPoliciesBefore: matchedBefore,
+		MatchedPoliciesAfter:  matchedAfter,
+	}, nil
+}
+
+func (e *Enforcer) matchedPoliciesForUser(roles []string, domain, resource, action string) []PolicyRule {
+	out := make([]PolicyRule, 0)
+	for _, role := range roles {
+		rules, err := e.GetPolicies(domain, role)
+		if err != nil {
+			continue
+		}
+		for _, r := range rules {
+			if (r.Resource == resource || r.Resource == "*") && (r.Action == action || r.Action == "*") {
+				out = append(out, r)
+			}
+		}
+	}
+	return out
+}
