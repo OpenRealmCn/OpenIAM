@@ -68,11 +68,20 @@ func TestRefreshTokenIsDeliveredViaHttpOnlyCookie(t *testing.T) {
 	require.NotNil(t, ck2)
 	assert.NotEqual(t, ck.Value, ck2.Value)
 
-	// 旧 Cookie 不能重放
+	// 旧 Cookie 不能重放；重放被视为令牌泄露，整个会话随之下线，轮换出的新 Cookie 也失效
 	r2 := cookieRequest(t, env, "/api/v1/auth/refresh", "", ck)
 	assert.Equal(t, http.StatusUnauthorized, r2.Code)
+	assert.Equal(t, http.StatusUnauthorized, cookieRequest(t, env, "/api/v1/auth/refresh", "", ck2).Code)
 
 	// 登出会清除 Cookie 并使对应 Refresh Token 失效
+	w2 := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/login", map[string]string{
+		"username": "admin",
+		"password": testSeedAdminPassword,
+	}, "")
+	require.Equal(t, http.StatusOK, w2.Code, w2.Body.String())
+	require.NoError(t, json.Unmarshal(w2.Body.Bytes(), &resp))
+	ck2 = findCookie(w2, "openiam_refresh")
+	require.NotNil(t, ck2)
 	logout := cookieRequest(t, env, "/api/v1/auth/logout", resp.Data.AccessToken, ck2)
 	require.Equal(t, http.StatusOK, logout.Code, logout.Body.String())
 	cleared := findCookie(logout, "openiam_refresh")

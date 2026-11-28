@@ -116,11 +116,15 @@ func (s *Service) SendMail(ctx context.Context, to, subject, htmlBody string) er
 	}
 	defer func() { _ = client.Close() }()
 
+	// STARTTLS 模式下服务器不宣告 STARTTLS 时必须中止：中间人可以剥离该扩展，迫使验证码明文发送。
+	// 明文投递只能通过显式选择 none 开启。
 	if enc == "starttls" || enc == "" {
-		if ok, _ := client.Extension("STARTTLS"); ok {
-			if err := client.StartTLS(tlsConfig); err != nil {
-				return fmt.Errorf("STARTTLS 握手失败: %w", err)
-			}
+		ok, _ := client.Extension("STARTTLS")
+		if !ok {
+			return errors.New("SMTP 服务器未提供 STARTTLS，已拒绝明文发送；如确为内网中继请将加密方式设为 none")
+		}
+		if err := client.StartTLS(tlsConfig); err != nil {
+			return fmt.Errorf("STARTTLS 握手失败: %w", err)
 		}
 	}
 

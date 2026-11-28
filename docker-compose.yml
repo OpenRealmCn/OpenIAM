@@ -1,7 +1,8 @@
 services:
   # 可选：内置 MySQL 8.0（仅在启用 profile: mysql 或 full 时启动；若使用外部 MySQL 可直接跳过）
+  # 生产部署前务必在 .env 中改掉下列默认口令
   mysql:
-    image: mysql:8.0
+    image: mysql:8.0.40
     container_name: openiam-mysql
     profiles: ["mysql", "full"]
     restart: unless-stopped
@@ -16,26 +17,35 @@ services:
       - openiam_mysql_data:/var/lib/mysql
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-popeniam_root_password"]
+      # 口令经环境变量传入，既跟随 .env 配置，也不会出现在进程参数里
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h localhost -u root --silent"]
       interval: 5s
       timeout: 5s
       retries: 15
+    networks:
+      - openiam
 
   # 可选：内置 Redis 7（仅在启用 profile: redis 或 full 时启动；若使用外部 Redis 可直接跳过）
+  # 内置 Redis 强制口令认证，口令与后端共用 OPENIAM_REDIS_PASSWORD
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     container_name: openiam-redis
     profiles: ["redis", "full"]
     restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${OPENIAM_REDIS_PASSWORD:-openiam_redis_password}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - openiam_redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 10
+    networks:
+      - openiam
 
   # 后端仅在 Docker 内部网络监听，不对外宿主机开放端口；所有外部流量统一经由 frontend (Nginx) 反代进入
   backend:
@@ -57,14 +67,26 @@ services:
       OPENIAM_REDIS_PASSWORD: "${OPENIAM_REDIS_PASSWORD:-}"
       OPENIAM_REDIS_DB: "${OPENIAM_REDIS_DB:-0}"
       OPENIAM_REDIS_KEY_PREFIX: "${OPENIAM_REDIS_KEY_PREFIX:-openiam:}"
+      # 只信任 compose 内部网段（前端 Nginx）转发的 X-Forwarded-For / X-Forwarded-Proto
+      OPENIAM_TRUSTED_PROXIES: "${OPENIAM_TRUSTED_PROXIES:-127.0.0.1,::1,${OPENIAM_DOCKER_SUBNET:-172.28.0.0/24}}"
+      # 敏感字段（TOTP 种子、联合登录/插件密钥）落库加密密钥：32 字节 base64 或 hex，生成方式见 .env.example
+      OPENIAM_DATA_ENCRYPTION_KEY: "${OPENIAM_DATA_ENCRYPTION_KEY:-}"
+      OPENIAM_JWT_PRIVATE_KEY_PATH: "${OPENIAM_JWT_PRIVATE_KEY_PATH:-}"
+      OPENIAM_JWT_AUTO_KEY_PATH: "/app/data/jwt_private.pem"
       OPENIAM_AUTO_MIGRATE: "${OPENIAM_AUTO_MIGRATE:-true}"
       OPENIAM_STRICT_VERSION_CHECK: "${OPENIAM_STRICT_VERSION_CHECK:-true}"
       OPENIAM_SEED_ENABLED: "${OPENIAM_SEED_ENABLED:-true}"
       OPENIAM_SEED_ADMIN_USERNAME: "${OPENIAM_SEED_ADMIN_USERNAME:-admin}"
       OPENIAM_SEED_ADMIN_EMAIL: "${OPENIAM_SEED_ADMIN_EMAIL:-admin@openrealm.local}"
       OPENIAM_SEED_ADMIN_PASSWORD: "${OPENIAM_SEED_ADMIN_PASSWORD:-}"
+    volumes:
+      - openiam_backend_data:/app/data
+    security_opt:
+      - no-new-privileges:true
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - openiam
 
   # 前端 Nginx 为唯一对外开放的主入口端口，反向代理 /api、/oauth2、/.well-known 到后端
   frontend:
@@ -80,8 +102,19 @@ services:
     environment:
       BACKEND_UPSTREAM: "${OPENIAM_BACKEND_UPSTREAM:-http://backend:8080}"
     ports:
-      - "${OPENIAM_PORT:-5173}:80"
+      - "${OPENIAM_PORT:-5173}:8080"
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - openiam
+
+networks:
+  openiam:
+    ipam:
+      config:
+        - subnet: "${OPENIAM_DOCKER_SUBNET:-172.28.0.0/24}"
 
 volumes:
   openiam_mysql_data:
   openiam_redis_data:
+  openiam_backend_data:

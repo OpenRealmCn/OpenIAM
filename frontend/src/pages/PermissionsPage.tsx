@@ -11,8 +11,10 @@ import {
   DialogContent,
   DialogTitle,
   Grid2 as Grid,
+  IconButton,
   Stack,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import {
@@ -25,17 +27,24 @@ import { DataGrid, GridActionsCellItem, GridColDef, GridToolbar } from '@mui/x-d
 import { SimpleTreeView } from '@mui/x-tree-view/SimpleTreeView';
 import { TreeItem } from '@mui/x-tree-view/TreeItem';
 import { api } from '../api/client';
+import { useConfirm } from '../components/ConfirmDialog';
 import { useAuth } from '../context/AuthContext';
 import { Permission, PolicyRule, SimulationResult } from '../types/api';
 
+function isSuperAdminWildcardPolicy(rule: PolicyRule): boolean {
+  return rule.role === 'super_admin' && rule.domain === 'openiam' && rule.resource === '*' && rule.action === '*';
+}
+
 export const PermissionsPage: React.FC = () => {
-  const { currentDomain, user } = useAuth();
+  const { currentDomain, user, hasCap } = useAuth();
+  const confirm = useConfirm();
   const [perms, setPerms] = useState<Permission[]>([]);
   const [policies, setPolicies] = useState<PolicyRule[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   const [createOpen, setCreateOpen] = useState(false);
+  const [dialogError, setDialogError] = useState('');
   const [form, setForm] = useState({ code: '', name: '', resource: '', action: 'read', description: '' });
 
   // 实时权限模拟器与策略变更预演
@@ -49,6 +58,8 @@ export const PermissionsPage: React.FC = () => {
   const [draftAddPolicies, setDraftAddPolicies] = useState<PolicyRule[]>([]);
   const [draftRemovePolicies, setDraftRemovePolicies] = useState<PolicyRule[]>([]);
   const [simResult, setSimResult] = useState<SimulationResult | null>(null);
+
+  const canWrite = hasCap('permissions:write');
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -81,20 +92,41 @@ export const PermissionsPage: React.FC = () => {
     return Object.entries(grouped);
   }, [policies]);
 
+  const openCreateDialog = () => {
+    setDialogError('');
+    setForm({ code: '', name: '', resource: '', action: 'read', description: '' });
+    setCreateOpen(true);
+  };
+
   const handleCreatePerm = async () => {
+    setDialogError('');
     try {
-      await api.permissions.create({ domain_code: currentDomain, ...form });
+      await api.permissions.create({
+        domain_code: currentDomain,
+        code: form.code.trim(),
+        name: form.name.trim(),
+        resource: form.resource.trim(),
+        action: form.action.trim(),
+        description: form.description.trim(),
+      });
       setCreateOpen(false);
       setForm({ code: '', name: '', resource: '', action: 'read', description: '' });
       await loadData();
     } catch (err) {
-      setError((err as Error).message);
+      setDialogError((err as Error).message);
     }
   };
 
-  const handleDeletePerm = async (id: number) => {
+  const handleDeletePerm = async (perm: Permission) => {
+    const ok = await confirm({
+      title: '确认删除权限点',
+      content: `确定要删除权限点「${perm.name}」（${perm.code}）吗？删除后该权限点将从当前域的权限点目录中移除。`,
+      confirmText: '确认删除',
+      danger: true,
+    });
+    if (!ok) return;
     try {
-      await api.permissions.delete(id);
+      await api.permissions.delete(perm.id);
       await loadData();
     } catch (err) {
       setError((err as Error).message);
@@ -102,6 +134,14 @@ export const PermissionsPage: React.FC = () => {
   };
 
   const handleRemovePolicy = async (rule: PolicyRule) => {
+    if (isSuperAdminWildcardPolicy(rule)) return;
+    const ok = await confirm({
+      title: '确认移除授权策略',
+      content: `确定要移除域「${rule.domain}」中角色「${rule.role}」对「${rule.resource} : ${rule.action}」的授权策略吗？`,
+      confirmText: '确认移除',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await api.permissions.removePolicy(rule);
       await loadData();
@@ -146,50 +186,83 @@ export const PermissionsPage: React.FC = () => {
   };
 
   const permColumns: GridColDef<Permission>[] = [
-    { field: 'code', headerName: '权限编码', width: 160 },
-    { field: 'name', headerName: '权限名称', width: 150 },
+    { field: 'code', headerName: '权限点编码', width: 160 },
+    { field: 'name', headerName: '权限点名称', width: 150 },
     { field: 'resource', headerName: '资源', width: 130 },
     { field: 'action', headerName: '动作', width: 95 },
-    {
-      field: 'actions',
-      type: 'actions',
-      headerName: '操作',
-      width: 70,
-      getActions: (p) => [
-        <GridActionsCellItem key="del" icon={<DeleteIcon />} label="删除" onClick={() => handleDeletePerm(p.row.id)} />,
-      ],
-    },
+    ...(canWrite
+      ? [
+          {
+            field: 'actions',
+            type: 'actions' as const,
+            headerName: '操作',
+            width: 70,
+            getActions: (p: { row: Permission }) => [
+              <GridActionsCellItem
+                key="del"
+                icon={<DeleteIcon />}
+                label="删除权限点"
+                onClick={() => void handleDeletePerm(p.row)}
+              />,
+            ],
+          },
+        ]
+      : []),
   ];
 
   const policyRows = policies.map((p, idx) => ({ id: `${p.role}-${p.domain}-${p.resource}-${p.action}-${idx}`, ...p }));
   const policyColumns: GridColDef<PolicyRule & { id: string }>[] = [
     { field: 'role', headerName: '角色', width: 135 },
-    { field: 'domain', headerName: '业务域', width: 105 },
+    { field: 'domain', headerName: '域', width: 105 },
     { field: 'resource', headerName: '资源', width: 145 },
     { field: 'action', headerName: '动作', width: 95 },
-    {
-      field: 'actions',
-      type: 'actions',
-      headerName: '移除',
-      width: 70,
-      getActions: (p) => [
-        <GridActionsCellItem key="del" icon={<DeleteIcon />} label="移除策略" onClick={() => handleRemovePolicy(p.row)} />,
-      ],
-    },
+    ...(canWrite
+      ? [
+          {
+            field: 'actions',
+            headerName: '移除',
+            width: 70,
+            sortable: false,
+            filterable: false,
+            disableColumnMenu: true,
+            align: 'center' as const,
+            headerAlign: 'center' as const,
+            renderCell: (p: { row: PolicyRule & { id: string } }) => {
+              const locked = isSuperAdminWildcardPolicy(p.row);
+              return (
+                <Tooltip title={locked ? '超级管理员的全局授权规则不可删除' : '移除策略'}>
+                  <span>
+                    <IconButton
+                      size="small"
+                      disabled={locked}
+                      onClick={() => void handleRemovePolicy(p.row)}
+                      aria-label={locked ? '超级管理员的全局授权规则不可删除' : '移除策略'}
+                    >
+                      <DeleteIcon fontSize="small" />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+              );
+            },
+          },
+        ]
+      : []),
   ];
 
   return (
     <Box>
       <Stack direction="row" justifyContent="space-between" alignItems="center" mb={2.5}>
         <Box>
-          <Typography variant="h5">权限 ({currentDomain})</Typography>
+          <Typography variant="h5">权限点与授权策略（{currentDomain}）</Typography>
           <Typography variant="body2" color="text.secondary">
-            配置权限项、查看角色授权关系并测试权限
+            配置域内权限点、查看角色授权关系并预演策略变更影响。
           </Typography>
         </Box>
-        <Button variant="contained" startIcon={<AddIcon />} onClick={() => setCreateOpen(true)}>
-          新建权限
-        </Button>
+        {canWrite && (
+          <Button variant="contained" startIcon={<AddIcon />} onClick={openCreateDialog}>
+            新建权限点
+          </Button>
+        )}
       </Stack>
 
       {error && (
@@ -204,7 +277,7 @@ export const PermissionsPage: React.FC = () => {
           <Stack direction="row" spacing={1} alignItems="center" mb={1.5}>
             <SimIcon color="primary" fontSize="small" />
             <Typography variant="subtitle1" fontWeight={600}>
-              权限模拟器与变更预演（沙盒测算，不改动线上策略）
+              权限模拟器与策略变更预演（仅沙盒测算，不修改线上策略）
             </Typography>
           </Stack>
           <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems="center" mb={2}>
@@ -335,7 +408,7 @@ export const PermissionsPage: React.FC = () => {
                   }
                 />
                 <Typography variant="caption" color="text.secondary">
-                  命中角色：{simResult.roles_after?.join(', ') || '无'}
+                  命中角色：{simResult.roles_after?.join('，') || '无'}
                 </Typography>
               </Stack>
             </Alert>
@@ -343,7 +416,7 @@ export const PermissionsPage: React.FC = () => {
         </CardContent>
       </Card>
 
-      {/* 多域 RBAC 权限层级树 */}
+      {/* 多域权限层级树 */}
       <Card sx={{ mb: 2.5 }}>
         <CardContent>
           <Stack direction="row" spacing={1} alignItems="center" mb={1.5}>
@@ -358,12 +431,12 @@ export const PermissionsPage: React.FC = () => {
             </Typography>
           ) : (
             <SimpleTreeView defaultExpandedItems={[`domain:${currentDomain}`, ...rolePolicyTree.slice(0, 2).map(([r]) => `role:${r}`)]}>
-              <TreeItem itemId={`domain:${currentDomain}`} label={`业务域: ${currentDomain} (${rolePolicyTree.length} 个角色)`}>
+              <TreeItem itemId={`domain:${currentDomain}`} label={`域：${currentDomain}（${rolePolicyTree.length} 个角色）`}>
                 {rolePolicyTree.map(([roleCode, rules]) => (
                   <TreeItem
                     key={roleCode}
                     itemId={`role:${roleCode}`}
-                    label={`角色: ${roleCode} (${rules.length} 条策略)`}
+                    label={`角色：${roleCode}（${rules.length} 条策略）`}
                   >
                     {rules.map((rule, i) => (
                       <TreeItem
@@ -383,7 +456,7 @@ export const PermissionsPage: React.FC = () => {
       <Grid container spacing={2.5}>
         <Grid size={{ xs: 12, lg: 6 }}>
           <Typography variant="subtitle1" fontWeight={600} mb={1}>
-            权限列表
+            权限点列表
           </Typography>
           <Box sx={{ height: 440 }}>
             <DataGrid
@@ -414,32 +487,37 @@ export const PermissionsPage: React.FC = () => {
       </Grid>
 
       <Dialog open={createOpen} onClose={() => setCreateOpen(false)} maxWidth="xs" fullWidth>
-        <DialogTitle>新增域权限点 ({currentDomain})</DialogTitle>
+        <DialogTitle>新建权限点（{currentDomain}）</DialogTitle>
         <DialogContent>
           <Stack spacing={2} mt={1}>
+            {dialogError && (
+              <Alert severity="error" onClose={() => setDialogError('')}>
+                {dialogError}
+              </Alert>
+            )}
             <TextField
-              label="权限编码 (如 order:read)"
+              label="权限点编码（如 order:read）"
               size="small"
               required
               value={form.code}
               onChange={(e) => setForm({ ...form, code: e.target.value })}
             />
             <TextField
-              label="权限名称"
+              label="权限点名称"
               size="small"
               required
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value })}
             />
             <TextField
-              label="资源路径/标识 (如 orders)"
+              label="资源路径或标识（如 orders）"
               size="small"
               required
               value={form.resource}
               onChange={(e) => setForm({ ...form, resource: e.target.value })}
             />
             <TextField
-              label="动作 (如 read / write / *)"
+              label="动作（如 read / write / *）"
               size="small"
               required
               value={form.action}

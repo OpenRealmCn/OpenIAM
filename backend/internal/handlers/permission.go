@@ -50,7 +50,7 @@ type createPermissionReq struct {
 func (h *PermissionHandler) Create(c *gin.Context) {
 	var req createPermissionReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		Fail(c, http.StatusBadRequest, bindError(err))
 		return
 	}
 	domain := strings.TrimSpace(req.DomainCode)
@@ -84,7 +84,7 @@ func (h *PermissionHandler) Create(c *gin.Context) {
 		Description: strings.TrimSpace(req.Description),
 	}
 	if err := h.db.Create(&perm).Error; err != nil {
-		Fail(c, http.StatusInternalServerError, "创建权限点失败: "+err.Error())
+		failWrite(c, err, "权限点编码已存在", "创建权限点失败")
 		return
 	}
 
@@ -215,7 +215,7 @@ type policyReq struct {
 func (h *PermissionHandler) AddPolicy(c *gin.Context) {
 	var req policyReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "策略参数无效: "+err.Error())
+		Fail(c, http.StatusBadRequest, bindError(err))
 		return
 	}
 	req.Role = strings.TrimSpace(req.Role)
@@ -235,7 +235,7 @@ func (h *PermissionHandler) AddPolicy(c *gin.Context) {
 	}
 	added, err := h.enforcer.AddPolicy(req.Role, req.Domain, req.Resource, req.Action)
 	if err != nil {
-		Fail(c, http.StatusInternalServerError, "添加策略失败: "+err.Error())
+		failInternal(c, "添加策略失败", err)
 		return
 	}
 	h.auditSvc.RecordFromContext(c, audit.Entry{
@@ -252,7 +252,7 @@ func (h *PermissionHandler) AddPolicy(c *gin.Context) {
 func (h *PermissionHandler) RemovePolicy(c *gin.Context) {
 	var req policyReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "策略参数无效: "+err.Error())
+		Fail(c, http.StatusBadRequest, bindError(err))
 		return
 	}
 	req.Role = strings.TrimSpace(req.Role)
@@ -262,9 +262,13 @@ func (h *PermissionHandler) RemovePolicy(c *gin.Context) {
 	if !requirePolicyWriteAccess(c, h.enforcer, req.Role, req.Domain, req.Resource, req.Action, false) {
 		return
 	}
+	if isSuperAdminWildcardPolicy(req.Role, req.Domain, req.Resource, req.Action) {
+		Fail(c, http.StatusBadRequest, "这是超级管理员的全局授权规则，删除后所有超级管理员将无法使用控制台，因此不允许删除")
+		return
+	}
 	removed, err := h.enforcer.RemovePolicy(req.Role, req.Domain, req.Resource, req.Action)
 	if err != nil {
-		Fail(c, http.StatusInternalServerError, "删除策略失败: "+err.Error())
+		failInternal(c, "删除策略失败", err)
 		return
 	}
 	h.auditSvc.RecordFromContext(c, audit.Entry{
@@ -276,6 +280,12 @@ func (h *PermissionHandler) RemovePolicy(c *gin.Context) {
 		Status:       "success",
 	})
 	OK(c, gin.H{"removed": removed})
+}
+
+// isSuperAdminWildcardPolicy 判断是否为 super_admin 在平台域的 *,* 策略。
+// casbin matcher 对超管只放行主体匹配，仍需要这条策略行存在，删掉它等于锁死所有超管。
+func isSuperAdminWildcardPolicy(role, domain, resource, action string) bool {
+	return role == rbac.SuperAdminRole && domain == rbac.DefaultDomain && resource == "*" && action == "*"
 }
 
 type checkPolicyReq struct {
@@ -307,7 +317,7 @@ func (h *PermissionHandler) requireRoleInDomain(c *gin.Context, role, domain str
 func (h *PermissionHandler) CheckPolicy(c *gin.Context) {
 	var req checkPolicyReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数无效: "+err.Error())
+		Fail(c, http.StatusBadRequest, bindError(err))
 		return
 	}
 	// 查询他人权限需要在目标域拥有 permissions:read；查询自身权限不受限
@@ -316,7 +326,7 @@ func (h *PermissionHandler) CheckPolicy(c *gin.Context) {
 	}
 	allowed, err := h.enforcer.Enforce(req.UserID, req.Domain, req.Resource, req.Action)
 	if err != nil {
-		Fail(c, http.StatusInternalServerError, "校验失败: "+err.Error())
+		failInternal(c, "权限校验失败", err)
 		return
 	}
 	roles := h.enforcer.GetRolesForUserInDomain(req.UserID, req.Domain)
@@ -338,7 +348,7 @@ type simulatePolicyReq struct {
 func (h *PermissionHandler) SimulatePolicy(c *gin.Context) {
 	var req simulatePolicyReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数无效: "+err.Error())
+		Fail(c, http.StatusBadRequest, bindError(err))
 		return
 	}
 	if req.UserID != CurrentUserID(c) && !requireDomainPermission(c, h.enforcer, req.Domain, "permissions", "read") {
@@ -346,7 +356,7 @@ func (h *PermissionHandler) SimulatePolicy(c *gin.Context) {
 	}
 	res, err := h.enforcer.Simulate(req.UserID, strings.TrimSpace(req.Domain), strings.TrimSpace(req.Resource), strings.TrimSpace(req.Action), req.Draft)
 	if err != nil {
-		Fail(c, http.StatusInternalServerError, "权限模拟失败: "+err.Error())
+		failInternal(c, "权限模拟失败", err)
 		return
 	}
 	OK(c, res)

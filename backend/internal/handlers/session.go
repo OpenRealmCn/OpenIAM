@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/openrealm/openiam/internal/audit"
 	"github.com/openrealm/openiam/internal/clientip"
+	"github.com/openrealm/openiam/internal/middleware"
 	"github.com/openrealm/openiam/internal/models"
 	"github.com/openrealm/openiam/internal/rbac"
 	"github.com/openrealm/openiam/internal/risk"
@@ -100,6 +101,15 @@ func NewSessionHandler(
 	}
 }
 
+// revokeTTL 返回会话下线标记的保留时长：不短于完整的刷新令牌有效期，避免标记先于仍可轮换的刷新令牌过期。
+func (h *SessionHandler) revokeTTL(expiresAt time.Time) time.Duration {
+	ttl := time.Until(expiresAt)
+	if full := h.settingsSvc.Snapshot().JWTRefreshTTL; full > ttl {
+		ttl = full
+	}
+	return ttl
+}
+
 type sessionView struct {
 	models.UserSession
 	Username  string `json:"username,omitempty"`
@@ -136,7 +146,7 @@ func (h *SessionHandler) RevokeMySession(c *gin.Context) {
 	}
 	now := time.Now()
 	_ = h.db.Model(&row).Update("revoked_at", &now).Error
-	_ = h.stateStore.RevokeSession(c.Request.Context(), sid, time.Until(row.ExpiresAt))
+	_ = h.stateStore.RevokeSession(c.Request.Context(), sid, h.revokeTTL(row.ExpiresAt))
 	h.auditSvc.RecordFromContext(c, audit.Entry{
 		DomainCode:   rbac.DefaultDomain,
 		Action:       "auth.session.revoke",
@@ -167,7 +177,7 @@ func (h *SessionHandler) RevokeAllMySessions(c *gin.Context) {
 	now := time.Now()
 	for _, r := range rows {
 		_ = h.db.Model(&r).Update("revoked_at", &now).Error
-		_ = h.stateStore.RevokeSession(c.Request.Context(), r.SessionID, time.Until(r.ExpiresAt))
+		_ = h.stateStore.RevokeSession(c.Request.Context(), r.SessionID, h.revokeTTL(r.ExpiresAt))
 	}
 	if !req.KeepCurrent {
 		_ = h.stateStore.RevokeUserTokens(c.Request.Context(), uid)
@@ -244,9 +254,9 @@ func (h *SessionHandler) AdminRevokeSession(c *gin.Context) {
 	}
 	now := time.Now()
 	_ = h.db.Model(&row).Update("revoked_at", &now).Error
-	_ = h.stateStore.RevokeSession(c.Request.Context(), sid, time.Until(row.ExpiresAt))
+	_ = h.stateStore.RevokeSession(c.Request.Context(), sid, h.revokeTTL(row.ExpiresAt))
 	h.auditSvc.RecordFromContext(c, audit.Entry{
-		DomainCode:   rbac.DefaultDomain,
+		DomainCode:   middleware.ResolveDomain(c),
 		Action:       "admin.session.revoke",
 		ResourceType: "user_session",
 		ResourceID:   sid,
@@ -270,11 +280,11 @@ func (h *SessionHandler) AdminRevokeUserSessions(c *gin.Context) {
 	now := time.Now()
 	for _, r := range rows {
 		_ = h.db.Model(&r).Update("revoked_at", &now).Error
-		_ = h.stateStore.RevokeSession(c.Request.Context(), r.SessionID, time.Until(r.ExpiresAt))
+		_ = h.stateStore.RevokeSession(c.Request.Context(), r.SessionID, h.revokeTTL(r.ExpiresAt))
 	}
 	_ = h.stateStore.RevokeUserTokens(c.Request.Context(), id)
 	h.auditSvc.RecordFromContext(c, audit.Entry{
-		DomainCode:   rbac.DefaultDomain,
+		DomainCode:   middleware.ResolveDomain(c),
 		Action:       "admin.session.revoke_all",
 		ResourceType: "user",
 		ResourceID:   fmt.Sprintf("%d", id),

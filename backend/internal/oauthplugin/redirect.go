@@ -1,7 +1,6 @@
 package oauthplugin
 
 import (
-	"errors"
 	"strings"
 )
 
@@ -21,5 +20,5 @@ func (s *Service) validateRedirectOverride(providerName, override string) error 
 			}
 		}
 	}
-	return errors.New("redirect_uri 不在允许的回调地址范围内")
+	return publicErr("redirect_uri 不在允许的回调地址范围内")
 }

@@ -167,6 +167,42 @@ func (s *Service) SendInApp(ctx context.Context, userID uint64, category, level,
 	return row, nil
 }
 
+// NotifySecurityEvent 告知用户本人其账号发生了安全相关变更（改密、绑定变更、被锁定等）。
+// 站内信必发；用户邮箱已验证时再异步补发一封邮件，方便账号被盗用时本人能及时察觉。
+// 不推送到管理员 Webhook：这类事件是用户的常规操作，推送只会制造噪音并外泄个人信息。
+func (s *Service) NotifySecurityEvent(ctx context.Context, userID uint64, title, content string, meta models.JSONMap) {
+	if userID == 0 {
+		return
+	}
+	row := &models.Notification{
+		UserID:   userID,
+		Category: CategorySystemMessage,
+		Level:    "security",
+		Title:    strings.TrimSpace(title),
+		Content:  strings.TrimSpace(content),
+		Metadata: meta,
+	}
+	_ = s.db.WithContext(ctx).Create(row).Error
+
+	if s.mailerSvc == nil {
+		return
+	}
+	var user models.User
+	if err := s.db.WithContext(ctx).Select("id", "email", "email_verified").First(&user, userID).Error; err != nil {
+		return
+	}
+	if !user.EmailVerified || strings.TrimSpace(user.Email) == "" || s.IsRecipientBounceBlocked(ctx, "email", user.Email) {
+		return
+	}
+	body := row.Content + "\n\n如果这不是你本人的操作，请立即修改密码，并检查账号的登录设备和绑定信息。"
+	htmlBody := "<pre style=\"font-family:sans-serif;white-space:pre-wrap;line-height:1.6\">" + html.EscapeString(body) + "</pre>"
+	go func(to, subject string) {
+		sendCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = s.mailerSvc.SendMail(sendCtx, to, subject, htmlBody)
+	}(user.Email, "账号安全提醒："+row.Title)
+}
+
 // NotifySuperAdmins 向全体平台超级管理员发送系统通知（system_notice）。
 func (s *Service) NotifySuperAdmins(ctx context.Context, level, title, content string, meta models.JSONMap) {
 	if s.enforcer == nil {

@@ -75,10 +75,66 @@ export function refreshAccessToken(): Promise<string | null> {
   return refreshingPromise;
 }
 
+// 敏感操作返回 reauth_required 时，由界面层弹窗让用户再次验证身份；返回 true 表示验证成功、可以重试原请求。
+type ReauthHandler = () => Promise<boolean>;
+let reauthHandler: ReauthHandler | null = null;
+
+export function setReauthHandler(handler: ReauthHandler | null) {
+  reauthHandler = handler;
+}
+
+// 已登录状态下刷新令牌也失败（会话被吊销或过期）时通知界面层清理登录状态并回到登录页。
+let authLostHandler: (() => void) | null = null;
+
+export function setAuthLostHandler(handler: (() => void) | null) {
+  authLostHandler = handler;
+}
+
+export class ApiError extends Error {
+  status?: number;
+  code?: string;
+
+  constructor(message: string, status?: number, code?: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
+function friendlyMessage(error: AxiosError<{ message?: string }>): string {
+  const serverMsg = error.response?.data?.message;
+  if (serverMsg) return serverMsg;
+  const status = error.response?.status;
+  if (!error.response) {
+    return error.code === 'ECONNABORTED' ? '请求超时，请稍后重试' : '网络连接失败，请检查网络后重试';
+  }
+  if (status === 401) return '登录已过期，请重新登录';
+  if (status === 403) return '没有权限执行此操作';
+  if (status === 404) return '请求的内容不存在';
+  if (status === 429) return '操作过于频繁，请稍后再试';
+  if (status && status >= 500) return '服务暂时不可用，请稍后重试';
+  return '请求失败，请稍后重试';
+}
+
 http.interceptors.response.use(
   (resp) => resp,
-  async (error: AxiosError<{ message?: string }>) => {
-    const original = error.config as (InternalAxiosRequestConfig & { _retry?: boolean }) | undefined;
+  async (error: AxiosError<{ message?: string; error?: string }>) => {
+    const original = error.config as (InternalAxiosRequestConfig & { _retry?: boolean; _reauthRetry?: boolean }) | undefined;
+    if (
+      error.response?.status === 403 &&
+      error.response.data?.error === 'reauth_required' &&
+      original &&
+      !original._reauthRetry &&
+      reauthHandler
+    ) {
+      original._reauthRetry = true;
+      if (await reauthHandler()) {
+        return http(original);
+      }
+      return Promise.reject(new ApiError('已取消身份验证，操作未执行', 403, 'reauth_cancelled'));
+    }
+    const hadSession = Boolean(original?.headers?.Authorization);
     if (error.response?.status === 401 && original && !original._retry && !original.url?.includes('/auth/refresh') && !original.url?.includes('/auth/login')) {
       original._retry = true;
       const newToken = await refreshAccessToken();
@@ -86,9 +142,11 @@ http.interceptors.response.use(
         original.headers.Authorization = `Bearer ${newToken}`;
         return http(original);
       }
+      if (hadSession) {
+        authLostHandler?.();
+      }
     }
-    const msg = error.response?.data?.message || error.message || '请求失败';
-    return Promise.reject(new Error(msg));
+    return Promise.reject(new ApiError(friendlyMessage(error), error.response?.status, error.response?.data?.error));
   },
 );
 
@@ -112,8 +170,16 @@ export const api = {
     logout: () =>
       http.post('/auth/logout', {}).then((r) => r.data.data),
     me: () => http.get('/auth/me').then((r) => r.data.data),
-    updateProfile: (payload: { display_name: string; avatar_url: string; phone?: string }) =>
+    reauth: (payload: { password?: string; code?: string }) =>
+      http.post('/auth/reauth', payload).then((r) => r.data.data),
+    updateProfile: (payload: { display_name: string; avatar_url: string; phone?: string; phone_code?: string }) =>
       http.put('/auth/me', payload).then((r) => r.data.data),
+    sendPhoneBindCode: (phone: string) =>
+      http.post('/auth/me/phone/send-code', { phone }).then((r) => r.data.data),
+    sendEmailChangeCode: (email: string) =>
+      http.post('/auth/me/email/send-code', { email }).then((r) => r.data.data),
+    changeEmail: (email: string, code: string) =>
+      http.post('/auth/me/email', { email, code }).then((r) => r.data.data),
     sendOTP: (payload: { scene?: string; channel: 'sms' | 'email'; target?: string; captcha_token?: string }) =>
       http.post('/auth/otp/send', payload).then((r) => r.data.data),
     otpLogin: (payload: { target: string; code: string; captcha_token?: string }) =>
@@ -136,8 +202,8 @@ export const api = {
     myRiskEvents: () => http.get('/auth/risk-events').then((r) => r.data.data),
     changePassword: (old_password: string, new_password: string) =>
       http.post('/auth/change-password', { old_password, new_password }).then((r) => r.data.data),
-    requestPasswordReset: (email: string) =>
-      http.post('/auth/password-reset/request', { email }).then((r) => r.data.data),
+    requestPasswordReset: (email: string, captcha_token?: string) =>
+      http.post('/auth/password-reset/request', { email, captcha_token }).then((r) => r.data.data),
     confirmPasswordReset: (payload: { email: string; code: string; new_password: string }) =>
       http.post('/auth/password-reset/confirm', payload).then((r) => r.data.data),
     listIdentities: () => http.get('/auth/me/identities').then((r) => r.data.data),
@@ -185,6 +251,8 @@ export const api = {
     delete: (id: number) => http.delete(`/users/${id}`).then((r) => r.data.data),
     resetPassword: (id: number, new_password: string) =>
       http.post(`/users/${id}/reset-password`, { new_password }).then((r) => r.data.data),
+    unlock: (id: number) => http.post(`/users/${id}/unlock`, {}).then((r) => r.data.data),
+    resetMFA: (id: number) => http.post(`/users/${id}/reset-mfa`, {}).then((r) => r.data.data),
     assignRoles: (id: number, data: { domain_code: string; role_codes: string[]; replace?: boolean }) =>
       http.post(`/users/${id}/roles`, data).then((r) => r.data.data),
   },
@@ -272,6 +340,8 @@ export const api = {
       redirect_uri?: string;
       scopes?: string[];
       state?: string;
+      code_challenge?: string;
+      code_challenge_method?: 'S256';
     }) => http.post('/oauth2/codes', data).then((r) => r.data.data),
   },
   audit: {

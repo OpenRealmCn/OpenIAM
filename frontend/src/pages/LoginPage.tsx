@@ -35,10 +35,12 @@ import {
   VpnKey as OAuthIcon,
 } from '@mui/icons-material';
 import { AnimatePresence, motion } from 'framer-motion';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Navigate, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { CapWidget } from '../components/CapWidget';
-import { LoginStepResult, useAuth } from '../context/AuthContext';
+import { LoginResponse, LoginStepResult, useAuth } from '../context/AuthContext';
+import { safeInternalPath } from '../utils/redirect';
+import { passwordHint, policyFromSite, rememberPostChangeRedirect, validatePassword } from '../utils/password';
 import { useSite } from '../context/SiteContext';
 import { MOTION_SPEED_SCALE, useThemeStore } from '../store/themeStore';
 import { PublicProvider } from '../types/api';
@@ -47,10 +49,17 @@ import { getPasskeyAssertion, isWebAuthnSupported } from '../utils/webauthn';
 const MotionBox = motion.create(Box);
 
 const MFA_METHOD_LABELS: Record<string, string> = {
-  totp: '验证器动态码（TOTP）',
-  recovery_code: '备用一次性恢复码',
-  email_otp: '邮箱安全验证码',
-  sms_otp: '手机短信验证码',
+  totp: '身份验证器动态码',
+  recovery_code: '恢复码',
+  email_otp: '邮箱验证码',
+  sms_otp: '短信验证码',
+};
+
+const MFA_CODE_LABELS: Record<string, string> = {
+  totp: '6 位动态码',
+  recovery_code: '恢复码（如 ABCD-EF23）',
+  email_otp: '6 位验证码',
+  sms_otp: '6 位验证码',
 };
 
 export const LoginPage: React.FC = () => {
@@ -65,6 +74,7 @@ export const LoginPage: React.FC = () => {
   const [phone, setPhone] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [emailCode, setEmailCode] = useState('');
   const [smsCode, setSmsCode] = useState('');
   const [regEmailCooldown, setRegEmailCooldown] = useState(0);
@@ -72,6 +82,9 @@ export const LoginPage: React.FC = () => {
   const [regSendingChannel, setRegSendingChannel] = useState<'email' | 'sms' | null>(null);
   const [captchaToken, setCaptchaToken] = useState('');
   const [captchaReset, setCaptchaReset] = useState(0);
+  // 发送验证码走 otp 场景的人机验证，与提交注册（register 场景）分开，两者的令牌都是一次性的。
+  const [sendCaptchaToken, setSendCaptchaToken] = useState('');
+  const [sendCaptchaReset, setSendCaptchaReset] = useState(0);
 
   // OTP 验证码登录状态
   const [otpChannel, setOtpChannel] = useState<'email' | 'sms'>('email');
@@ -99,13 +112,58 @@ export const LoginPage: React.FC = () => {
   const [resetEmail, setResetEmail] = useState('');
   const [resetCode, setResetCode] = useState('');
   const [resetPassword, setResetPassword] = useState('');
+  const [resetConfirm, setResetConfirm] = useState('');
   const [resetBusy, setResetBusy] = useState(false);
   const [resetError, setResetError] = useState('');
 
-  const { loginWithCredentials, completeOAuthLogin } = useAuth();
+  const [resetCaptchaToken, setResetCaptchaToken] = useState('');
+  const [resetCaptchaReset, setResetCaptchaReset] = useState(0);
+
+  const { user, loading: authLoading, mustChangePassword, loginWithCredentials, applyLoginResponse } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams] = useSearchParams();
-  const redirectTarget = searchParams.get('redirect') || '/';
+  const redirectTarget = safeInternalPath(searchParams.get('redirect'));
+  const pwPolicy = policyFromSite(siteInfo);
+  const emailOTPAvailable = Boolean(siteInfo.smtp_enabled);
+  const smsOTPAvailable = Boolean(siteInfo.sms_enabled);
+
+  const goAfterLogin = (res: LoginStepResult) => {
+    if (res.mustChangePassword) {
+      rememberPostChangeRedirect(redirectTarget);
+      navigate('/change-password', { replace: true });
+      return;
+    }
+    navigate(redirectTarget, { replace: true });
+  };
+
+  const enterMFA = (res: LoginStepResult) => {
+    setMfaChallenge(res);
+    setMfaMethod(res.methods?.[0] || 'totp');
+    setMfaCode('');
+    // 密码环节已消耗人机验证令牌，返回重新登录时需要重新验证。
+    setCaptchaReset((n) => n + 1);
+  };
+
+  // 联合登录回调遇到二步验证时会把挑战带到登录页，在这里继续完成。
+  useEffect(() => {
+    const handoff = (location.state as { mfaChallenge?: LoginStepResult } | null)?.mfaChallenge;
+    if (handoff?.mfaToken) {
+      setMfaChallenge(handoff);
+      setMfaMethod(handoff.methods?.[0] || 'totp');
+      setMfaCode('');
+      navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
+    }
+  }, [location, navigate]);
+
+  const finishLogin = async (data: LoginResponse) => {
+    const res = await applyLoginResponse(data);
+    if (res.mfaRequired && res.mfaToken) {
+      enterMFA(res);
+      return;
+    }
+    goAfterLogin(res);
+  };
 
   useEffect(() => {
     api.auth
@@ -124,7 +182,15 @@ export const LoginPage: React.FC = () => {
     if (!siteInfo.allow_public_register && tab === 'register') {
       setTab('login');
     }
-  }, [siteInfo.allow_public_register, tab]);
+    if (tab === 'otp' && !emailOTPAvailable && !smsOTPAvailable) {
+      setTab('login');
+    }
+  }, [siteInfo.allow_public_register, tab, emailOTPAvailable, smsOTPAvailable]);
+
+  useEffect(() => {
+    if (otpChannel === 'email' && !emailOTPAvailable && smsOTPAvailable) setOtpChannel('sms');
+    if (otpChannel === 'sms' && !smsOTPAvailable && emailOTPAvailable) setOtpChannel('email');
+  }, [otpChannel, emailOTPAvailable, smsOTPAvailable]);
 
   useEffect(() => {
     if (otpCooldown <= 0) return;
@@ -178,21 +244,29 @@ export const LoginPage: React.FC = () => {
     e.preventDefault();
     setError('');
     setSuccessMsg('');
+    if (tab === 'register') {
+      const pwErr = validatePassword(password, pwPolicy);
+      if (pwErr) {
+        setError(pwErr);
+        return;
+      }
+      if (password !== confirmPassword) {
+        setError('两次输入的密码不一致');
+        return;
+      }
+    }
     setSubmitting(true);
     try {
       if (tab === 'login') {
-        const res = await loginWithCredentials(username, password, captchaToken);
+        const res = await loginWithCredentials(username.trim(), password, captchaToken);
         if (res.mfaRequired && res.mfaToken) {
-          setMfaChallenge(res);
-          setMfaMethod(res.methods?.[0] || 'totp');
-          setMfaCode('');
+          enterMFA(res);
           return;
         }
-        navigate(res.mustChangePassword ? '/change-password' : redirectTarget, { replace: true });
+        goAfterLogin(res);
       } else if (tab === 'otp') {
-        const data = await api.auth.otpLogin({ target: otpTarget.trim(), code: otpCode.trim(), captcha_token: captchaToken });
-        await completeOAuthLogin(data.access_token);
-        navigate(redirectTarget, { replace: true });
+        const data = await api.auth.otpLogin({ target: otpTarget.trim(), code: otpCode.trim() });
+        await finishLogin(data);
       } else {
         await api.auth.register({
           username,
@@ -204,9 +278,11 @@ export const LoginPage: React.FC = () => {
           sms_code: needSmsVerify ? smsCode.trim() : undefined,
           captcha_token: captchaToken,
         });
-        setSuccessMsg('注册成功，请使用账号密码登录');
+        setSuccessMsg('注册成功，请用刚才设置的用户名和密码登录');
         setEmailCode('');
         setSmsCode('');
+        setPassword('');
+        setConfirmPassword('');
         setTab('login');
         setCaptchaReset((n) => n + 1);
       }
@@ -223,7 +299,7 @@ export const LoginPage: React.FC = () => {
     setSuccessMsg('');
     const target = (channel === 'email' ? email : phone).trim();
     if (!target) {
-      setError(channel === 'email' ? '请先输入注册邮箱' : '请先输入注册手机号');
+      setError(channel === 'email' ? '请先填写邮箱' : '请先填写手机号');
       return;
     }
     setRegSendingChannel(channel);
@@ -232,19 +308,18 @@ export const LoginPage: React.FC = () => {
         scene: 'register',
         channel,
         target,
-        captcha_token: captchaToken,
+        captcha_token: sendCaptchaToken,
       });
-      setSuccessMsg(res?.message || '注册验证码已发送，请注意查收');
+      setSuccessMsg(res?.message || '验证码已发送，请注意查收');
       if (channel === 'email') {
         setRegEmailCooldown(60);
       } else {
         setRegSmsCooldown(60);
       }
-      setCaptchaReset((n) => n + 1);
     } catch (err) {
       setError((err as Error).message);
-      setCaptchaReset((n) => n + 1);
     } finally {
+      setSendCaptchaReset((n) => n + 1);
       setRegSendingChannel(null);
     }
   };
@@ -253,7 +328,7 @@ export const LoginPage: React.FC = () => {
     setError('');
     setSuccessMsg('');
     if (!otpTarget.trim()) {
-      setError(otpChannel === 'sms' ? '请输入绑定手机号' : '请输入绑定邮箱');
+      setError(otpChannel === 'sms' ? '请输入手机号' : '请输入邮箱');
       return;
     }
     setOtpSending(true);
@@ -299,8 +374,8 @@ export const LoginPage: React.FC = () => {
         method: mfaMethod,
         code: mfaCode.trim(),
       });
-      await completeOAuthLogin(data.access_token);
-      navigate(redirectTarget, { replace: true });
+      setMfaChallenge(null);
+      await finishLogin(data);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -320,8 +395,7 @@ export const LoginPage: React.FC = () => {
       const begin = await api.auth.passkeyLoginBegin(username.trim());
       const assertion = await getPasskeyAssertion(begin.options);
       const data = await api.auth.passkeyLoginFinish(begin.session_id, assertion);
-      await completeOAuthLogin(data.access_token);
-      navigate(redirectTarget, { replace: true });
+      await finishLogin(data);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -344,15 +418,16 @@ export const LoginPage: React.FC = () => {
   const handleSendResetCode = async () => {
     setResetError('');
     if (!resetEmail.trim()) {
-      setResetError('请输入注册邮箱');
+      setResetError('请输入邮箱');
       return;
     }
     setResetBusy(true);
     try {
-      await api.auth.requestPasswordReset(resetEmail.trim());
+      await api.auth.requestPasswordReset(resetEmail.trim(), resetCaptchaToken);
       setResetStep('confirm');
     } catch (err) {
       setResetError((err as Error).message);
+      setResetCaptchaReset((n) => n + 1);
     } finally {
       setResetBusy(false);
     }
@@ -361,11 +436,16 @@ export const LoginPage: React.FC = () => {
   const handleConfirmReset = async () => {
     setResetError('');
     if (resetCode.trim().length !== 6) {
-      setResetError('请输入 6 位邮箱验证码');
+      setResetError('请输入 6 位验证码');
       return;
     }
-    if (resetPassword.length < 8 || resetPassword.length > 72) {
-      setResetError('新密码长度需在 8 ~ 72 位之间');
+    const pwErr = validatePassword(resetPassword, pwPolicy);
+    if (pwErr) {
+      setResetError(pwErr);
+      return;
+    }
+    if (resetPassword !== resetConfirm) {
+      setResetError('两次输入的新密码不一致');
       return;
     }
     setResetBusy(true);
@@ -379,6 +459,8 @@ export const LoginPage: React.FC = () => {
       setResetStep('email');
       setResetCode('');
       setResetPassword('');
+      setResetConfirm('');
+      setResetCaptchaReset((n) => n + 1);
       setSuccessMsg('密码已重置，请使用新密码登录');
     } catch (err) {
       setResetError((err as Error).message);
@@ -399,9 +481,17 @@ export const LoginPage: React.FC = () => {
       ? { duration: 0 }
       : { type: 'spring' as const, stiffness: 380 / scale, damping: 32, mass: 0.9 };
 
-  const visibleTabs: ('login' | 'otp' | 'register')[] = siteInfo.allow_public_register
-    ? ['login', 'otp', 'register']
-    : ['login', 'otp'];
+  const visibleTabs: ('login' | 'otp' | 'register')[] = ['login'];
+  if (emailOTPAvailable || smsOTPAvailable) visibleTabs.push('otp');
+  if (siteInfo.allow_public_register) visibleTabs.push('register');
+
+  // 已登录用户访问登录页时直接进入目标页；处于两步验证中途时停留在本页。
+  if (!authLoading && user && !mfaChallenge && !submitting) {
+    if (mustChangePassword) {
+      return <Navigate to="/change-password" replace />;
+    }
+    return <Navigate to={redirectTarget} replace />;
+  }
 
   return (
     <Box
@@ -490,11 +580,11 @@ export const LoginPage: React.FC = () => {
                     icon={<RiskIcon fontSize="small" />}
                   >
                     <AlertTitle>
-                      {mfaChallenge.riskLevel === 'high' ? '高风险登录二次安全验证' : '多因素身份验证'}
+                      {mfaChallenge.riskLevel && mfaChallenge.riskLevel !== 'low' ? '本次登录需要额外验证' : '请完成两步验证'}
                     </AlertTitle>
-                    {mfaChallenge.riskReasons && mfaChallenge.riskReasons.length > 0
-                      ? `检测到环境风险：${mfaChallenge.riskReasons.join('；')}。请完成二次身份校验。`
-                      : '该账号已开启多因素认证，请完成二次校验后继续登录。'}
+                    {mfaChallenge.riskLevel && mfaChallenge.riskLevel !== 'low'
+                      ? '本次登录的环境与平时不同，为保护账号安全，请再验证一次身份。'
+                      : '你的账号已开启两步验证，请输入验证码完成登录。'}
                   </Alert>
 
                   {error && <Alert severity="error">{error}</Alert>}
@@ -504,6 +594,7 @@ export const LoginPage: React.FC = () => {
                     value={mfaMethod}
                     onChange={(e) => {
                       setMfaMethod(e.target.value);
+                      setMfaCode('');
                       setError('');
                     }}
                   >
@@ -535,12 +626,13 @@ export const LoginPage: React.FC = () => {
                       disabled={mfaSendCooldown > 0}
                       onClick={() => handleSendMFACode(mfaMethod === 'sms_otp' ? 'sms' : 'email')}
                     >
-                      {mfaSendCooldown > 0 ? `${mfaSendCooldown} 秒后可重发` : '发送一次性验证码'}
+                      {mfaSendCooldown > 0 ? `${mfaSendCooldown} 秒后可重新发送` : '发送验证码'}
                     </Button>
                   )}
 
                   <TextField
-                    label={mfaMethod === 'recovery_code' ? '8 位备用恢复码' : '6 位动态验证码'}
+                    label={MFA_CODE_LABELS[mfaMethod] || '验证码'}
+                    autoComplete="one-time-code"
                     size="small"
                     fullWidth
                     required
@@ -550,7 +642,7 @@ export const LoginPage: React.FC = () => {
                   />
 
                   <Button type="submit" variant="contained" size="large" disabled={submitting} fullWidth>
-                    {submitting ? '验证中...' : '完成验证并登录'}
+                    {submitting ? '验证中…' : '验证并登录'}
                   </Button>
 
                   <Button
@@ -562,7 +654,7 @@ export const LoginPage: React.FC = () => {
                       setSuccessMsg('');
                     }}
                   >
-                    返回重新登录
+                    返回登录页
                   </Button>
                 </Stack>
               </Box>
@@ -659,27 +751,35 @@ export const LoginPage: React.FC = () => {
                   <Stack spacing={2}>
                     {tab === 'otp' ? (
                       <>
-                        <Stack direction="row" spacing={1}>
-                          <Chip
-                            label="邮箱验证码"
-                            color={otpChannel === 'email' ? 'primary' : 'default'}
-                            variant={otpChannel === 'email' ? 'filled' : 'outlined'}
-                            onClick={() => setOtpChannel('email')}
-                          />
-                          <Chip
-                            label="手机短信验证码"
-                            color={otpChannel === 'sms' ? 'primary' : 'default'}
-                            variant={otpChannel === 'sms' ? 'filled' : 'outlined'}
-                            onClick={() => setOtpChannel('sms')}
-                          />
-                        </Stack>
+                        {emailOTPAvailable && smsOTPAvailable && (
+                          <Stack direction="row" spacing={1}>
+                            {(['email', 'sms'] as const).map((ch) => (
+                              <Chip
+                                key={ch}
+                                label={ch === 'email' ? '邮箱验证码' : '短信验证码'}
+                                color={otpChannel === ch ? 'primary' : 'default'}
+                                variant={otpChannel === ch ? 'filled' : 'outlined'}
+                                onClick={() => {
+                                  if (ch === otpChannel) return;
+                                  setOtpChannel(ch);
+                                  setOtpTarget('');
+                                  setOtpCode('');
+                                  setError('');
+                                }}
+                              />
+                            ))}
+                          </Stack>
+                        )}
                         <TextField
-                          label={otpChannel === 'sms' ? '绑定手机号' : '绑定邮箱'}
+                          label={otpChannel === 'sms' ? '手机号' : '邮箱'}
+                          type={otpChannel === 'sms' ? 'tel' : 'email'}
+                          autoComplete={otpChannel === 'sms' ? 'tel' : 'email'}
                           value={otpTarget}
                           onChange={(e) => setOtpTarget(e.target.value)}
                           required
                           fullWidth
                           size="small"
+                          helperText="已开启两步验证的账号请使用密码登录"
                         />
                         <Stack direction="row" spacing={1}>
                           <TextField
@@ -689,6 +789,8 @@ export const LoginPage: React.FC = () => {
                             required
                             fullWidth
                             size="small"
+                            autoComplete="one-time-code"
+                            inputProps={{ inputMode: 'numeric', maxLength: 6 }}
                           />
                           <Button
                             variant="outlined"
@@ -696,7 +798,7 @@ export const LoginPage: React.FC = () => {
                             disabled={otpSending || otpCooldown > 0}
                             sx={{ whiteSpace: 'nowrap', minWidth: 112 }}
                           >
-                            {otpCooldown > 0 ? `${otpCooldown}s` : otpSending ? '发送中' : '获取验证码'}
+                            {otpCooldown > 0 ? `${otpCooldown} 秒` : otpSending ? '发送中…' : '获取验证码'}
                           </Button>
                         </Stack>
                         <CapWidget scene="otp" onToken={setCaptchaToken} resetSignal={captchaReset} />
@@ -727,8 +829,11 @@ export const LoginPage: React.FC = () => {
                               <Stack spacing={2} sx={{ pt: 0.5 }}>
                                 {registerVerifyMode === 'either' && (
                                   <Alert severity="info" sx={{ py: 0.3 }}>
-                                    请至少填写邮箱或手机号并完成对应验证码校验
+                                    邮箱和手机号至少填写一项，并输入收到的验证码
                                   </Alert>
+                                )}
+                                {(needEmailVerify || needSmsVerify) && (
+                                  <CapWidget scene="otp" onToken={setSendCaptchaToken} resetSignal={sendCaptchaReset} />
                                 )}
                                 {showRegisterEmail && (
                                   <>
@@ -744,7 +849,8 @@ export const LoginPage: React.FC = () => {
                                     {needEmailVerify && (
                                       <Stack direction="row" spacing={1}>
                                         <TextField
-                                          label="6 位邮箱验证码"
+                                          label="邮箱验证码"
+                                          inputProps={{ inputMode: 'numeric', maxLength: 6 }}
                                           value={emailCode}
                                           onChange={(e) => setEmailCode(e.target.value)}
                                           required={registerVerifyMode === 'email' || registerVerifyMode === 'both'}
@@ -758,9 +864,9 @@ export const LoginPage: React.FC = () => {
                                           sx={{ whiteSpace: 'nowrap', minWidth: 112 }}
                                         >
                                           {regEmailCooldown > 0
-                                            ? `${regEmailCooldown}s`
+                                            ? `${regEmailCooldown} 秒`
                                             : regSendingChannel === 'email'
-                                              ? '发送中'
+                                              ? '发送中…'
                                               : '获取验证码'}
                                         </Button>
                                       </Stack>
@@ -781,7 +887,8 @@ export const LoginPage: React.FC = () => {
                                     {needSmsVerify && (
                                       <Stack direction="row" spacing={1}>
                                         <TextField
-                                          label="6 位短信验证码"
+                                          label="短信验证码"
+                                          inputProps={{ inputMode: 'numeric', maxLength: 6 }}
                                           value={smsCode}
                                           onChange={(e) => setSmsCode(e.target.value)}
                                           required={registerVerifyMode === 'sms' || registerVerifyMode === 'both'}
@@ -795,9 +902,9 @@ export const LoginPage: React.FC = () => {
                                           sx={{ whiteSpace: 'nowrap', minWidth: 112 }}
                                         >
                                           {regSmsCooldown > 0
-                                            ? `${regSmsCooldown}s`
+                                            ? `${regSmsCooldown} 秒`
                                             : regSendingChannel === 'sms'
-                                              ? '发送中'
+                                              ? '发送中…'
                                               : '获取验证码'}
                                         </Button>
                                       </Stack>
@@ -805,11 +912,12 @@ export const LoginPage: React.FC = () => {
                                   </>
                                 )}
                                 <TextField
-                                  label="显示名称"
+                                  label="显示名称（选填）"
                                   value={displayName}
                                   onChange={(e) => setDisplayName(e.target.value)}
                                   fullWidth
                                   size="small"
+                                  inputProps={{ maxLength: 64 }}
                                 />
                               </Stack>
                             </MotionBox>
@@ -825,7 +933,22 @@ export const LoginPage: React.FC = () => {
                             required
                             fullWidth
                             size="small"
+                            autoComplete={tab === 'register' ? 'new-password' : 'current-password'}
+                            helperText={tab === 'register' ? passwordHint(pwPolicy) : undefined}
                           />
+                          {tab === 'register' && (
+                            <TextField
+                              label="确认密码"
+                              type="password"
+                              value={confirmPassword}
+                              onChange={(e) => setConfirmPassword(e.target.value)}
+                              required
+                              fullWidth
+                              size="small"
+                              autoComplete="new-password"
+                              sx={{ mt: 2 }}
+                            />
+                          )}
                           {tab === 'login' && siteInfo.smtp_enabled && (
                             <Box sx={{ textAlign: 'right', mt: 0.5 }}>
                               <Link
@@ -869,7 +992,7 @@ export const LoginPage: React.FC = () => {
                         fullWidth
                         sx={{ py: 1.15 }}
                       >
-                        {submitting ? '处理中...' : tab === 'register' ? '注 册' : '登 录'}
+                        {submitting ? '请稍候…' : tab === 'register' ? '注册' : '登录'}
                       </Button>
                     </MotionBox>
 
@@ -888,7 +1011,7 @@ export const LoginPage: React.FC = () => {
                           startIcon={<PasskeyIcon />}
                           onClick={handlePasskeyLogin}
                         >
-                          {passkeyLoading ? '等待设备验证...' : '使用通行密钥登录'}
+                          {passkeyLoading ? '请在设备上完成验证…' : '使用通行密钥登录'}
                         </Button>
                       </MotionBox>
                     )}
@@ -941,10 +1064,10 @@ export const LoginPage: React.FC = () => {
             {resetStep === 'email' ? (
               <>
                 <Typography variant="body2" color="text.secondary">
-                  请输入您的账号绑定邮箱，系统将发送 6 位一次性验证码。
+                  请输入账号绑定的邮箱，我们会向该邮箱发送一个 6 位验证码。
                 </Typography>
                 <TextField
-                  label="绑定邮箱"
+                  label="邮箱"
                   type="email"
                   size="small"
                   fullWidth
@@ -952,25 +1075,55 @@ export const LoginPage: React.FC = () => {
                   value={resetEmail}
                   onChange={(e) => setResetEmail(e.target.value)}
                 />
+                <CapWidget scene="otp" onToken={setResetCaptchaToken} resetSignal={resetCaptchaReset} />
               </>
             ) : (
               <>
-                <Alert severity="info">验证码已发送至 {resetEmail}，请在 10 分钟内完成验证。</Alert>
+                <Alert severity="info">
+                  如果 {resetEmail} 已绑定账号，你将收到一封含验证码的邮件，验证码 10 分钟内有效。
+                </Alert>
                 <TextField
                   label="6 位验证码"
                   size="small"
                   fullWidth
+                  autoComplete="one-time-code"
+                  inputProps={{ inputMode: 'numeric', maxLength: 6 }}
                   value={resetCode}
                   onChange={(e) => setResetCode(e.target.value)}
                 />
                 <TextField
-                  label="新密码（8 ~ 72 位）"
+                  label="新密码"
                   type="password"
                   size="small"
                   fullWidth
+                  autoComplete="new-password"
+                  helperText={passwordHint(pwPolicy)}
                   value={resetPassword}
                   onChange={(e) => setResetPassword(e.target.value)}
                 />
+                <TextField
+                  label="确认新密码"
+                  type="password"
+                  size="small"
+                  fullWidth
+                  autoComplete="new-password"
+                  value={resetConfirm}
+                  onChange={(e) => setResetConfirm(e.target.value)}
+                />
+                <Link
+                  component="button"
+                  type="button"
+                  variant="caption"
+                  underline="hover"
+                  sx={{ alignSelf: 'flex-start' }}
+                  onClick={() => {
+                    setResetStep('email');
+                    setResetError('');
+                    setResetCaptchaReset((n) => n + 1);
+                  }}
+                >
+                  没收到验证码？重新发送
+                </Link>
               </>
             )}
           </Stack>
@@ -981,11 +1134,11 @@ export const LoginPage: React.FC = () => {
           </Button>
           {resetStep === 'email' ? (
             <Button variant="contained" onClick={handleSendResetCode} disabled={resetBusy}>
-              {resetBusy ? '发送中...' : '发送验证码'}
+              {resetBusy ? '发送中…' : '发送验证码'}
             </Button>
           ) : (
             <Button variant="contained" onClick={handleConfirmReset} disabled={resetBusy}>
-              {resetBusy ? '提交中...' : '确认重置密码'}
+              {resetBusy ? '提交中…' : '重置密码'}
             </Button>
           )}
         </DialogActions>

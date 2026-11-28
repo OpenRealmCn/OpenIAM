@@ -174,6 +174,9 @@ export interface SiteInfo {
   register_phone_mode: 'disabled' | 'optional' | 'required';
   register_verify_mode: 'none' | 'email' | 'sms' | 'either' | 'both';
   smtp_enabled: boolean;
+  sms_enabled?: boolean;
+  password_min_length?: number;
+  password_require_complexity?: boolean;
 }
 
 export interface UserIdentity {

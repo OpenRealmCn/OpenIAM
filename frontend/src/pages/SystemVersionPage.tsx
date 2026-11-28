@@ -21,15 +21,15 @@ export const SystemVersionPage: React.FC = () => {
   }, []);
 
   const columns: GridColDef<VersionHistoryItem>[] = [
-    { field: 'id', headerName: 'ID', width: 70 },
-    { field: 'app_version', headerName: '程序版本', width: 120 },
+    { field: 'id', headerName: '编号', width: 80 },
+    { field: 'app_version', headerName: '系统版本', width: 120 },
     {
       field: 'schema_version',
-      headerName: '数据结构版本',
-      width: 130,
+      headerName: '数据库结构版本',
+      width: 140,
       valueFormatter: (v) => `v${v}`,
     },
-    { field: 'action', headerName: '动作', width: 150 },
+    { field: 'action', headerName: '操作类型', width: 150 },
     {
       field: 'status',
       headerName: '状态',
@@ -45,9 +45,9 @@ export const SystemVersionPage: React.FC = () => {
     { field: 'details', headerName: '详情', flex: 1, minWidth: 220 },
     {
       field: 'created_at',
-      headerName: '检查/执行时间',
+      headerName: '执行时间',
       width: 180,
-      valueFormatter: (v) => dayjs(v as string).format('YYYY-MM-DD HH:mm:ss'),
+      valueFormatter: (v) => (v ? dayjs(v as string).format('YYYY-MM-DD HH:mm:ss') : '—'),
     },
   ];
 
@@ -57,7 +57,7 @@ export const SystemVersionPage: React.FC = () => {
         版本信息
       </Typography>
       <Typography variant="body2" color="text.secondary" mb={3}>
-        查看系统版本与数据库升级记录
+        查看当前系统版本、数据库结构状态及升级记录。
       </Typography>
 
       {error && (
@@ -108,15 +108,15 @@ export const SystemVersionPage: React.FC = () => {
             <Card>
               <CardContent>
                 <Typography variant="caption" color="text.secondary">
-                  状态校验
+                  版本校验状态
                 </Typography>
                 <Stack direction="row" spacing={1} mt={1}>
                   <Chip
                     size="small"
                     color={status.up_to_date ? 'success' : 'warning'}
-                    label={status.up_to_date ? '版本匹配' : '存在差异'}
+                    label={status.up_to_date ? '版本一致' : '存在差异'}
                   />
-                  {status.dirty && <Chip size="small" color="error" label="迁移异常" />}
+                  {status.dirty && <Chip size="small" color="error" label="升级异常" />}
                 </Stack>
               </CardContent>
             </Card>

@@ -30,11 +30,34 @@ func mustCIDR(s string) *net.IPNet {
 	return n
 }
 
-var cgnatNet = mustCIDR("100.64.0.0/10")
+// reservedNets 覆盖标准库判定函数之外的保留、文档、基准测试与转换网段（含 NAT64，可被用来间接访问内网 IPv4）。
+var reservedNets = []*net.IPNet{
+	mustCIDR("0.0.0.0/8"),
+	mustCIDR("100.64.0.0/10"),
+	mustCIDR("192.0.0.0/24"),
+	mustCIDR("192.0.2.0/24"),
+	mustCIDR("198.18.0.0/15"),
+	mustCIDR("198.51.100.0/24"),
+	mustCIDR("203.0.113.0/24"),
+	mustCIDR("240.0.0.0/4"),
+	mustCIDR("64:ff9b::/96"),
+	mustCIDR("64:ff9b:1::/48"),
+	mustCIDR("100::/64"),
+	mustCIDR("2001:db8::/32"),
+	mustCIDR("2002::/16"),
+}
 
 func isBlockedIP(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() || cgnatNet.Contains(ip)
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	for _, n := range reservedNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // guardDial 在真正建立连接前检查「已解析的目标 IP」，因此同时覆盖 DNS 重绑定与重定向跳转。
@@ -67,9 +90,13 @@ var upstreamClient = &http.Client{
 		IdleConnTimeout:       60 * time.Second,
 		ForceAttemptHTTP2:     true,
 	},
-	CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 3 {
 			return errors.New("重定向次数过多")
+		}
+		// 禁止从 https 降级到明文，避免令牌或授权码在重定向后以明文传输
+		if req.URL.Scheme != "https" && !allowPrivateUpstream.Load() {
+			return errors.New("禁止重定向到非 https 地址")
 		}
 		return nil
 	},

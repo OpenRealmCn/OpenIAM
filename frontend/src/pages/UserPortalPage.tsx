@@ -112,7 +112,7 @@ export const UserPortalPage: React.FC = () => {
                   你好，{user?.display_name || user?.username}
                 </Typography>
                 <Typography variant="body2" color="text.secondary" mt={0.4}>
-                  欢迎使用 {siteInfo.name} 个人工作台，在这里管理您的账号安全、通行密钥与个人应用
+                  欢迎使用 {siteInfo.name}。你可以在这里管理账号安全和自己创建的应用
                 </Typography>
               </Box>
             </Stack>
@@ -124,7 +124,7 @@ export const UserPortalPage: React.FC = () => {
                   startIcon={<AdminIcon />}
                   onClick={() => navigate('/')}
                 >
-                  管理概览
+                  管理后台
                 </Button>
               )}
               <Button
@@ -132,7 +132,7 @@ export const UserPortalPage: React.FC = () => {
                 startIcon={<ProfileIcon />}
                 onClick={() => navigate('/profile')}
               >
-                管理个人资料
+                个人中心
               </Button>
             </Stack>
           </Stack>
@@ -167,7 +167,7 @@ export const UserPortalPage: React.FC = () => {
                     {item.title}
                   </Typography>
                   <Typography variant="caption" color="text.secondary">
-                    点击前往管理 →
+                    前往管理
                   </Typography>
                 </CardContent>
               </CardActionArea>
@@ -184,18 +184,18 @@ export const UserPortalPage: React.FC = () => {
               <Stack direction="row" spacing={1.5} alignItems="center" mb={1.5}>
                 <ProfileIcon color="primary" />
                 <Typography variant="h6" fontWeight={600}>
-                  个人中心与账号安全
+                  账号与安全
                 </Typography>
               </Stack>
               <Typography variant="body2" color="text.secondary" mb={2.5}>
-                修改显示名称与头像、更新登录密码、绑定设备通行密钥（Passkey）以及关联第三方 OAuth 账号。
+                修改资料和密码，开启两步验证，添加通行密钥，绑定第三方账号。
               </Typography>
               <Stack direction="row" spacing={1.2} flexWrap="wrap" useFlexGap>
                 <Button variant="contained" size="small" endIcon={<ArrowIcon />} onClick={() => navigate('/profile')}>
                   进入个人中心
                 </Button>
                 <Button variant="outlined" size="small" onClick={() => navigate('/profile?tab=security')}>
-                  绑定通行密钥
+                  安全设置
                 </Button>
                 <Button variant="outlined" size="small" onClick={() => navigate('/profile?tab=oauth')}>
                   第三方账号
@@ -211,11 +211,11 @@ export const UserPortalPage: React.FC = () => {
               <Stack direction="row" spacing={1.5} alignItems="center" mb={1.5}>
                 <AppsIcon color="primary" />
                 <Typography variant="h6" fontWeight={600}>
-                  我的 OAuth 应用
+                  我的应用
                 </Typography>
               </Stack>
               <Typography variant="body2" color="text.secondary" mb={2.5}>
-                创建并管理属于您自己的 OAuth2 / OIDC 应用，轮换应用密钥或生成一次性授权码用于应用授权接入。
+                创建 OAuth 2.0 / OIDC 应用，让你的网站或程序可以使用本平台账号登录。
               </Typography>
               <Button variant="contained" size="small" endIcon={<ArrowIcon />} onClick={() => navigate('/oauth-apps')}>
                 管理我的应用

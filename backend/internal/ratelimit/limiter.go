@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/openrealm/openiam/internal/clientip"
@@ -42,30 +43,34 @@ func NewIPRateLimiter(rdb *redis.Client, rateStr, keyPrefix string) (gin.Handler
 	middleware := mgin.NewMiddleware(
 		instance,
 		mgin.WithLimitReachedHandler(func(c *gin.Context) {
+			// X-RateLimit-Reset 是 Unix 时间戳，Retry-After 需要的是秒数；必须在写响应体之前设置。
+			if reset, err := strconv.ParseInt(c.Writer.Header().Get("X-RateLimit-Reset"), 10, 64); err == nil {
+				if wait := reset - time.Now().Unix(); wait > 0 {
+					c.Header("Retry-After", strconv.FormatInt(wait, 10))
+				} else {
+					c.Header("Retry-After", "1")
+				}
+			}
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
 				"code":    429,
 				"message": "请求过于频繁，触发 IP 速率限制，请稍后再试",
 			})
 		}),
+		// 限流存储不可用时拒绝请求，而不是静默放行（认证状态同样依赖 Redis，放行并不能换来可用性）；
+		// 底层错误不写进响应头。
 		mgin.WithErrorHandler(func(c *gin.Context, err error) {
-			c.Header("X-RateLimit-Error", err.Error())
-			c.Next()
+			_ = c.Error(err)
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+				"code":    503,
+				"message": "服务暂不可用，请稍后再试",
+			})
 		}),
 		mgin.WithKeyGetter(func(c *gin.Context) string {
 			return clientip.FromGin(c)
 		}),
 	)
 
-	return func(c *gin.Context) {
-		middleware(c)
-		if c.Writer.Status() == http.StatusTooManyRequests {
-			if reset := c.Writer.Header().Get("X-RateLimit-Reset"); reset != "" {
-				if _, err := strconv.ParseInt(reset, 10, 64); err == nil {
-					c.Header("Retry-After", reset)
-				}
-			}
-		}
-	}, nil
+	return middleware, nil
 }
 
 // DynamicIPRateLimiter 支持管理员在数据库配置更改开关或限流表达式后热切换中间件。

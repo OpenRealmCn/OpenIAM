@@ -16,9 +16,10 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
 	"github.com/openrealm/openiam/internal/audit"
-	"github.com/openrealm/openiam/internal/clientip"
 	"github.com/openrealm/openiam/internal/models"
+	"github.com/openrealm/openiam/internal/notify"
 	"github.com/openrealm/openiam/internal/rbac"
+	"github.com/openrealm/openiam/internal/risk"
 	"github.com/openrealm/openiam/internal/security"
 	"github.com/openrealm/openiam/internal/settings"
 	"gorm.io/gorm"
@@ -31,6 +32,8 @@ type PasskeyHandler struct {
 	enforcer    *rbac.Enforcer
 	auditSvc    *audit.Service
 	settingsSvc *settings.Service
+	riskEngine  *risk.Engine
+	notifySvc   *notify.Service
 }
 
 func NewPasskeyHandler(
@@ -96,6 +99,32 @@ func (h *PasskeyHandler) loadWebAuthnUser(userID uint64) (*webAuthnUser, error) 
 	return &webAuthnUser{user: user, creds: creds}, nil
 }
 
+// SetRiskEngine 注入风控引擎，通行密钥登录同样需要经过风控阻断判定。
+func (h *PasskeyHandler) SetRiskEngine(e *risk.Engine) { h.riskEngine = e }
+
+func (h *PasskeyHandler) issuer() *loginIssuer {
+	return &loginIssuer{
+		db:          h.db,
+		jwtMgr:      h.jwtMgr,
+		stateStore:  h.stateStore,
+		enforcer:    h.enforcer,
+		auditSvc:    h.auditSvc,
+		settingsSvc: h.settingsSvc,
+		riskEngine:  h.riskEngine,
+	}
+}
+
+func originOf(raw string) (origin, host string, ok bool) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", "", false
+	}
+	return u.Scheme + "://" + u.Host, u.Hostname(), true
+}
+
+// buildWebAuthn 只信任系统配置的前端地址（OAuth 签发者地址与 CORS 允许来源）作为 RP Origin。
+// RP ID 取请求 Origin 的主机名，但前提是该 Origin 本身在配置的允许列表内；Host 与 Origin 头由客户端控制，
+// 不能直接作为 RP 身份，否则攻击者可让服务端接受为其他站点生成的断言。
 func (h *PasskeyHandler) buildWebAuthn(c *gin.Context) (*webauthn.WebAuthn, error) {
 	snap := h.settingsSvc.Snapshot()
 	rpName := snap.SiteName
@@ -104,43 +133,27 @@ func (h *PasskeyHandler) buildWebAuthn(c *gin.Context) (*webauthn.WebAuthn, erro
 	}
 
 	origins := make([]string, 0, 4)
-	seen := make(map[string]bool)
+	hosts := make(map[string]string)
 	addOrigin := func(raw string) {
-		if raw == "" {
-			return
-		}
-		if u, err := url.Parse(raw); err == nil && u.Scheme != "" && u.Host != "" {
-			o := u.Scheme + "://" + u.Host
-			if !seen[o] {
-				seen[o] = true
+		if o, host, ok := originOf(raw); ok {
+			if _, dup := hosts[o]; !dup {
+				hosts[o] = host
 				origins = append(origins, o)
 			}
 		}
 	}
-
-	reqOrigin := strings.TrimSpace(c.GetHeader("Origin"))
-	addOrigin(reqOrigin)
 	addOrigin(snap.OAuthServerIssuer)
 	for _, o := range snap.CORSAllowOrigins {
 		addOrigin(o)
 	}
-
-	scheme := "http"
-	if isSecureRequest(c) {
-		scheme = "https"
-	}
-	if c.Request.Host != "" {
-		addOrigin(scheme + "://" + c.Request.Host)
+	if len(origins) == 0 {
+		return nil, fmt.Errorf("no trusted origin configured for passkeys")
 	}
 
-	rpID := "localhost"
-	if reqOrigin != "" {
-		if u, err := url.Parse(reqOrigin); err == nil && u.Hostname() != "" {
-			rpID = u.Hostname()
-		}
-	} else if c.Request.Host != "" {
-		if u, err := url.Parse(scheme + "://" + c.Request.Host); err == nil && u.Hostname() != "" {
-			rpID = u.Hostname()
+	rpID := hosts[origins[0]]
+	if reqOrigin, _, ok := originOf(c.GetHeader("Origin")); ok {
+		if host, allowed := hosts[reqOrigin]; allowed {
+			rpID = host
 		}
 	}
 
@@ -162,10 +175,14 @@ func (h *PasskeyHandler) ListPasskeys(c *gin.Context) {
 }
 
 // BeginRegisterPasskey 生成 WebAuthn 注册 Challenge。
+// 通行密钥可直接登录且跳过 TOTP，新增它等同新增最强登录凭据，因此要求近期重新认证。
 func (h *PasskeyHandler) BeginRegisterPasskey(c *gin.Context) {
+	if !requireReauth(c, h.db, h.stateStore) {
+		return
+	}
 	wa, err := h.buildWebAuthn(c)
 	if err != nil {
-		Fail(c, http.StatusInternalServerError, "初始化通行密钥服务失败: "+err.Error())
+		Fail(c, http.StatusInternalServerError, "初始化通行密钥服务失败")
 		return
 	}
 	waUser, err := h.loadWebAuthnUser(CurrentUserID(c))
@@ -185,12 +202,12 @@ func (h *PasskeyHandler) BeginRegisterPasskey(c *gin.Context) {
 		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementPreferred),
 	)
 	if err != nil {
-		Fail(c, http.StatusInternalServerError, "生成通行密钥注册参数失败: "+err.Error())
+		Fail(c, http.StatusInternalServerError, "生成通行密钥注册参数失败")
 		return
 	}
 
 	sessionID := uuid.NewString()
-	sessBytes, _ := json.Marshal(session)
+	sessBytes, _ := json.Marshal(passkeyRegSession{UserID: CurrentUserID(c), Session: *session})
 	if err := h.stateStore.SavePasskeySession(c.Request.Context(), sessionID, sessBytes, 5*time.Minute); err != nil {
 		Fail(c, http.StatusInternalServerError, "保存验证会话失败")
 		return
@@ -222,11 +239,17 @@ func (h *PasskeyHandler) FinishRegisterPasskey(c *gin.Context) {
 		Fail(c, http.StatusBadRequest, "验证会话已过期，请重新发起绑定")
 		return
 	}
-	var session webauthn.SessionData
-	if err := json.Unmarshal(rawSess, &session); err != nil {
+	var reg passkeyRegSession
+	if err := json.Unmarshal(rawSess, &reg); err != nil || reg.UserID == 0 {
 		Fail(c, http.StatusBadRequest, "验证会话数据无效")
 		return
 	}
+	// 注册会话只能由发起它的用户完成，防止把别人发起的注册挑战套用到自己的账号上（或反之）
+	if reg.UserID != CurrentUserID(c) {
+		Fail(c, http.StatusBadRequest, "验证会话数据无效")
+		return
+	}
+	session := reg.Session
 
 	wa, err := h.buildWebAuthn(c)
 	if err != nil {
@@ -241,13 +264,13 @@ func (h *PasskeyHandler) FinishRegisterPasskey(c *gin.Context) {
 
 	credential, err := wa.FinishRegistration(waUser, session, c.Request)
 	if err != nil {
-		Fail(c, http.StatusBadRequest, "通行密钥校验失败: "+err.Error())
+		Fail(c, http.StatusBadRequest, "通行密钥校验失败，请重试")
 		return
 	}
 
 	credJSON, err := json.Marshal(credential)
 	if err != nil {
-		Fail(c, http.StatusInternalServerError, "序列化凭证失败")
+		Fail(c, http.StatusInternalServerError, "保存通行密钥失败，请重试")
 		return
 	}
 	credIDStr := base64.RawURLEncoding.EncodeToString(credential.ID)
@@ -270,6 +293,7 @@ func (h *PasskeyHandler) FinishRegisterPasskey(c *gin.Context) {
 		After:        map[string]interface{}{"name": row.Name},
 		Status:       "success",
 	})
+	notifySecurity(c, h.notifySvc, row.UserID, "已添加通行密钥", fmt.Sprintf("你的账号添加了新的通行密钥「%s」，之后可以用它免密码登录。", row.Name))
 	Created(c, row)
 }
 
@@ -286,6 +310,21 @@ func (h *PasskeyHandler) DeletePasskey(c *gin.Context) {
 		Fail(c, http.StatusNotFound, "通行密钥不存在")
 		return
 	}
+	// 删除后必须仍有其他登录方式，否则账号将无法再登录
+	var user models.User
+	if err := h.db.First(&user, uid).Error; err != nil {
+		Fail(c, http.StatusNotFound, "用户不存在")
+		return
+	}
+	if user.PasswordHash == "" {
+		var otherPasskeys, identities int64
+		h.db.Model(&models.UserPasskey{}).Where("user_id = ? AND id <> ?", uid, id).Count(&otherPasskeys)
+		h.db.Model(&models.UserIdentity{}).Where("user_id = ?", uid).Count(&identities)
+		if otherPasskeys == 0 && identities == 0 {
+			Fail(c, http.StatusBadRequest, "这是你唯一的登录方式，请先设置登录密码或绑定第三方账号后再移除")
+			return
+		}
+	}
 	if err := h.db.Delete(&row).Error; err != nil {
 		Fail(c, http.StatusInternalServerError, "删除通行密钥失败")
 		return
@@ -299,7 +338,14 @@ func (h *PasskeyHandler) DeletePasskey(c *gin.Context) {
 		Before:       map[string]interface{}{"name": row.Name},
 		Status:       "success",
 	})
+	notifySecurity(c, h.notifySvc, uid, "已移除通行密钥", fmt.Sprintf("你的账号移除了通行密钥「%s」，该密钥已无法再用于登录。", row.Name))
 	OK(c, gin.H{"deleted": true})
+}
+
+// passkeyRegSession 把注册挑战与发起用户绑定在一起保存。
+type passkeyRegSession struct {
+	UserID  uint64               `json:"user_id"`
+	Session webauthn.SessionData `json:"session"`
 }
 
 type passkeyLoginBeginReq struct {
@@ -307,13 +353,14 @@ type passkeyLoginBeginReq struct {
 }
 
 // BeginPasskeyLogin 发起通行密钥无密码登录（支持填用户名或 Discoverable 无输入登录）。
+// 账号不存在或未绑定通行密钥时静默退化为 Discoverable 挑战，响应形态与正常情况一致，避免据此枚举账号。
 func (h *PasskeyHandler) BeginPasskeyLogin(c *gin.Context) {
 	var req passkeyLoginBeginReq
 	_ = c.ShouldBindJSON(&req)
 
 	wa, err := h.buildWebAuthn(c)
 	if err != nil {
-		Fail(c, http.StatusInternalServerError, "初始化通行密钥服务失败: "+err.Error())
+		Fail(c, http.StatusInternalServerError, "初始化通行密钥服务失败")
 		return
 	}
 
@@ -323,24 +370,20 @@ func (h *PasskeyHandler) BeginPasskeyLogin(c *gin.Context) {
 	username := strings.TrimSpace(req.Username)
 	if username != "" {
 		var user models.User
-		if err := h.db.Where("(username = ? OR email = ?) AND status = ?", username, username, "active").First(&user).Error; err != nil {
-			Fail(c, http.StatusBadRequest, "未找到该账号或未绑定通行密钥")
-			return
+		if h.db.Where("(username = ? OR LOWER(email) = ?) AND status = ?", username, normalizeEmail(username), "active").First(&user).Error == nil {
+			if waUser, lErr := h.loadWebAuthnUser(user.ID); lErr == nil && len(waUser.creds) > 0 {
+				options, session, err = wa.BeginLogin(waUser)
+				if err != nil {
+					Fail(c, http.StatusInternalServerError, "生成登录挑战失败")
+					return
+				}
+			}
 		}
-		waUser, err := h.loadWebAuthnUser(user.ID)
-		if err != nil || len(waUser.creds) == 0 {
-			Fail(c, http.StatusBadRequest, "该账号尚未绑定通行密钥")
-			return
-		}
-		options, session, err = wa.BeginLogin(waUser)
-		if err != nil {
-			Fail(c, http.StatusInternalServerError, "生成登录挑战失败: "+err.Error())
-			return
-		}
-	} else {
+	}
+	if options == nil {
 		options, session, err = wa.BeginDiscoverableLogin()
 		if err != nil {
-			Fail(c, http.StatusInternalServerError, "生成登录挑战失败: "+err.Error())
+			Fail(c, http.StatusInternalServerError, "生成登录挑战失败")
 			return
 		}
 	}
@@ -390,24 +433,20 @@ func (h *PasskeyHandler) FinishPasskeyLogin(c *gin.Context) {
 		uid := binary.BigEndian.Uint64(session.UserID)
 		matchedUser, err = h.loadWebAuthnUser(uid)
 		if err != nil {
-			Fail(c, http.StatusUnauthorized, "用户不存在")
+			Fail(c, http.StatusUnauthorized, "通行密钥验证失败")
 			return
 		}
 		cred, err = wa.FinishLogin(matchedUser, session, c.Request)
 	} else {
 		cred, err = wa.FinishDiscoverableLogin(func(rawID, userHandle []byte) (webauthn.User, error) {
-			if len(userHandle) == 8 {
-				uid := binary.BigEndian.Uint64(userHandle)
-				u, uErr := h.loadWebAuthnUser(uid)
-				if uErr == nil {
-					matchedUser = u
-					return u, nil
-				}
-			}
+			// 以凭据 ID 查到的绑定关系为准，并要求 userHandle 与之一致，不能仅凭客户端提供的 userHandle 选定用户
 			credIDStr := base64.RawURLEncoding.EncodeToString(rawID)
 			var row models.UserPasskey
 			if qErr := h.db.Where("credential_id = ?", credIDStr).First(&row).Error; qErr != nil {
 				return nil, qErr
+			}
+			if len(userHandle) == 8 && binary.BigEndian.Uint64(userHandle) != row.UserID {
+				return nil, fmt.Errorf("user handle mismatch")
 			}
 			u, uErr := h.loadWebAuthnUser(row.UserID)
 			if uErr != nil {
@@ -421,8 +460,22 @@ func (h *PasskeyHandler) FinishPasskeyLogin(c *gin.Context) {
 		Fail(c, http.StatusUnauthorized, "通行密钥验证失败")
 		return
 	}
+	// 签名计数回退说明认证器可能被克隆，拒绝登录
+	if cred.Authenticator.CloneWarning {
+		h.auditSvc.RecordFromContext(c, audit.Entry{
+			ActorID:      matchedUser.user.ID,
+			DomainCode:   rbac.DefaultDomain,
+			Action:       "auth.passkey_login",
+			ResourceType: "user",
+			ResourceID:   fmt.Sprintf("%d", matchedUser.user.ID),
+			Status:       "failed",
+			ErrorMessage: "authenticator sign count regression (possible clone)",
+		})
+		Fail(c, http.StatusUnauthorized, "通行密钥验证失败")
+		return
+	}
 	if matchedUser.user.Status != "active" {
-		Fail(c, http.StatusForbidden, "账号已被禁用")
+		Fail(c, http.StatusUnauthorized, "通行密钥验证失败")
 		return
 	}
 
@@ -431,44 +484,17 @@ func (h *PasskeyHandler) FinishPasskeyLogin(c *gin.Context) {
 	credIDStr := base64.RawURLEncoding.EncodeToString(cred.ID)
 	if updatedJSON, mErr := json.Marshal(cred); mErr == nil {
 		_ = h.db.Model(&models.UserPasskey{}).
-			Where("credential_id = ?", credIDStr).
+			Where("credential_id = ? AND user_id = ?", credIDStr, matchedUser.user.ID).
 			Updates(map[string]interface{}{
 				"credential_json": string(updatedJSON),
 				"last_used_at":    &now,
 			}).Error
 	}
-	_ = h.db.Model(&matchedUser.user).Updates(map[string]interface{}{
-		"last_login_at": &now,
-		"last_login_ip": clientip.FromGin(c),
-	}).Error
 
-	accessToken, refreshToken, _, expiresIn, err := createSessionAndTokens(c, h.db, h.jwtMgr, h.stateStore, h.settingsSvc, matchedUser.user)
-	if err != nil {
-		Fail(c, http.StatusInternalServerError, "签发令牌与保存会话失败")
+	// 通行密钥本身是防钓鱼的强因子，不再要求 TOTP；但仍需经过风控阻断与强制改密检查
+	li := h.issuer()
+	if li.gate(c, matchedUser.user, gateOptions{Channel: "passkey"}, nil) {
 		return
 	}
-
-	snap := h.settingsSvc.Snapshot()
-	setRefreshCookie(c, refreshToken, snap.JWTRefreshTTL)
-	resp := gin.H{
-		"access_token": accessToken,
-		"expires_in":   expiresIn,
-		"user":         matchedUser.user,
-	}
-	if c.GetHeader("X-Token-Delivery") == "body" {
-		resp["refresh_token"] = refreshToken
-	}
-	rolesMap, _ := h.enforcer.GetAllUserRoles(matchedUser.user.ID)
-	resp["roles"] = rolesMap
-
-	h.auditSvc.RecordFromContext(c, audit.Entry{
-		ActorID:       matchedUser.user.ID,
-		ActorUsername: matchedUser.user.Username,
-		DomainCode:    rbac.DefaultDomain,
-		Action:        "auth.passkey_login",
-		ResourceType:  "user",
-		ResourceID:    fmt.Sprintf("%d", matchedUser.user.ID),
-		Status:        "success",
-	})
-	OK(c, resp)
+	li.finish(c, matchedUser.user, "auth.passkey_login", nil, nil)
 }

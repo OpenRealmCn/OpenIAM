@@ -9,6 +9,7 @@ import (
 
 	"github.com/openrealm/openiam/internal/clientip"
 	"github.com/openrealm/openiam/internal/models"
+	"github.com/openrealm/openiam/internal/security"
 	"github.com/ulule/limiter/v3"
 	"gorm.io/gorm"
 )
@@ -21,6 +22,9 @@ const (
 	KeySecurityRegisterPhoneMode    = "security.register_phone_mode"
 	KeySecurityRegisterVerifyMode   = "security.register_verify_mode"
 	KeySecurityAllowPrivateUpstream = "security.allow_private_upstream"
+
+	KeyPasswordMinLength         = "password.min_length"
+	KeyPasswordRequireComplexity = "password.require_complexity"
 
 	KeyJWTIssuer               = "jwt.issuer"
 	KeyJWTAccessTokenTTLMin    = "jwt.access_token_ttl_minutes"
@@ -95,6 +99,9 @@ type RuntimeSettings struct {
 	RegisterPhoneMode    string
 	RegisterVerifyMode   string
 	AllowPrivateUpstream bool
+
+	PasswordMinLength         int
+	PasswordRequireComplexity bool
 
 	JWTIssuer     string
 	JWTAccessTTL  time.Duration
@@ -220,6 +227,22 @@ var defaultSpecs = []settingSpec{
 		ValueType:   "bool",
 		Label:       "允许身份源与插件访问内网地址",
 		Description: "默认关闭以防止内网探测风险；仅在需要对接内网身份源、内网告警地址或私有验证服务时开启。",
+	},
+	{
+		Key:         KeyPasswordMinLength,
+		Category:    "security",
+		DefaultVal:  "8",
+		ValueType:   "int",
+		Label:       "密码最小长度",
+		Description: "用户注册、修改或重置密码时要求的最少字符数，可设置 8~64。已有密码不受影响。",
+	},
+	{
+		Key:         KeyPasswordRequireComplexity,
+		Category:    "security",
+		DefaultVal:  "false",
+		ValueType:   "bool",
+		Label:       "密码须包含大小写字母和数字",
+		Description: "开启后，新设置的密码必须同时包含大写字母、小写字母和数字。已有密码不受影响。",
 	},
 	{
 		Key:         KeyJWTIssuer,
@@ -671,7 +694,15 @@ func (s *Service) Reload() error {
 	}
 	kv := make(map[string]string, len(rows))
 	for _, r := range rows {
-		kv[r.SettingKey] = r.Value
+		v := r.Value
+		if IsSecretKey(r.SettingKey) {
+			plain, err := security.OpenField(v)
+			if err != nil {
+				return fmt.Errorf("解密系统设置 %s 失败: %w", r.SettingKey, err)
+			}
+			v = plain
+		}
+		kv[r.SettingKey] = v
 	}
 
 	snap := RuntimeSettings{
@@ -682,6 +713,8 @@ func (s *Service) Reload() error {
 		RegisterPhoneMode:             fallbackStr(kv[KeySecurityRegisterPhoneMode], "disabled"),
 		RegisterVerifyMode:            fallbackStr(kv[KeySecurityRegisterVerifyMode], "none"),
 		AllowPrivateUpstream:          parseBool(kv[KeySecurityAllowPrivateUpstream], false),
+		PasswordMinLength:             parseInt(kv[KeyPasswordMinLength], 8),
+		PasswordRequireComplexity:     parseBool(kv[KeyPasswordRequireComplexity], false),
 		JWTIssuer:                     fallbackStr(kv[KeyJWTIssuer], "http://localhost:5173"),
 		JWTAccessTTL:                  time.Duration(parseInt(kv[KeyJWTAccessTokenTTLMin], 30)) * time.Minute,
 		JWTRefreshTTL:                 time.Duration(parseInt(kv[KeyJWTRefreshTokenTTLHours], 168)) * time.Hour,
@@ -785,7 +818,7 @@ func (s *Service) UpdateBatch(updates map[string]string, actorID uint64) (before
 	for k, rawVal := range updates {
 		item, ok := byKey[k]
 		if !ok {
-			return nil, nil, fmt.Errorf("未知的系统设置项: %s", k)
+			return nil, nil, fmt.Errorf("不存在的设置项：%s", k)
 		}
 		// 敏感密钥字段留空时表示保留原值，避免前端未修改密码时意外清空
 		if IsSecretKey(k) && strings.TrimSpace(rawVal) == "" {
@@ -795,14 +828,23 @@ func (s *Service) UpdateBatch(updates map[string]string, actorID uint64) (before
 		if err != nil {
 			return nil, nil, err
 		}
-		if item.Value != normVal {
-			if IsSecretKey(k) {
-				before[k] = "***REDACTED***"
-				after[k] = "***REDACTED***"
-			} else {
-				before[k] = item.Value
-				after[k] = normVal
+		if IsSecretKey(k) {
+			current, oErr := security.OpenField(item.Value)
+			if oErr == nil && current == normVal {
+				continue
 			}
+			sealed, sErr := security.SealField(normVal)
+			if sErr != nil {
+				return nil, nil, sErr
+			}
+			before[k] = "***REDACTED***"
+			after[k] = "***REDACTED***"
+			validated[k] = sealed
+			continue
+		}
+		if item.Value != normVal {
+			before[k] = item.Value
+			after[k] = normVal
 			validated[k] = normVal
 		}
 	}
@@ -838,7 +880,7 @@ func validateSettingValue(key, valueType, raw string) (string, error) {
 	case "int":
 		n, err := strconv.Atoi(trimmed)
 		if err != nil || n <= 0 {
-			return "", fmt.Errorf("设置项 %s 必须为正整数", key)
+			return "", fmt.Errorf("「%s」必须为正整数", displayName(key))
 		}
 		if err := checkIntBounds(key, n); err != nil {
 			return "", err
@@ -847,7 +889,7 @@ func validateSettingValue(key, valueType, raw string) (string, error) {
 	case "bool":
 		b, err := strconv.ParseBool(strings.ToLower(trimmed))
 		if err != nil {
-			return "", fmt.Errorf("设置项 %s 必须为布尔值 (true/false)", key)
+			return "", fmt.Errorf("「%s」只能设置为开启或关闭", displayName(key))
 		}
 		return strconv.FormatBool(b), nil
 	case "string_list":
@@ -869,11 +911,11 @@ func validateSettingValue(key, valueType, raw string) (string, error) {
 	default:
 		if key == KeyRateLimitGeneralRate || key == KeyRateLimitAuthRate {
 			if _, err := limiter.NewRateFromFormatted(trimmed); err != nil {
-				return "", fmt.Errorf("限流表达式 %s 格式无效（示例: 15-M, 120-M, 20-S）", trimmed)
+				return "", fmt.Errorf("「%s」格式无效，应写成“次数-单位”，如 15-M（每分钟 15 次）、20-S（每秒 20 次）", displayName(key))
 			}
 		}
 		if trimmed == "" && !optionalEmptyKeys[key] {
-			return "", fmt.Errorf("设置项 %s 不能为空", key)
+			return "", fmt.Errorf("「%s」不能为空", displayName(key))
 		}
 		if err := validateURLSetting(key, trimmed); err != nil {
 			return "", err

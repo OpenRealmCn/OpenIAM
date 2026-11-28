@@ -13,6 +13,7 @@ import (
 	"github.com/openrealm/openiam/internal/notify"
 	"github.com/openrealm/openiam/internal/rbac"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type NotificationHandler struct {
@@ -44,30 +45,87 @@ func (h *NotificationHandler) userCanSeeSystemNotice(uid uint64) bool {
 	return false
 }
 
+// visibleNotifications 限定为当前用户自己的通知与未过期的全员公告。
+func visibleNotifications(db *gorm.DB, uid uint64) *gorm.DB {
+	return db.Model(&models.Notification{}).
+		Where("(user_id = ? OR (category = ? AND user_id = 0))", uid, notify.CategoryAnnouncement).
+		Where("(expires_at IS NULL OR expires_at > ?)", time.Now())
+}
+
+// unreadForUser 在 visibleNotifications 之上筛出该用户未读的记录：
+// 个人通知看自身 is_read，全员公告看 notification_reads 里有没有该用户的已读记录。
+func unreadForUser(q *gorm.DB, uid uint64) *gorm.DB {
+	return q.Where("((user_id = ? AND is_read = ?) OR (user_id = 0 AND NOT EXISTS ("+
+		"SELECT 1 FROM notification_reads nr WHERE nr.notification_id = notifications.id AND nr.user_id = ?)))",
+		uid, false, uid)
+}
+
+// CountUnreadNotifications 统计用户未读通知数（含全员公告）。
+func CountUnreadNotifications(db *gorm.DB, uid uint64) int64 {
+	var n int64
+	_ = unreadForUser(visibleNotifications(db, uid), uid).Count(&n).Error
+	return n
+}
+
+// markAnnouncementsRead 为用户写入公告已读记录，已存在的忽略。
+func (h *NotificationHandler) markAnnouncementsRead(uid uint64, ids []uint64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	now := time.Now()
+	rows := make([]models.NotificationRead, 0, len(ids))
+	for _, id := range ids {
+		rows = append(rows, models.NotificationRead{NotificationID: id, UserID: uid, ReadAt: now})
+	}
+	return h.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&rows).Error
+}
+
 // List 返回当前用户的系统消息、系统公告及管理员系统通知。
 func (h *NotificationHandler) List(c *gin.Context) {
 	uid := CurrentUserID(c)
 	category := strings.TrimSpace(c.Query("category"))
 	unreadOnly := c.Query("unread_only") == "true"
 
-	q := h.db.Model(&models.Notification{})
-	if !h.userCanSeeSystemNotice(uid) {
-		q = q.Where("(user_id = ? OR (category = ? AND user_id = 0))", uid, notify.CategoryAnnouncement)
-	} else {
-		q = q.Where("(user_id = ? OR (category = ? AND user_id = 0))", uid, notify.CategoryAnnouncement)
-	}
+	q := visibleNotifications(h.db, uid)
 	if category != "" {
 		q = q.Where("category = ?", category)
 	}
 	if unreadOnly {
-		q = q.Where("is_read = ?", false)
+		q = unreadForUser(q, uid)
 	}
-	q = q.Where("(expires_at IS NULL OR expires_at > ?)", time.Now())
 
 	var items []models.Notification
 	if err := q.Order("id DESC").Limit(100).Find(&items).Error; err != nil {
 		Fail(c, http.StatusInternalServerError, "查询通知列表失败")
 		return
+	}
+
+	// 公告记录上的 is_read 是共享字段，返回前替换为当前用户自己的已读状态。
+	announcementIDs := make([]uint64, 0)
+	for _, it := range items {
+		if it.UserID == 0 {
+			announcementIDs = append(announcementIDs, it.ID)
+		}
+	}
+	readAt := make(map[uint64]time.Time, len(announcementIDs))
+	if len(announcementIDs) > 0 {
+		var reads []models.NotificationRead
+		_ = h.db.Where("user_id = ? AND notification_id IN ?", uid, announcementIDs).Find(&reads).Error
+		for _, r := range reads {
+			readAt[r.NotificationID] = r.ReadAt
+		}
+	}
+	for i := range items {
+		if items[i].UserID != 0 {
+			continue
+		}
+		if t, ok := readAt[items[i].ID]; ok {
+			items[i].IsRead = true
+			items[i].ReadAt = &t
+		} else {
+			items[i].IsRead = false
+			items[i].ReadAt = nil
+		}
 	}
 	OK(c, items)
 }
@@ -80,10 +138,8 @@ func (h *NotificationHandler) UnreadCount(c *gin.Context) {
 		Total    int64
 	}
 	var rows []row
-	_ = h.db.Model(&models.Notification{}).
+	_ = unreadForUser(visibleNotifications(h.db, uid), uid).
 		Select("category, count(*) as total").
-		Where("(user_id = ? OR (category = ? AND user_id = 0)) AND is_read = ? AND (expires_at IS NULL OR expires_at > ?)",
-			uid, notify.CategoryAnnouncement, false, time.Now()).
 		Group("category").
 		Scan(&rows).Error
 
@@ -110,9 +166,22 @@ func (h *NotificationHandler) MarkRead(c *gin.Context) {
 		return
 	}
 	uid := CurrentUserID(c)
+	var n models.Notification
+	if err := visibleNotifications(h.db, uid).Where("id = ?", id).First(&n).Error; err != nil {
+		OK(c, gin.H{"updated": 0})
+		return
+	}
+	if n.UserID == 0 {
+		if err := h.markAnnouncementsRead(uid, []uint64{n.ID}); err != nil {
+			Fail(c, http.StatusInternalServerError, "更新已读状态失败")
+			return
+		}
+		OK(c, gin.H{"updated": 1})
+		return
+	}
 	now := time.Now()
 	res := h.db.Model(&models.Notification{}).
-		Where("id = ? AND (user_id = ? OR (category = ? AND user_id = 0))", id, uid, notify.CategoryAnnouncement).
+		Where("id = ? AND user_id = ?", id, uid).
 		Updates(map[string]interface{}{"is_read": true, "read_at": &now})
 	if res.Error != nil {
 		Fail(c, http.StatusInternalServerError, "更新已读状态失败")
@@ -129,7 +198,20 @@ func (h *NotificationHandler) MarkAllRead(c *gin.Context) {
 	if category != "" {
 		q = q.Where("category = ?", category)
 	}
-	_ = q.Updates(map[string]interface{}{"is_read": true, "read_at": &now}).Error
+	if err := q.Updates(map[string]interface{}{"is_read": true, "read_at": &now}).Error; err != nil {
+		Fail(c, http.StatusInternalServerError, "更新已读状态失败")
+		return
+	}
+
+	if category == "" || category == notify.CategoryAnnouncement {
+		var ids []uint64
+		_ = unreadForUser(visibleNotifications(h.db, uid), uid).
+			Where("user_id = 0").Limit(1000).Pluck("id", &ids).Error
+		if err := h.markAnnouncementsRead(uid, ids); err != nil {
+			Fail(c, http.StatusInternalServerError, "更新已读状态失败")
+			return
+		}
+	}
 	OK(c, gin.H{"ok": true})
 }
 
@@ -144,7 +226,7 @@ type announcementReq struct {
 func (h *NotificationHandler) CreateAnnouncement(c *gin.Context) {
 	var req announcementReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		Fail(c, http.StatusBadRequest, bindError(err))
 		return
 	}
 	var exp *time.Time
@@ -191,6 +273,7 @@ func (h *NotificationHandler) DeleteAnnouncement(c *gin.Context) {
 		Fail(c, http.StatusNotFound, "公告不存在")
 		return
 	}
+	_ = h.db.Where("notification_id = ?", id).Delete(&models.NotificationRead{}).Error
 	OK(c, gin.H{"deleted": true})
 }
 
@@ -216,7 +299,7 @@ type templateReq struct {
 func (h *NotificationHandler) CreateTemplate(c *gin.Context) {
 	var req templateReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		Fail(c, http.StatusBadRequest, bindError(err))
 		return
 	}
 	if strings.TrimSpace(req.Code) == "" {
@@ -261,7 +344,7 @@ func (h *NotificationHandler) UpdateTemplate(c *gin.Context) {
 	}
 	var req templateReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		Fail(c, http.StatusBadRequest, bindError(err))
 		return
 	}
 	tpl.Name = strings.TrimSpace(req.Name)

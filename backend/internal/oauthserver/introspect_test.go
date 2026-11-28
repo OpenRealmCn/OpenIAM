@@ -1,4 +1,3 @@
-
 package oauthserver
 
 import (
@@ -11,9 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	oauthmodels "github.com/go-oauth2/oauth2/v4/models"
 	"github.com/alicebob/miniredis/v2"
+	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
+	oauthmodels "github.com/go-oauth2/oauth2/v4/models"
 	"github.com/openrealm/openiam/internal/audit"
 	"github.com/openrealm/openiam/internal/models"
 	"github.com/openrealm/openiam/internal/security"
@@ -22,7 +22,6 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
-	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )

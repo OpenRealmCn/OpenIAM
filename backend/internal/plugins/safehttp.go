@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -42,9 +43,10 @@ func isPrivateOrReservedIP(ip net.IP) bool {
 		ip.IsPrivate() ||
 		ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() ||
+		ip.IsInterfaceLocalMulticast() ||
 		ip.IsMulticast() ||
 		ip.IsUnspecified() ||
-		isCGNAT(ip)
+		isReservedRange(ip)
 }
 
 // ValidateExternalURL 校验外部插件接口地址：必须为 https（允许私网开关打开时放行内网地址）。
@@ -72,11 +74,27 @@ func ValidateExternalURL(raw string) error {
 	return nil
 }
 
-// NewSafeHTTPClient 创建带 SSRF 防护与 10 秒超时的受限 HTTP 客户端。
+var (
+	safeClientOnce sync.Once
+	safeClient     *http.Client
+)
+
+// NewSafeHTTPClient 返回进程内共享的、带 SSRF 防护与 10 秒超时的受限 HTTP 客户端。
+// 共享同一个 Transport 以复用连接；私网开关在每次拨号时读取，热更新仍然生效。
 func NewSafeHTTPClient() *http.Client {
+	safeClientOnce.Do(func() { safeClient = buildSafeHTTPClient() })
+	return safeClient
+}
+
+func buildSafeHTTPClient() *http.Client {
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+		MaxIdleConns:          32,
+		MaxIdleConnsPerHost:   4,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ResponseHeaderTimeout: 8 * time.Second,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			if allowPrivateUpstream() {
 				return dialer.DialContext(ctx, network, addr)

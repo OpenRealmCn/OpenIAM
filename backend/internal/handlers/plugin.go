@@ -87,7 +87,7 @@ type createPluginReq struct {
 func (h *PluginHandler) CreateInstance(c *gin.Context) {
 	var req createPluginReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		Fail(c, http.StatusBadRequest, bindError(err))
 		return
 	}
 	if req.Priority == 0 {

@@ -10,19 +10,26 @@ import (
 	"github.com/openrealm/openiam/internal/audit"
 	"github.com/openrealm/openiam/internal/clientip"
 	"github.com/openrealm/openiam/internal/mailer"
+	"github.com/openrealm/openiam/internal/plugins"
 	"github.com/openrealm/openiam/internal/rbac"
 	"github.com/openrealm/openiam/internal/settings"
 )
 
 type SettingsHandler struct {
-	svc      *settings.Service
-	enforcer *rbac.Enforcer
-	mailSvc  *mailer.Service
-	auditSvc *audit.Service
+	svc       *settings.Service
+	enforcer  *rbac.Enforcer
+	mailSvc   *mailer.Service
+	auditSvc  *audit.Service
+	pluginMgr *plugins.Manager
 }
 
 func NewSettingsHandler(svc *settings.Service, enforcer *rbac.Enforcer, mailSvc *mailer.Service, auditSvc *audit.Service) *SettingsHandler {
 	return &SettingsHandler{svc: svc, enforcer: enforcer, mailSvc: mailSvc, auditSvc: auditSvc}
+}
+
+// SetPluginManager 注入插件管理器，用于在公开站点信息中报告短信通道是否可用。
+func (h *SettingsHandler) SetPluginManager(m *plugins.Manager) {
+	h.pluginMgr = m
 }
 
 // PublicSiteInfo 公开返回站点名称、图标、首页公告等非敏感品牌与运维配置。
@@ -43,13 +50,16 @@ func (h *SettingsHandler) PublicSiteInfo(c *gin.Context) {
 		"register_phone_mode":   snap.RegisterPhoneMode,
 		"register_verify_mode":  snap.RegisterVerifyMode,
 		"smtp_enabled":          snap.SMTPEnabled,
+		"sms_enabled":           h.pluginMgr != nil && h.pluginMgr.HasActive(plugins.SlotSMS),
+		"password_min_length":         snap.PasswordMinLength,
+		"password_require_complexity": snap.PasswordRequireComplexity,
 	})
 }
 
 func (h *SettingsHandler) List(c *gin.Context) {
 	items, err := h.svc.ListAll()
 	if err != nil {
-		Fail(c, http.StatusInternalServerError, "查询系统设置失败: "+err.Error())
+		failInternal(c, "查询系统设置失败", err)
 		return
 	}
 	OK(c, items)
@@ -69,7 +79,7 @@ func (h *SettingsHandler) Update(c *gin.Context) {
 
 	var req updateSettingsReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数格式错误: "+err.Error())
+		Fail(c, http.StatusBadRequest, bindError(err))
 		return
 	}
 
@@ -111,7 +121,7 @@ func (h *SettingsHandler) TestSMTP(c *gin.Context) {
 		return
 	}
 	if h.mailSvc == nil {
-		Fail(c, http.StatusInternalServerError, "邮件服务未初始化")
+		Fail(c, http.StatusInternalServerError, "邮件服务暂不可用")
 		return
 	}
 	if err := h.mailSvc.SendTestEmail(c.Request.Context(), req.To); err != nil {

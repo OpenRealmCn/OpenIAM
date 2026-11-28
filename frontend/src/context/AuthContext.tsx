@@ -1,10 +1,12 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import {
   api,
+  ApiError,
   clearTokens,
   getAccessToken,
   getCurrentDomain,
   refreshAccessToken,
+  setAuthLostHandler,
   setCurrentDomain,
   setTokens,
 } from '../api/client';
@@ -19,6 +21,21 @@ export interface LoginStepResult {
   riskReasons?: string[];
   emailHint?: string;
   phoneHint?: string;
+}
+
+// 各登录入口（密码、验证码、通行密钥、联合登录、二步验证）共用的服务端响应结构。
+export interface LoginResponse {
+  access_token?: string;
+  user?: User;
+  roles?: Record<string, string[]>;
+  must_change_password?: boolean;
+  mfa_required?: boolean;
+  mfa_token?: string;
+  methods?: string[];
+  risk_level?: string;
+  risk_reasons?: string[];
+  email_hint?: string;
+  phone_hint?: string;
 }
 
 interface AuthContextValue {
@@ -43,6 +60,7 @@ interface AuthContextValue {
   refreshProfile: () => Promise<void>;
   refreshDomains: () => Promise<void>;
   loginWithCredentials: (username: string, password: string, captchaToken?: string) => Promise<LoginStepResult>;
+  applyLoginResponse: (data: LoginResponse) => Promise<LoginStepResult>;
   completeOAuthLogin: (accessToken: string) => Promise<void>;
   logout: () => Promise<void>;
 }
@@ -84,8 +102,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const refreshDomains = useCallback(async () => {
     try {
-      const list = await api.domains.list();
-      setDomains(list || []);
+      const list: Domain[] = (await api.domains.list()) || [];
+      setDomains(list);
+      // 当前域已被删除或不再可见时，回落到第一个可用域，避免后续请求一直带着失效的域
+      const current = getCurrentDomain();
+      if (list.length > 0 && !list.some((d) => d.code === current)) {
+        setCurrentDomain(list[0].code);
+        setDomainState(list[0].code);
+      }
     } catch {
       // ignore if unauthorized
     }
@@ -125,9 +149,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!data.user?.must_change_password) {
         await refreshDomains();
       }
-    } catch {
-      clearTokens();
-      resetAuthState();
+    } catch (err) {
+      // 只有确认登录已失效才清理状态；网络抖动或服务端临时错误保留当前登录态
+      if (err instanceof ApiError && err.status === 401) {
+        clearTokens();
+        resetAuthState();
+      }
     } finally {
       setLoading(false);
     }
@@ -136,6 +163,28 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     refreshProfile();
   }, [refreshProfile]);
+
+  useEffect(() => {
+    setAuthLostHandler(() => {
+      clearTokens();
+      resetAuthState();
+    });
+    return () => setAuthLostHandler(null);
+  }, [resetAuthState]);
+
+  // 定期及切回页面时刷新未读消息数，新的安全提醒无需手动刷新页面即可看到
+  useEffect(() => {
+    if (!user) return;
+    const timer = window.setInterval(() => void refreshUnreadCount(), 60_000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void refreshUnreadCount();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [user, refreshUnreadCount]);
 
   const switchDomain = useCallback(
     (domainCode: string) => {
@@ -147,32 +196,42 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     [refreshProfile],
   );
 
+  const applyLoginResponse = useCallback(
+    async (data: LoginResponse): Promise<LoginStepResult> => {
+      if (data.mfa_required) {
+        return {
+          mfaRequired: true,
+          mfaToken: data.mfa_token,
+          methods: data.methods || [],
+          riskLevel: data.risk_level,
+          riskReasons: data.risk_reasons || [],
+          emailHint: data.email_hint,
+          phoneHint: data.phone_hint,
+        };
+      }
+      if (!data.access_token) {
+        throw new Error('登录失败，请重试');
+      }
+      setTokens(data.access_token);
+      if (data.user) setUser(data.user);
+      setRoles(data.roles || {});
+      const forced = !!data.must_change_password;
+      setMustChangePassword(forced);
+      if (!forced) {
+        await refreshProfile();
+      }
+      return { mustChangePassword: forced };
+    },
+    [refreshProfile],
+  );
+
   const loginWithCredentials = async (
     username: string,
     password: string,
     captchaToken?: string,
   ): Promise<LoginStepResult> => {
     const data = await api.auth.login(username, password, captchaToken);
-    if (data.mfa_required) {
-      return {
-        mfaRequired: true,
-        mfaToken: data.mfa_token,
-        methods: data.methods || [],
-        riskLevel: data.risk_level,
-        riskReasons: data.risk_reasons || [],
-        emailHint: data.email_hint,
-        phoneHint: data.phone_hint,
-      };
-    }
-    setTokens(data.access_token);
-    setUser(data.user);
-    setRoles(data.roles || {});
-    const forced = !!data.must_change_password;
-    setMustChangePassword(forced);
-    if (!forced) {
-      await refreshProfile();
-    }
-    return { mustChangePassword: forced };
+    return applyLoginResponse(data);
   };
 
   const completeOAuthLogin = useCallback(
@@ -226,6 +285,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         refreshProfile,
         refreshDomains,
         loginWithCredentials,
+        applyLoginResponse,
         completeOAuthLogin,
         logout,
       }}

@@ -2,6 +2,9 @@ package security
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +22,13 @@ type OAuthPluginState struct {
 	CodeVerifier string `json:"code_verifier"`
 	RedirectTo   string `json:"redirect_to,omitempty"`
 	BindUserID   uint64 `json:"bind_user_id,omitempty"`
+	// BrowserBinding 为发起浏览器所持 Cookie 随机值的摘要，回调时必须匹配，防止登录 CSRF 与绑定劫持。
+	BrowserBinding string `json:"browser_binding,omitempty"`
+}
+
+// BrowserBindingDigest 计算联合登录浏览器绑定值的摘要。
+func BrowserBindingDigest(v string) string {
+	return tokenDigest(v)
 }
 
 type RefreshTokenRecord struct {
@@ -38,6 +48,7 @@ type OAuthConsentRequest struct {
 	State               string   `json:"state"`
 	CodeChallenge       string   `json:"code_challenge"`
 	CodeChallengeMethod string   `json:"code_challenge_method"`
+	Nonce               string   `json:"nonce,omitempty"`
 	CreatedAt           int64    `json:"created_at"`
 }
 
@@ -268,8 +279,16 @@ func (s *StateStore) SavePasswordResetCode(ctx context.Context, email string, re
 	return s.rdb.Set(ctx, s.key("pwd_reset", email), string(b), ttl).Err()
 }
 
+// ErrTooManyAttempts 表示一次性验证码的校验次数已用尽，验证码已作废。
+var ErrTooManyAttempts = errors.New("验证码错误次数过多，请重新获取")
+
+// ErrCodeMismatch 表示一次性验证码不正确。
+var ErrCodeMismatch = errors.New("验证码不正确")
+
 // ConsumePasswordResetCode 校验并原子消费重置密码验证码。
+// 每次校验先原子占用一次尝试机会再比对，并发请求也无法突破 5 次上限。
 func (s *StateStore) ConsumePasswordResetCode(ctx context.Context, email, code string) (*PasswordResetRecord, error) {
+	const maxAttempts = 5
 	k := s.key("pwd_reset", email)
 	val, err := s.rdb.Get(ctx, k).Result()
 	if errors.Is(err, redis.Nil) {
@@ -278,18 +297,23 @@ func (s *StateStore) ConsumePasswordResetCode(ctx context.Context, email, code s
 	if err != nil {
 		return nil, err
 	}
+	attempts, aErr := s.IncrFailure(ctx, "pwd_reset", email, 10*time.Minute)
+	if aErr != nil || attempts > maxAttempts {
+		_ = s.rdb.Del(ctx, k).Err()
+		_ = s.ClearFailures(ctx, "pwd_reset", email)
+		return nil, ErrTooManyAttempts
+	}
 	var rec PasswordResetRecord
 	if err := json.Unmarshal([]byte(val), &rec); err != nil {
 		return nil, err
 	}
-	if rec.Code != code {
-		fails, fErr := s.IncrFailure(ctx, "pwd_reset", email, 10*time.Minute)
-		if fErr != nil || fails >= 5 {
+	if !constantTimeEqual(rec.Code, code) {
+		if attempts >= maxAttempts {
 			_ = s.rdb.Del(ctx, k).Err()
 			_ = s.ClearFailures(ctx, "pwd_reset", email)
-			return nil, errors.New("验证码错误次数过多，请重新获取")
+			return nil, ErrTooManyAttempts
 		}
-		return nil, errors.New("验证码不正确")
+		return nil, ErrCodeMismatch
 	}
 	if n, dErr := s.rdb.Del(ctx, k).Result(); dErr != nil || n == 0 {
 		return nil, ErrStateNotFound
@@ -406,22 +430,27 @@ func (s *StateStore) VerifyAndConsumeOTP(ctx context.Context, scopeKey, code str
 	if err != nil {
 		return nil, err
 	}
+	if maxAttempts <= 0 {
+		maxAttempts = 5
+	}
+	// 先原子占用一次尝试机会再比对：并发请求即使同时读到验证码，也只有前 maxAttempts 个能进入比对
+	attempts, aErr := s.IncrFailure(ctx, "otp", scopeKey, 10*time.Minute)
+	if aErr != nil || int(attempts) > maxAttempts {
+		_ = s.rdb.Del(ctx, k).Err()
+		_ = s.ClearFailures(ctx, "otp", scopeKey)
+		return nil, ErrTooManyAttempts
+	}
 	var rec OTPRecord
 	if err := json.Unmarshal([]byte(val), &rec); err != nil {
 		return nil, err
 	}
-	if rec.Code != code {
-		if maxAttempts <= 0 {
-			maxAttempts = 5
-		}
-		// 使用原子自增计数，避免「先读后写」被并发请求绕过错误次数限制
-		fails, fErr := s.IncrFailure(ctx, "otp", scopeKey, 10*time.Minute)
-		if fErr != nil || int(fails) >= maxAttempts {
+	if !constantTimeEqual(rec.Code, code) {
+		if int(attempts) >= maxAttempts {
 			_ = s.rdb.Del(ctx, k).Err()
 			_ = s.ClearFailures(ctx, "otp", scopeKey)
-			return nil, errors.New("验证码错误次数过多，请重新获取")
+			return nil, ErrTooManyAttempts
 		}
-		return nil, errors.New("验证码不正确")
+		return nil, ErrCodeMismatch
 	}
 	// 以 DEL 的返回值原子消费验证码，防止同一验证码被并发请求重复使用
 	if n, dErr := s.rdb.Del(ctx, k).Result(); dErr != nil || n == 0 {
@@ -548,6 +577,89 @@ func (s *StateStore) RecordIPFailure(ctx context.Context, ip string, ttl time.Du
 		_ = s.rdb.Expire(ctx, k, ttl).Err()
 	}
 	return n, err
+}
+
+func constantTimeEqual(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+func tokenDigest(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// MarkRefreshUsed 记录已被轮换消费的 Refresh Token（仅存摘要）及其所属会话，用于识别令牌重放。
+func (s *StateStore) MarkRefreshUsed(ctx context.Context, token, sessionID string, ttl time.Duration) error {
+	if ttl <= 0 {
+		ttl = 7 * 24 * time.Hour
+	}
+	val := sessionID
+	if val == "" {
+		val = "-"
+	}
+	return s.rdb.Set(ctx, s.key("refresh_used", tokenDigest(token)), val, ttl).Err()
+}
+
+// RefreshReuse 判断给定 Refresh Token 是否属于已轮换消费过的令牌；found=true 表示发生了重放，返回其会话 ID（可能为空）。
+func (s *StateStore) RefreshReuse(ctx context.Context, token string) (sessionID string, found bool, err error) {
+	val, err := s.rdb.Get(ctx, s.key("refresh_used", tokenDigest(token))).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if val == "-" {
+		val = ""
+	}
+	return val, true, nil
+}
+
+func reauthKeyPart(userID uint64, sessionID string) string {
+	if sessionID == "" {
+		sessionID = "nosid"
+	}
+	return fmt.Sprintf("%d:%s", userID, sessionID)
+}
+
+// MarkReauth 记录用户在当前会话内刚完成过一次身份再确认（输入密码或动态码）。
+func (s *StateStore) MarkReauth(ctx context.Context, userID uint64, sessionID string, ttl time.Duration) error {
+	return s.rdb.Set(ctx, s.key("reauth", reauthKeyPart(userID, sessionID)), time.Now().UnixMilli(), ttl).Err()
+}
+
+// HasRecentReauth 判断用户在当前会话内是否于有效期内完成过身份再确认；Redis 异常时返回 false。
+func (s *StateStore) HasRecentReauth(ctx context.Context, userID uint64, sessionID string) bool {
+	n, err := s.rdb.Exists(ctx, s.key("reauth", reauthKeyPart(userID, sessionID))).Result()
+	return err == nil && n > 0
+}
+
+// ClearReauth 清除身份再确认标记。
+func (s *StateStore) ClearReauth(ctx context.Context, userID uint64, sessionID string) {
+	_ = s.rdb.Del(ctx, s.key("reauth", reauthKeyPart(userID, sessionID))).Err()
+}
+
+// MarkTOTPStepUsed 标记某用户的某个 TOTP 时间步已被使用；返回 false 表示该动态码已用过（重放）。
+func (s *StateStore) MarkTOTPStepUsed(ctx context.Context, userID uint64, step int64) (bool, error) {
+	return s.rdb.SetNX(ctx, s.key("totp_used", fmt.Sprintf("%d:%d", userID, step)), "1", 3*time.Minute).Result()
+}
+
+// AcquireOnce 以 SET NX 抢占一次性处理权，用于防止同一授权码或刷新令牌被并发重复兑换。
+func (s *StateStore) AcquireOnce(ctx context.Context, scope, id string, ttl time.Duration) (bool, error) {
+	return s.rdb.SetNX(ctx, s.key("once", scope, tokenDigest(id)), "1", ttl).Result()
+}
+
+// SaveCodeNonce 记录授权码对应的 OIDC nonce，换取令牌时写入 ID Token，供客户端防重放校验。
+func (s *StateStore) SaveCodeNonce(ctx context.Context, code, nonce string, ttl time.Duration) error {
+	return s.rdb.Set(ctx, s.key("oidc_nonce", tokenDigest(code)), nonce, ttl).Err()
+}
+
+// ConsumeCodeNonce 取出并删除授权码对应的 nonce；不存在时返回空串。
+func (s *StateStore) ConsumeCodeNonce(ctx context.Context, code string) string {
+	v, err := s.rdb.GetDel(ctx, s.key("oidc_nonce", tokenDigest(code))).Result()
+	if err != nil {
+		return ""
+	}
+	return v
 }
 
 // GetIPFailureCount 获取来源 IP 近期认证失败次数。

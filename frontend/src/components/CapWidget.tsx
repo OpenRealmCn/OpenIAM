@@ -52,14 +52,23 @@ export const CapWidget: React.FC<CapWidgetProps> = ({ scene, onToken, resetSigna
   const [status, setStatus] = useState<'idle' | 'solving' | 'verified' | 'error'>('idle');
   const [progress, setProgress] = useState(0);
   const [errMsg, setErrMsg] = useState('');
+  const [cfgFailed, setCfgFailed] = useState(false);
   const runningRef = useRef(false);
 
-  useEffect(() => {
+  const loadConfig = useCallback(() => {
+    setCfgFailed(false);
     api.captcha
       .config()
       .then((res: CaptchaPublicConfig) => setCfg(res))
-      .catch(() => setCfg(null));
+      .catch(() => {
+        setCfg(null);
+        setCfgFailed(true);
+      });
   }, []);
+
+  useEffect(() => {
+    loadConfig();
+  }, [loadConfig]);
 
   useEffect(() => {
     if (resetSignal > 0) {
@@ -103,7 +112,7 @@ export const CapWidget: React.FC<CapWidgetProps> = ({ scene, onToken, resetSigna
         });
         const rdData = await rdRes.json();
         if (!rdData?.success || !rdData?.token) {
-          throw new Error(rdData?.error || '远端人机验证未通过');
+          throw new Error('人机验证未通过，请重试');
         }
         setProgress(100);
         setStatus('verified');
@@ -120,7 +129,7 @@ export const CapWidget: React.FC<CapWidgetProps> = ({ scene, onToken, resetSigna
         }
         const rdData = await api.captcha.capRedeem(chData.token, solutions);
         if (!rdData?.success || !rdData?.token) {
-          throw new Error(rdData?.error || '人机验证未通过');
+          throw new Error('人机验证未通过，请重试');
         }
         setProgress(100);
         setStatus('verified');
@@ -128,12 +137,33 @@ export const CapWidget: React.FC<CapWidgetProps> = ({ scene, onToken, resetSigna
       }
     } catch (err) {
       setStatus('error');
-      setErrMsg((err as Error).message || '验证失败，请点击重试');
+      setErrMsg(
+        err instanceof TypeError
+          ? '无法连接人机验证服务，请检查网络后重试'
+          : (err as Error).message || '验证未通过，请点击重试',
+      );
       onToken('');
     } finally {
       runningRef.current = false;
     }
   }, [cfg, status, onToken]);
+
+  // 配置加载失败时无法判断是否需要验证，提示用户重试，避免提交时才报"请完成人机验证"却看不到验证框。
+  if (cfgFailed) {
+    return (
+      <Alert
+        severity="warning"
+        sx={{ py: 0 }}
+        action={
+          <Box component="span" onClick={loadConfig} sx={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+            <RefreshIcon fontSize="small" />
+          </Box>
+        }
+      >
+        人机验证组件加载失败，请检查网络后点击右侧按钮重试
+      </Alert>
+    );
+  }
 
   if (!sceneEnabled) {
     return null;
@@ -176,13 +206,13 @@ export const CapWidget: React.FC<CapWidgetProps> = ({ scene, onToken, resetSigna
           )}
           <Box>
             <Typography variant="body2" fontWeight={600}>
-              {status === 'idle' && '点击完成人机安全验证'}
-              {status === 'solving' && `正在验证环境安全性（${progress}%）...`}
-              {status === 'verified' && '已通过人机安全验证'}
-              {status === 'error' && '验证失败，点击重试'}
+              {status === 'idle' && '点击进行人机验证'}
+              {status === 'solving' && `正在验证（${progress}%）…`}
+              {status === 'verified' && '已通过人机验证'}
+              {status === 'error' && '验证未通过，点击重试'}
             </Typography>
             <Typography variant="caption" color="text.secondary">
-              安全人机验证保护中
+              用于防止自动化程序滥用
             </Typography>
           </Box>
         </Stack>

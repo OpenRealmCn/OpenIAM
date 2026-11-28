@@ -70,13 +70,77 @@
 
 新增回归测试在 `security_review_test.go`；原有企业功能测试因依赖旧行为已调整（OTP 测试改用带手机号的已注册账号，风控测试显式开启地理头信任）。
 
+## 第三轮全量复审修复
+
+这一轮从头复查了全部代码，发现 6 个高危问题，另有若干上一轮声称已修复、但实际没修好的条目。以下问题已全部修复。
+
+### 高危
+
+1. 二步验证可被邮箱或短信验证码绕过：登录流程统一收口到 `login_flow.go`。已启用 TOTP 的账号只接受 TOTP 或恢复码，`/auth/mfa/verify` 只接受挑战里列出的方式。风控要求二次验证、但账号没有可用方式时，直接阻断登录，不再放行。
+2. 联合登录绕过 TOTP、强制改密和风控：联合登录改走统一登录出口，会写入会话表，也能在「我的会话」中踢下线。前端回调页能处理 MFA 挑战（转到登录页继续验证）和强制改密。
+3. OAuth2 scope 越权：注册 `ClientScopeHandler` 和 `RefreshingScopeHandler`。`client_credentials` 只能申请应用登记的 scope，刷新令牌时 scope 只能缩小、不能扩大。
+4. 禁用或改密后，OAuth2 refresh_token 仍能续期：签发和刷新时都会检查用户状态和用户级令牌失效时间点。
+5. 管理员登记 `javascript:` 回调地址导致同意页 XSS：所有应用（含管理员创建的）都校验回调地址协议，只允许 https、本机回环 http 和含点号的自定义 scheme。前端同意页在跳转前再校验一次。
+6. 改手机号无需验证：新手机号要通过短信验证码证明持有，并且需要近 5 分钟内重新验证身份。
+
+### 敏感操作二次认证
+
+新增 `POST /auth/reauth`，用密码或 TOTP 动态码确认身份，有效期 5 分钟。改手机号、启用 TOTP、新增 Passkey、绑定第三方账号都要求先完成这一步，否则返回 `403 reauth_required`。前端新增全局 `ReauthDialog`：收到 `reauth_required` 时弹窗验证，通过后自动重试原请求。关闭 TOTP 需要同时提供动态码（或恢复码）和登录密码（账号有密码时）。
+
+### 中危
+
+- 用户列表和详情跨域读取：非超级管理员只能看到请求域内持有角色的用户。创建用户、创建 JIT 临时授权时，目标域必须等于已鉴权的请求域。
+- 被吊销的会话复活：刷新令牌轮换时同步更新会话过期时间，吊销标记的 TTL 不会早于会话本身。
+- 注册验证缺口：任一模式下，提交的每个可验证联系方式都必须通过验证码；`email` / `sms` 模式要求对应联系方式必填。邮箱和手机号恢复唯一索引（迁移 `000008`），并发注册返回 409。ID Token 和 userinfo 新增 `email_verified`，只有验证过的邮箱才为 true；管理员修改邮箱后该标记重置为未验证。
+- 公共客户端关闭 PKCE：公共客户端强制使用 PKCE，`/oauth2/codes` 同样检查。
+- 账号枚举和信息泄露：OTP 发送、OTP 登录、重置密码对账号存在与否返回一致的结果，验证失败统一提示，只有「尝试次数过多」原样返回。SMTP 和上游报错不再透传给客户端。联合登录出站请求出错时，错误里不再带 URL（企业微信的 `corpsecret` 位于查询参数）。管理接口的数据库错误统一由 `failInternal` / `failWrite` 处理，唯一约束冲突返回 409。
+- 人机验证在数据库出错时放行：改为拒绝。
+- 联合登录和绑定的 `state` 未绑定浏览器（登录 CSRF）：`state` 绑定发起请求的浏览器，回调时校验。
+- 并发计数：OTP、重置码、MFA 的尝试次数改为原子自增，MFA 挑战按原子消费结果判断。OAuth2 授权码改为原子消费，重复兑换返回 400。
+- Passkey 的 RP ID 和 Origin 只从系统配置的 Issuer 与 CORS 来源中选取，不再信任请求头。
+
+### 低危与部署
+
+- 敏感字段落库加密：TOTP 种子、联合登录 Client Secret、插件密钥字段、密钥类系统设置使用 AES-GCM 加密（前缀 `enc:v1:`）。密钥来自 `OPENIAM_DATA_ENCRYPTION_KEY`；未配置时以明文存储并告警。已有的明文数据仍可读取，下次保存时会自动加密。
+- JWT 签名密钥：未指定私钥路径时，自动生成并持久化到 `data/jwt_private.pem`（权限 0600），重启不再使全部令牌失效。compose 为此挂载 `openiam_backend_data` 卷。
+- OIDC 支持 `nonce`。ID Token 不能当作 Access Token 调用 API。
+- 全员公告的已读状态改为按用户记录（`notification_reads` 表）。
+- Webhook 配置 `secret` 后，请求带签名：`X-OpenIAM-Signature: sha256=hex(HMAC(secret, timestamp + "." + body))`。
+- SSRF 黑名单补充 `0.0.0.0/8`、`192.0.0.0/24`、文档与基准测试地址段、`240.0.0.0/4`、NAT64、`100::/64`、`2001:db8::/32`、`2002::/16`、接口本地组播。插件出站共用一个带连接池和超时的受限客户端。
+- 风控：省略设备指纹不能再冒充已知设备。只有当历史会话也都没有指纹时，空指纹才视为已知。
+- 登录锁定判断在 Redis 出错时按已锁定处理。限流器在存储出错时返回 503（fail-closed），触发限流时返回 `Retry-After`。
+- SMTP 在 `starttls` 模式下，服务器不支持 STARTTLS 时直接拒绝发送，不再降级为明文。
+- 审计脱敏改为按归一化后的子串匹配（如 `client_secret`、`apiKey`、`recovery-codes`），顶层数组也会脱敏。
+- `/health` 不再返回版本号。业务连接强制关闭 `multiStatements`，只有迁移连接开启。
+- 默认运行模式为 `release`。可信代理默认只有 `127.0.0.1,::1`。
+- 前端：`?redirect=` 和联合登录回跳地址只接受同源路径；重置密码的发码接受人机验证令牌；`react-router-dom` 升级到 7.18，修复 GHSA-wrjc-x8rr-h8h6 与 GHSA-337j-9hxr-rhxg，`npm audit --omit=dev` 为 0。
+- 部署：
+  - compose 中 MySQL 健康检查通过环境变量读取口令，不再硬编码。
+  - 内置 Redis 用 `OPENIAM_REDIS_PASSWORD` 启用认证。
+  - compose 使用固定内部网段 `OPENIAM_DOCKER_SUBNET`，后端只信任该网段转发的 `X-Forwarded-*`。
+  - 前端镜像只用 `npm ci`，去掉了 `npm install` 回退；nginx 改为非 root 镜像，监听 8080，并沿用上游代理声明的 https。
+  - 容器开启 `no-new-privileges`，镜像版本固定到次版本号。
+  - CI 中的 Actions 固定到 commit SHA，新增 `go vet`、前端完整构建和 `npm audit`。
+  - `.gitignore` 增加私钥、本地数据库与 `data/` 目录。
+
+### 验证
+
+- 后端：`go build`、`go vet`、`go test ./...` 全部通过。
+  - 新增 `security_regression_test.go`，覆盖注册时每个联系方式都要验证、用户列表和详情的域隔离、TOTP 种子加密落库、公告已读状态按用户隔离。
+  - 新增 `fieldcrypt_test.go`、`sanitize_test.go`、`webhook_sign_test.go`、`risk/engine_test.go`。
+  - 集成测试补充了 nonce、ID Token 不能调用 API、授权码不能重复兑换、刷新时不能扩大 scope。
+- 前端：`npm run build` 通过。
+- 未验证：
+  - Docker 镜像构建与 compose 启动（本机没有 Docker），包括非 root nginx 的模板渲染和 Redis 口令认证。
+  - 前端重新认证弹窗、改手机号、联合登录 MFA 跳转在真实浏览器中的交互。
+  - SMTP STARTTLS 的严格模式。
+
 ## 尚未修复
 
-1. Redis 默认无密码（仅绑定本机回环，但仍建议在生产环境设置 `OPENIAM_REDIS_PASSWORD`）。
-2. 缺省运行模式为 `debug`，GORM 会打印 SQL；生产环境请设置 `OPENIAM_MODE=release`（compose 默认已是 release）。
-3. DSN 强制开启 `multiStatements=true`，这是迁移所需；建议后续把迁移与业务连接拆开。
-4. 修改密码等操作的审计、令牌撤销依赖 Redis；Redis 不可用时登录与刷新会失败（有意的 fail-closed）。
-5. 联合登录插件仍信任管理员配置的外部 https 站点本身；开启系统设置 `security.allow_private_upstream` 会放宽 SSRF 防护。
+1. 修改密码等操作的审计、令牌撤销依赖 Redis；Redis 不可用时，登录与刷新会失败。这是有意的 fail-closed 设计。
+2. 联合登录插件仍然信任管理员配置的外部 https 站点本身。开启系统设置 `security.allow_private_upstream` 会放宽 SSRF 防护。
+3. 未配置 `OPENIAM_DATA_ENCRYPTION_KEY` 时，敏感字段仍以明文落库（启动时会告警）。
+4. compose 中内置 MySQL 的默认口令仍是公开值（端口只绑定本机回环），生产环境需要在 `.env` 中修改。
 
 ## 升级注意
 
@@ -88,3 +152,13 @@
 - 前端必须经由 HTTPS 反代访问生产环境，Cookie 才会带 `Secure` 属性；nginx 已传递 `X-Forwarded-Proto`，上游代理需保证该头正确。
 - 已有身份源配置中若使用 http 或内网地址，保存时会被拒绝，需要改用 https 或显式开启内网开关。
 - 联合登录的回调地址需要在「系统设置」的 CORS 来源或回调前缀中登记。
+- 第三轮修复的升级影响：
+  - 迁移 `000008` 会恢复邮箱和手机号的唯一索引。如果库里已有重复的邮箱或手机号，迁移会失败，需要先清理重复数据。
+  - 令牌的 `typ` 与签发方校验变严格，升级前签发的令牌会失效，用户需要重新登录。
+  - 公共 OAuth 客户端必须使用 PKCE。`client_credentials` 和刷新令牌不能再申请超出登记范围的 scope。
+  - 改手机号、启用 TOTP、新增 Passkey、绑定第三方账号前需要重新验证身份。直接调用 API 的客户端要先调用 `POST /auth/reauth`。
+  - SMTP 服务器不支持 STARTTLS 时会拒绝发送。确实是内网明文中继的，需要把加密方式设为 `none`。
+  - 限流存储（Redis）异常时返回 503，不再放行。
+  - 可信代理默认只信任回环地址。自建反向代理的部署需要设置 `OPENIAM_TRUSTED_PROXIES`，或在系统设置中配置。
+  - 启用 `OPENIAM_DATA_ENCRYPTION_KEY` 后请妥善备份该密钥，丢失后已加密的字段无法恢复。
+  - compose 部署：前端容器端口从 80 改为 8080（宿主机端口仍由 `OPENIAM_PORT` 控制）；使用内置 Redis 时必须在 `.env` 设置 `OPENIAM_REDIS_PASSWORD`，后端使用同一个变量连接。

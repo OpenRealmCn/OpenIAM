@@ -8,9 +8,21 @@ frontend/*.tsbuildinfo
 
 # Env & local configs
 .env
-.env.local
+.env.*
+!.env.example
 backend/config.yaml
 backend/keys/
+
+# Secrets & runtime data (auto-generated JWT key, local databases, logs)
+data/
+backend/data/
+*.pem
+*.key
+*.p12
+*.pfx
+*.db
+*.sqlite
+*.log
 
 # IDE & OS
 .vscode/

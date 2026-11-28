@@ -10,6 +10,7 @@ import (
 	"github.com/openrealm/openiam/internal/models"
 	"github.com/openrealm/openiam/internal/oauthplugin"
 	"github.com/openrealm/openiam/internal/rbac"
+	"github.com/openrealm/openiam/internal/security"
 	"gorm.io/gorm"
 )
 
@@ -64,7 +65,7 @@ type upsertProviderReq struct {
 func (h *OAuthProviderHandler) Create(c *gin.Context) {
 	var req upsertProviderReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		Fail(c, http.StatusBadRequest, bindError(err))
 		return
 	}
 	if _, ok := h.registry.Get(req.PluginType); !ok {
@@ -92,19 +93,24 @@ func (h *OAuthProviderHandler) Create(c *gin.Context) {
 		enabled = *req.Enabled
 	}
 
+	sealedSecret, err := security.SealField(req.ClientSecret)
+	if err != nil {
+		failInternal(c, "加密 client secret 失败", err)
+		return
+	}
 	p := models.OAuthProvider{
 		Name:         name,
 		PluginType:   req.PluginType,
 		DisplayName:  strings.TrimSpace(req.DisplayName),
 		ClientID:     strings.TrimSpace(req.ClientID),
-		ClientSecret: req.ClientSecret,
+		ClientSecret: sealedSecret,
 		Scopes:       strings.TrimSpace(req.Scopes),
 		ExtraConfig:  models.JSONMap(req.ExtraConfig),
 		AutoRegister: autoReg,
 		Enabled:      enabled,
 	}
 	if err := h.db.Create(&p).Error; err != nil {
-		Fail(c, http.StatusInternalServerError, "创建联合登录配置失败: "+err.Error())
+		failWrite(c, err, "同名联合登录配置已存在", "创建联合登录配置失败")
 		return
 	}
 
@@ -134,7 +140,7 @@ func (h *OAuthProviderHandler) Update(c *gin.Context) {
 
 	var req upsertProviderReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		Fail(c, http.StatusBadRequest, bindError(err))
 		return
 	}
 	if _, ok := h.registry.Get(req.PluginType); !ok {
@@ -150,7 +156,12 @@ func (h *OAuthProviderHandler) Update(c *gin.Context) {
 	p.DisplayName = strings.TrimSpace(req.DisplayName)
 	p.ClientID = strings.TrimSpace(req.ClientID)
 	if req.ClientSecret != "" {
-		p.ClientSecret = req.ClientSecret
+		sealedSecret, sErr := security.SealField(req.ClientSecret)
+		if sErr != nil {
+			failInternal(c, "加密 client secret 失败", sErr)
+			return
+		}
+		p.ClientSecret = sealedSecret
 	}
 	p.Scopes = strings.TrimSpace(req.Scopes)
 	if req.ExtraConfig != nil {

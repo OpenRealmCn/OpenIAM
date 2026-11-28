@@ -1,5 +1,12 @@
+# 若前面还有一层 TLS 终结代理（负载均衡/CDN），沿用它声明的 https；否则使用本层实际协议。
+# 后端据此决定刷新令牌 Cookie 是否带 Secure，客户端伪造 https 只会让它自己的 Cookie 更严格。
+map $http_x_forwarded_proto $openiam_forwarded_proto {
+    default $scheme;
+    https   https;
+}
+
 server {
-    listen 80;
+    listen 8080;
     server_name _;
 
     root /usr/share/nginx/html;
@@ -24,7 +31,7 @@ server {
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Proto $openiam_forwarded_proto;
     }
 
     location = /oauth2/consent {
@@ -37,7 +44,7 @@ server {
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Proto $openiam_forwarded_proto;
     }
 
     location /.well-known/ {
@@ -46,6 +53,6 @@ server {
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Proto $openiam_forwarded_proto;
     }
 }

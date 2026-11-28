@@ -115,6 +115,7 @@ func toSanitizedJSONMap(v interface{}) models.JSONMap {
 		// 如果原始值不是 JSON 对象（如切片），包装为 items
 		var anyVal interface{}
 		if err2 := json.Unmarshal(b, &anyVal); err2 == nil {
+			sanitizeValue(anyVal)
 			return models.JSONMap{"value": anyVal}
 		}
 		return nil

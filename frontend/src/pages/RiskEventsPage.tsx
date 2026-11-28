@@ -14,11 +14,11 @@ const RISK_LEVEL_LABELS: Record<string, { label: string; color: 'error' | 'warni
   low: { label: '低风险', color: 'success' },
 };
 
-const ACTION_LABELS: Record<string, string> = {
-  allow: '正常放行',
-  notify: '风险提醒',
-  challenge_mfa: '二次身份验证',
-  block: '已拦截',
+const ACTION_LABELS: Record<string, { label: string; color: 'default' | 'info' | 'warning' | 'error' }> = {
+  allow: { label: '放行', color: 'default' },
+  notify: { label: '仅通知', color: 'info' },
+  challenge_mfa: { label: '要求两步验证', color: 'warning' },
+  block: { label: '阻断', color: 'error' },
 };
 
 export const RiskEventsPage: React.FC = () => {
@@ -49,33 +49,56 @@ export const RiskEventsPage: React.FC = () => {
     {
       field: 'risk_level',
       headerName: '风险等级',
-      width: 135,
+      width: 150,
       renderCell: (p) => {
         const lvl = p.value as string;
-        const meta = RISK_LEVEL_LABELS[lvl] || { label: lvl, color: 'success' as const };
-        return <Chip size="small" color={meta.color} label={`${meta.label} (${p.row.risk_score}分)`} />;
+        const meta = RISK_LEVEL_LABELS[lvl] || { label: lvl || '—', color: 'success' as const };
+        return <Chip size="small" color={meta.color} label={`${meta.label}（${p.row.risk_score} 分）`} />;
       },
     },
     { field: 'ip_address', headerName: '来源 IP', width: 140 },
-    { field: 'location', headerName: '地点', width: 130 },
+    { field: 'location', headerName: '登录地点', width: 130, valueGetter: (_, r) => r.location || '—' },
     {
       field: 'reasons',
-      headerName: '风险命中因子',
+      headerName: '风险原因',
       flex: 1,
-      minWidth: 240,
+      minWidth: 260,
       valueGetter: (_, r) => (r.reasons || []).join('；'),
+      renderCell: (p) => {
+        const list = p.row.reasons || [];
+        if (list.length === 0) {
+          return (
+            <Typography variant="body2" color="text.secondary">
+              —
+            </Typography>
+          );
+        }
+        return (
+          <Stack direction="row" spacing={0.6} flexWrap="wrap" useFlexGap sx={{ py: 0.8 }}>
+            {list.map((reason, idx) => (
+              <Chip key={`${idx}-${reason}`} size="small" variant="outlined" label={reason} />
+            ))}
+          </Stack>
+        );
+      },
     },
     {
       field: 'action_taken',
       headerName: '处置策略',
-      width: 135,
-      valueFormatter: (v) => ACTION_LABELS[v as string] || String(v || '-'),
+      width: 140,
+      valueGetter: (_, r) => ACTION_LABELS[r.action_taken]?.label || r.action_taken || '—',
+      renderCell: (p) => {
+        const action = p.row.action_taken;
+        const meta = ACTION_LABELS[action];
+        if (!meta) return <Typography variant="body2">{action || '—'}</Typography>;
+        return <Chip size="small" variant="outlined" color={meta.color} label={meta.label} />;
+      },
     },
     {
       field: 'created_at',
       headerName: '发生时间',
       width: 170,
-      valueFormatter: (v) => (v ? dayjs(v as string).format('YYYY-MM-DD HH:mm:ss') : '-'),
+      valueFormatter: (v) => (v ? dayjs(v as string).format('YYYY-MM-DD HH:mm:ss') : '—'),
     },
   ];
 
@@ -85,10 +108,10 @@ export const RiskEventsPage: React.FC = () => {
         <Box>
           <Stack direction="row" spacing={1} alignItems="center">
             <RiskIcon color="primary" />
-            <Typography variant="h5">风险自适应认证事件</Typography>
+            <Typography variant="h5">登录风险事件</Typography>
           </Stack>
           <Typography variant="body2" color="text.secondary" mt={0.4}>
-            基于 IP 信誉、异地位置、设备指纹变动与非常用时间段的实时登录风险评分记录
+            记录基于来源 IP、登录地点、新设备与非常用时段的登录风险评估及处置结果。
           </Typography>
         </Box>
         <Button
@@ -103,13 +126,18 @@ export const RiskEventsPage: React.FC = () => {
         </Button>
       </Stack>
 
-      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+      {error && (
+        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
+          {error}
+        </Alert>
+      )}
 
       <Box sx={{ height: 540 }}>
         <DataGrid
           rows={rows}
           columns={columns}
           loading={loading}
+          getRowHeight={() => 'auto'}
           disableRowSelectionOnClick
           slots={{ toolbar: GridToolbar }}
           slotProps={{ toolbar: { showQuickFilter: true } }}

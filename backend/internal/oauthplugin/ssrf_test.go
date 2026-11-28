@@ -77,9 +77,9 @@ func TestStartLoginRejectsForeignRedirectURI(t *testing.T) {
 		Enabled:      true,
 	}).Error)
 
-	_, _, err = svc.StartLogin(context.Background(), "gh_redirect", "https://evil.example.com/oauth/callback/gh_redirect")
+	_, _, err = svc.StartLogin(context.Background(), "gh_redirect", "https://evil.example.com/oauth/callback/gh_redirect", "b")
 	assert.Error(t, err)
 
-	_, _, err = svc.StartLogin(context.Background(), "gh_redirect", "http://localhost:5173/oauth/callback/gh_redirect")
+	_, _, err = svc.StartLogin(context.Background(), "gh_redirect", "http://localhost:5173/oauth/callback/gh_redirect", "b")
 	assert.NoError(t, err)
 }

@@ -57,7 +57,7 @@ func DynamicCORS(getOrigins func() []string) gin.HandlerFunc {
 		}
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-OpenIAM-Domain, X-Token-Delivery")
-		c.Header("Access-Control-Expose-Headers", "X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset")
+		c.Header("Access-Control-Expose-Headers", "X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After")
 		c.Header("Vary", "Origin")
 
 		if c.Request.Method == "OPTIONS" {

@@ -269,7 +269,8 @@ func (m *Manager) VerifyCaptchaForScene(ctx context.Context, scene, token string
 		required = snap.CaptchaProtectLogin
 	case "register":
 		required = snap.CaptchaProtectRegister
-	case "otp":
+	case "otp", "reset_password":
+		// 重置密码同样会向邮箱发送验证码，与 OTP 共用防刷开关
 		required = snap.CaptchaProtectOTP
 	}
 	if !required {
@@ -277,8 +278,12 @@ func (m *Manager) VerifyCaptchaForScene(ctx context.Context, scene, token string
 	}
 
 	list, err := m.ActiveBySlot(SlotCaptcha)
-	if err != nil || len(list) == 0 {
-		// 开启场景保护但管理员未启用任何 captcha 插件时不阻塞合法用户；可在测试中显式启用插件验证
+	if err != nil {
+		// 无法确认插件状态时按需要验证处理，避免存储抖动期间人机验证被整体绕过
+		return errors.New("人机验证服务暂不可用，请稍后再试")
+	}
+	if len(list) == 0 {
+		// 开启场景保护但管理员未启用任何 captcha 插件时不阻塞合法用户（属于配置缺失，管理后台会提示）
 		return nil
 	}
 	token = strings.TrimSpace(token)
@@ -309,7 +314,7 @@ func (m *Manager) VerifyCaptchaForScene(ctx context.Context, scene, token string
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := NewSafeHTTPClient().Do(req)
 	if err != nil {
-		return fmt.Errorf("远端人机验证校验失败: %w", err)
+		return errors.New("远端人机验证服务暂不可用，请稍后再试")
 	}
 	defer resp.Body.Close()
 

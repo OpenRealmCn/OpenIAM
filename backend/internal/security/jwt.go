@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -32,13 +33,35 @@ type AccessClaims struct {
 
 // IDTokenClaims 为 OIDC 标准 ID Token 声明。
 type IDTokenClaims struct {
-	Username        string `json:"preferred_username"`
-	Email           string `json:"email"`
+	Username        string `json:"preferred_username,omitempty"`
+	Email           string `json:"email,omitempty"`
+	EmailVerified   *bool  `json:"email_verified,omitempty"`
 	Name            string `json:"name,omitempty"`
 	Picture         string `json:"picture,omitempty"`
 	AuthorizedParty string `json:"azp,omitempty"`
+	Nonce           string `json:"nonce,omitempty"`
 	jwt.RegisteredClaims
 }
+
+// IDTokenOptions 描述一次 ID Token 签发。Profile/Email 字段只在对应 scope 被授予时填写。
+type IDTokenOptions struct {
+	UserID        uint64
+	ClientID      string
+	Nonce         string
+	TTL           time.Duration
+	Username      string
+	DisplayName   string
+	AvatarURL     string
+	Email         string
+	EmailVerified *bool
+}
+
+const (
+	// accessTokenType 写入 Access Token 的 typ 头（RFC 9068），用于和同一密钥签发的 ID Token 区分，
+	// 防止把 ID Token 当作 Access Token 使用。
+	accessTokenType = "at+jwt"
+	idTokenType     = "JWT"
+)
 
 type JWK struct {
 	Kty string `json:"kty"`
@@ -91,6 +114,36 @@ func NewJWTManager(issuer, privateKeyPath string, accessTTL time.Duration) (*JWT
 		issuer:     issuer,
 		accessTTL:  accessTTL,
 	}, nil
+}
+
+// EnsurePrivateKeyFile 确保 path 处存在 RSA 私钥：已存在则校验可解析，否则生成 2048 位密钥并以 0600 权限写入。
+func EnsurePrivateKeyFile(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		_, lErr := loadPrivateKeyFromFile(path)
+		return lErr
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("generate rsa key: %w", err)
+	}
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+	}
+	data := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	return f.Close()
 }
 
 func loadPrivateKeyFromFile(path string) (*rsa.PrivateKey, error) {
@@ -191,30 +244,47 @@ func (m *JWTManager) GenerateAccessTokenWithSession(userID uint64, username, ema
 
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	token.Header["kid"] = m.kid
+	token.Header["typ"] = accessTokenType
 	tokenStr, err = token.SignedString(m.privateKey)
 	return tokenStr, jti, expiresAt, err
 }
 
-// GenerateIDToken 签发 OIDC ID Token。
+// GenerateIDToken 签发 OIDC ID Token（包含全部资料声明，供内部兼容调用）。
 func (m *JWTManager) GenerateIDToken(userID uint64, username, email, displayName, avatarURL, clientID string, ttl time.Duration) (string, error) {
+	return m.GenerateIDTokenWithOptions(IDTokenOptions{
+		UserID:      userID,
+		ClientID:    clientID,
+		TTL:         ttl,
+		Username:    username,
+		DisplayName: displayName,
+		AvatarURL:   avatarURL,
+		Email:       email,
+	})
+}
+
+// GenerateIDTokenWithOptions 按授予的 scope 与请求 nonce 签发 OIDC ID Token。
+func (m *JWTManager) GenerateIDTokenWithOptions(opts IDTokenOptions) (string, error) {
 	m.mu.RLock()
 	defaultTTL := m.accessTTL
 	issuer := m.issuer
 	m.mu.RUnlock()
+	ttl := opts.TTL
 	if ttl <= 0 {
 		ttl = defaultTTL
 	}
 	now := time.Now()
 	claims := IDTokenClaims{
-		Username:        username,
-		Email:           email,
-		Name:            displayName,
-		Picture:         avatarURL,
-		AuthorizedParty: clientID,
+		Username:        opts.Username,
+		Email:           opts.Email,
+		EmailVerified:   opts.EmailVerified,
+		Name:            opts.DisplayName,
+		Picture:         opts.AvatarURL,
+		AuthorizedParty: opts.ClientID,
+		Nonce:           opts.Nonce,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    issuer,
-			Subject:   fmt.Sprintf("%d", userID),
-			Audience:  jwt.ClaimStrings{clientID},
+			Subject:   fmt.Sprintf("%d", opts.UserID),
+			Audience:  jwt.ClaimStrings{opts.ClientID},
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
 			ID:        uuid.NewString(),
@@ -222,17 +292,23 @@ func (m *JWTManager) GenerateIDToken(userID uint64, username, email, displayName
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	token.Header["kid"] = m.kid
+	token.Header["typ"] = idTokenType
 	return token.SignedString(m.privateKey)
 }
 
-// ParseAccessToken 验证并解析 Access Token。
+// ParseAccessToken 验证并解析 Access Token：只接受 RS256、typ=at+jwt 且签发者为本系统的令牌。
 func (m *JWTManager) ParseAccessToken(tokenStr string) (*AccessClaims, error) {
+	issuer := m.Issuer()
+	opts := []jwt.ParserOption{jwt.WithValidMethods([]string{jwt.SigningMethodRS256.Alg()})}
+	if issuer != "" {
+		opts = append(opts, jwt.WithIssuer(issuer))
+	}
 	token, err := jwt.ParseWithClaims(tokenStr, &AccessClaims{}, func(t *jwt.Token) (interface{}, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+		if typ, _ := t.Header["typ"].(string); typ != accessTokenType {
+			return nil, errors.New("not an access token")
 		}
 		return m.publicKey, nil
-	})
+	}, opts...)
 	if err != nil {
 		return nil, err
 	}

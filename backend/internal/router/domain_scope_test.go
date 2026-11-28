@@ -356,9 +356,10 @@ func TestManagementPathIsProtected(t *testing.T) {
 	var admin models.User
 	require.NoError(t, env.db.Where("username = ?", "admin").First(&admin).Error)
 
+	// 停用自己一律拒绝（先于"最后一个超管"判定）
 	w := doJSON(t, env.engine, http.MethodPut, fmt.Sprintf("/api/v1/users/%d", admin.ID),
 		map[string]string{"status": "disabled"}, adminToken)
-	assert.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 	var stillActive models.User
 	require.NoError(t, env.db.First(&stillActive, admin.ID).Error)
 	assert.Equal(t, "active", stillActive.Status)
@@ -386,10 +387,11 @@ func TestManagementPathIsProtected(t *testing.T) {
 	w = doJSON(t, env.engine, http.MethodDelete, fmt.Sprintf("/api/v1/domains/%d", mainDomain.ID), nil, adminToken)
 	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 
-	// 存在第二个超管后，停用原超管才被允许（放在最后：会吊销当前令牌）
+	// 存在第二个超管后，由第二个超管停用原超管才被允许（放在最后：会吊销原超管令牌）
 	createScopedUser(t, env, adminToken, "admin2", "admin2@openrealm.local", "Admin2@123456", "openiam", []string{"super_admin"})
+	admin2Token, _ := loginAs(t, env.engine, "admin2", "Admin2@123456")
 	w = doJSON(t, env.engine, http.MethodPut, fmt.Sprintf("/api/v1/users/%d", admin.ID),
-		map[string]string{"status": "disabled"}, adminToken)
+		map[string]string{"status": "disabled"}, admin2Token)
 	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
 }
 

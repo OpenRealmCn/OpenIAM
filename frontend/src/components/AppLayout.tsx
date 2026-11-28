@@ -174,9 +174,9 @@ const allSections: { title: string; userTitle?: string; items: NavItem[] }[] = [
 ];
 
 const TIER_META: Record<AdminTier, { label: string; color: 'secondary' | 'primary' | 'info' | 'default' }> = {
-  platform_admin: { label: '平台超管控制台', color: 'secondary' },
-  domain_admin: { label: '域管理员控制台', color: 'primary' },
-  auditor: { label: '安全审计控制台', color: 'info' },
+  platform_admin: { label: '平台管理', color: 'secondary' },
+  domain_admin: { label: '域管理', color: 'primary' },
+  auditor: { label: '安全审计', color: 'info' },
   user: { label: '用户工作台', color: 'default' },
 };
 
@@ -474,7 +474,7 @@ export const AppLayout: React.FC = () => {
                 renderInput={(params) => (
                   <TextField
                     {...params}
-                    placeholder="搜索页面..."
+                    placeholder="搜索页面"
                     onFocus={() => setSearchFocused(true)}
                     onBlur={() => setSearchFocused(false)}
                     InputProps={{

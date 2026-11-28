@@ -24,13 +24,13 @@ export const CapabilityGuard: React.FC<CapabilityGuardProps> = ({ cap, tiers, ch
       <Box sx={{ py: 8, textAlign: 'center', maxWidth: 460, mx: 'auto' }}>
         <FenceIcon sx={{ fontSize: 48, color: 'text.disabled', mb: 1.5 }} />
         <Typography variant="h6" fontWeight={700} mb={1}>
-          当前身份未开放此功能区域
+          没有访问权限
         </Typography>
         <Alert severity="info" sx={{ textAlign: 'left', mb: 2.5 }}>
-          您当前身份为「{adminTier === 'domain_admin' ? '域管理员' : adminTier === 'auditor' ? '安全审计员' : '普通用户'}」，暂未获得该页面的访问权限。
+          你当前的身份是「{adminTier === 'domain_admin' ? '域管理员' : adminTier === 'auditor' ? '审计员' : '普通用户'}」，无权访问此页面。如需访问，请联系管理员分配权限。
         </Alert>
         <Button variant="contained" onClick={() => navigate('/')}>
-          返回工作台首页
+          返回首页
         </Button>
       </Box>
     );

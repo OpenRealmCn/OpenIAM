@@ -77,6 +77,39 @@ func MatchesLegacyDefaultPassword(hash string) bool {
 	return false
 }
 
+// ValidatePasswordPolicy 按站点密码策略校验用户新设置的密码，错误信息可直接展示给用户。
+func ValidatePasswordPolicy(plain string, minLength int, requireComplexity bool) error {
+	if minLength < 8 {
+		minLength = 8
+	}
+	if utf8.RuneCountInString(plain) < minLength {
+		return fmt.Errorf("密码至少需要 %d 位", minLength)
+	}
+	if len(plain) > InitialPasswordMaxLength {
+		return errors.New("密码过长，请缩短后重试")
+	}
+	if requireComplexity {
+		var hasUpper, hasLower, hasDigit bool
+		for _, r := range plain {
+			switch {
+			case unicode.IsUpper(r):
+				hasUpper = true
+			case unicode.IsLower(r):
+				hasLower = true
+			case unicode.IsDigit(r):
+				hasDigit = true
+			}
+		}
+		if !hasUpper || !hasLower || !hasDigit {
+			return errors.New("密码需同时包含大写字母、小写字母和数字")
+		}
+	}
+	if IsLegacyDefaultPassword(plain) {
+		return errors.New("不能使用系统默认密码，请换一个")
+	}
+	return nil
+}
+
 // ValidateInitialPassword 校验空库初始化时提供的初始管理员口令是否满足策略。
 // 所有错误信息只描述规则，绝不包含口令明文。
 func ValidateInitialPassword(plain string) error {

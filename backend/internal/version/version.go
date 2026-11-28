@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	mysqldriver "github.com/go-sql-driver/mysql"
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/mysql"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
@@ -16,7 +17,7 @@ import (
 
 const (
 	AppVersion            = "0.1.0"
-	ExpectedSchemaVersion = uint(7)
+	ExpectedSchemaVersion = uint(8)
 )
 
 // Status 描述当前应用版本与数据库 Schema 版本状态。
@@ -37,7 +38,12 @@ func newIsolatedMigrator(dsn string) (*migrate.Migrate, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create iofs migration source: %w", err)
 	}
-	rawDB, err := sql.Open("mysql", dsn)
+	parsed, err := mysqldriver.ParseDSN(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("parse mysql dsn for migration: %w", err)
+	}
+	parsed.MultiStatements = true
+	rawDB, err := sql.Open("mysql", parsed.FormatDSN())
 	if err != nil {
 		return nil, fmt.Errorf("open mysql for migration: %w", err)
 	}
@@ -140,8 +146,20 @@ func AutoMigrateForTesting(db *gorm.DB) error {
 		&models.RiskEvent{},
 		&models.TempRoleGrant{},
 		&models.PluginInstance{},
+		&models.NotificationRead{},
 	); err != nil {
 		return err
+	}
+	// 与 MySQL 迁移 000008 等价的唯一约束：空值不参与，邮箱大小写不敏感（SQLite 使用部分索引表达）
+	if db.Dialector.Name() == "sqlite" {
+		for _, stmt := range []string{
+			"CREATE UNIQUE INDEX IF NOT EXISTS uk_users_email_norm ON users (LOWER(email)) WHERE email <> ''",
+			"CREATE UNIQUE INDEX IF NOT EXISTS uk_users_phone_norm ON users (phone) WHERE phone <> ''",
+		} {
+			if err := db.Exec(stmt).Error; err != nil {
+				return err
+			}
+		}
 	}
 	recordHistory(db, ExpectedSchemaVersion, "test_automigrate", "success", "测试环境初始化表结构")
 	return nil

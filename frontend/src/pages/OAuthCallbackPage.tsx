@@ -2,16 +2,25 @@ import React, { useEffect, useState } from 'react';
 import { Alert, Box, Button, Card, CardContent, CircularProgress, Stack, Typography } from '@mui/material';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
-import { useAuth } from '../context/AuthContext';
+import { LoginResponse, useAuth } from '../context/AuthContext';
+import { safeInternalPath } from '../utils/redirect';
+
+type CallbackResponse = LoginResponse & { bound?: boolean; provider?: string };
+
+const PROVIDER_ERRORS: Record<string, string> = {
+  access_denied: '你已取消授权，未完成登录',
+  temporarily_unavailable: '第三方登录服务暂时不可用，请稍后重试',
+  server_error: '第三方登录服务出错，请稍后重试',
+};
 
 // 对相同 (provider, state) 的回调请求去重，避免 React StrictMode 或父级重渲染触发二次消费一次性 state。
-const inflightCallbacks = new Map<string, Promise<{ access_token?: string }>>();
+const inflightCallbacks = new Map<string, Promise<CallbackResponse>>();
 
 export const OAuthCallbackPage: React.FC = () => {
   const { provider } = useParams<{ provider: string }>();
   const [searchParams] = useSearchParams();
   const [error, setError] = useState('');
-  const { user, completeOAuthLogin, refreshProfile } = useAuth();
+  const { user, applyLoginResponse, refreshProfile } = useAuth();
   const navigate = useNavigate();
 
   const code = searchParams.get('code');
@@ -22,11 +31,11 @@ export const OAuthCallbackPage: React.FC = () => {
     let active = true;
 
     if (errParam) {
-      setError(`身份源返回错误: ${errParam}`);
+      setError(PROVIDER_ERRORS[errParam] || '第三方登录未完成，请重试');
       return;
     }
     if (!provider || !code || !state) {
-      setError('回调缺少必要的 code 或 state 参数');
+      setError('登录链接无效或已过期，请重新发起登录');
       return;
     }
 
@@ -40,16 +49,23 @@ export const OAuthCallbackPage: React.FC = () => {
 
     req
       .then(async (data) => {
-        if (data?.access_token) {
-          await completeOAuthLogin(data.access_token);
-        } else {
-          await refreshProfile();
-        }
-        const target = localStorage.getItem('openiam_post_login_redirect') || '/';
+        const target = safeInternalPath(localStorage.getItem('openiam_post_login_redirect'));
         localStorage.removeItem('openiam_post_login_redirect');
-        if (active) {
-          navigate(target, { replace: true });
+
+        // 绑定流程不签发新令牌，沿用当前登录态
+        if (data?.bound) {
+          await refreshProfile();
+          if (active) navigate('/profile?tab=oauth&bound=1', { replace: true });
+          return;
         }
+
+        const step = await applyLoginResponse(data);
+        if (!active) return;
+        if (step.mfaRequired && step.mfaToken) {
+          navigate(`/login?redirect=${encodeURIComponent(target)}`, { replace: true, state: { mfaChallenge: step } });
+          return;
+        }
+        navigate(step.mustChangePassword ? '/change-password' : target, { replace: true });
       })
       .catch((err) => {
         inflightCallbacks.delete(key);
@@ -61,7 +77,7 @@ export const OAuthCallbackPage: React.FC = () => {
     return () => {
       active = false;
     };
-  }, [provider, code, state, errParam, completeOAuthLogin, refreshProfile, navigate]);
+  }, [provider, code, state, errParam, applyLoginResponse, refreshProfile, navigate]);
 
   return (
     <Box sx={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', p: 2 }}>
@@ -83,7 +99,7 @@ export const OAuthCallbackPage: React.FC = () => {
             ) : (
               <>
                 <CircularProgress />
-                <Typography variant="body1">正在完成 {provider} 联合身份验证...</Typography>
+                <Typography variant="body1">正在完成第三方账号登录…</Typography>
               </>
             )}
           </Stack>

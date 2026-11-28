@@ -7,21 +7,26 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/openrealm/openiam/internal/audit"
 	"github.com/openrealm/openiam/internal/middleware"
 	"github.com/openrealm/openiam/internal/models"
+	"github.com/openrealm/openiam/internal/notify"
 	"github.com/openrealm/openiam/internal/rbac"
 	"github.com/openrealm/openiam/internal/security"
+	"github.com/openrealm/openiam/internal/settings"
 	"gorm.io/gorm"
 )
 
 type UserHandler struct {
-	stateStore *security.StateStore
-	db         *gorm.DB
-	enforcer   *rbac.Enforcer
-	auditSvc   *audit.Service
+	stateStore  *security.StateStore
+	db          *gorm.DB
+	enforcer    *rbac.Enforcer
+	auditSvc    *audit.Service
+	notifySvc   *notify.Service
+	settingsSvc *settings.Service
 }
 
 func NewUserHandler(db *gorm.DB, enforcer *rbac.Enforcer, auditSvc *audit.Service, stateStore *security.StateStore) *UserHandler {
@@ -39,6 +44,19 @@ func (h *UserHandler) List(c *gin.Context) {
 	status := strings.TrimSpace(c.Query("status"))
 
 	q := h.db.Model(&models.User{})
+	// 非超管只能看到在本次办理域内有角色绑定的用户，否则单域管理员可读取全平台用户的联系方式与登录 IP。
+	if !isSuperAdmin(h.enforcer, CurrentUserID(c)) {
+		ids, err := h.userIDsInDomain(middleware.ResolveDomain(c))
+		if err != nil {
+			Fail(c, http.StatusInternalServerError, "查询用户归属失败")
+			return
+		}
+		if len(ids) == 0 {
+			OK(c, PagedResult{Items: []userWithRoles{}, Total: 0, Page: page, Size: size})
+			return
+		}
+		q = q.Where("id IN ?", ids)
+	}
 	if keyword != "" {
 		like := "%" + keyword + "%"
 		q = q.Where("username LIKE ? OR email LIKE ? OR phone LIKE ? OR display_name LIKE ?", like, like, like, like)
@@ -77,9 +95,34 @@ func (h *UserHandler) Get(c *gin.Context) {
 		Fail(c, http.StatusNotFound, "用户不存在")
 		return
 	}
+	if _, ok := requireTargetUserInDomain(c, h.enforcer, id, middleware.ResolveDomain(c)); !ok {
+		return
+	}
 	roles, _ := h.enforcer.GetAllUserRoles(user.ID)
 	roles = visibleRoles(c, h.enforcer, roles)
 	OK(c, userWithRoles{User: user, Roles: roles})
+}
+
+// userIDsInDomain 返回在 domain 内至少有一个角色绑定的用户 ID（去重）。
+func (h *UserHandler) userIDsInDomain(domain string) ([]uint64, error) {
+	groupings, err := h.enforcer.GetGroupingsForDomain(domain)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[uint64]struct{}, len(groupings))
+	ids := make([]uint64, 0, len(groupings))
+	for _, g := range groupings {
+		if len(g) == 0 {
+			continue
+		}
+		if id, ok := rbac.ParseUserIDFromSubject(g[0]); ok {
+			if _, dup := seen[id]; !dup {
+				seen[id] = struct{}{}
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids, nil
 }
 
 type createUserReq struct {
@@ -120,13 +163,19 @@ func validateAdminAvatarInput(raw string) string {
 func (h *UserHandler) Create(c *gin.Context) {
 	var req createUserReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		Fail(c, http.StatusBadRequest, "参数错误：用户名 3~64 位且不含 @，密码 8~72 位")
 		return
 	}
 
+	// users:write 是按请求域校验的，新用户的角色也必须落在同一个域，不能借 A 域的建号权限往 B 域塞人。
+	requestDomain := middleware.ResolveDomain(c)
 	roleDomain := strings.TrimSpace(req.DomainCode)
 	if roleDomain == "" {
-		roleDomain = middleware.ResolveDomain(c)
+		roleDomain = requestDomain
+	}
+	if roleDomain != requestDomain && !isSuperAdmin(h.enforcer, CurrentUserID(c)) {
+		Fail(c, http.StatusForbidden, "只能在当前办理的域内创建用户")
+		return
 	}
 	if len(req.RoleCodes) > 0 {
 		if !requireDomainPermission(c, h.enforcer, roleDomain, "roles", "write") {
@@ -146,8 +195,8 @@ func (h *UserHandler) Create(c *gin.Context) {
 	}
 
 	username := strings.TrimSpace(req.Username)
-	email := strings.ToLower(strings.TrimSpace(req.Email))
-	phone := strings.TrimSpace(req.Phone)
+	email := normalizeEmail(req.Email)
+	phone := normalizePhone(req.Phone)
 
 	if email != "" {
 		if addr, err := mail.ParseAddress(email); err != nil || !strings.EqualFold(addr.Address, email) {
@@ -181,9 +230,12 @@ func (h *UserHandler) Create(c *gin.Context) {
 		}
 	}
 
+	if !enforcePasswordPolicy(c, h.settingsSvc, req.Password) {
+		return
+	}
 	hash, err := security.HashPassword(req.Password)
 	if err != nil {
-		Fail(c, http.StatusInternalServerError, "密码加密失败")
+		Fail(c, http.StatusInternalServerError, "创建用户失败，请稍后重试")
 		return
 	}
 	status := req.Status
@@ -204,16 +256,19 @@ func (h *UserHandler) Create(c *gin.Context) {
 		Status:       status,
 	}
 	if err := h.db.Create(&user).Error; err != nil {
+		if isUniqueViolation(err) {
+			Fail(c, http.StatusConflict, "用户名、邮箱或手机号已存在")
+			return
+		}
 		Fail(c, http.StatusInternalServerError, "创建用户失败")
 		return
 	}
 
-	domain := req.DomainCode
-	if domain == "" {
-		domain = middleware.ResolveDomain(c)
-	}
+	domain := roleDomain
 	for _, rc := range req.RoleCodes {
-		_, _ = h.enforcer.AddRoleForUserInDomain(user.ID, rc, domain)
+		if rc = strings.TrimSpace(rc); rc != "" {
+			_, _ = h.enforcer.AddRoleForUserInDomain(user.ID, rc, domain)
+		}
 	}
 
 	h.auditSvc.RecordFromContext(c, audit.Entry{
@@ -276,7 +331,10 @@ func (h *UserHandler) Update(c *gin.Context) {
 	}
 
 	if req.Email != nil {
-		email := strings.ToLower(strings.TrimSpace(*req.Email))
+		email := normalizeEmail(*req.Email)
+		if email != user.Email {
+			user.EmailVerified = false
+		}
 		if email != "" {
 			if addr, mErr := mail.ParseAddress(email); mErr != nil || !strings.EqualFold(addr.Address, email) {
 				Fail(c, http.StatusBadRequest, "邮箱格式无效")
@@ -292,7 +350,7 @@ func (h *UserHandler) Update(c *gin.Context) {
 		user.Email = email
 	}
 	if req.Phone != nil {
-		phone := strings.TrimSpace(*req.Phone)
+		phone := normalizePhone(*req.Phone)
 		if phone != "" {
 			if !phonePattern.MatchString(phone) {
 				Fail(c, http.StatusBadRequest, "手机号格式无效，需为 6~20 位数字（可带国际区号前缀 +）")
@@ -308,7 +366,12 @@ func (h *UserHandler) Update(c *gin.Context) {
 		user.Phone = phone
 	}
 	if req.DisplayName != nil {
-		user.DisplayName = strings.TrimSpace(*req.DisplayName)
+		dn := strings.TrimSpace(*req.DisplayName)
+		if utf8.RuneCountInString(dn) > 64 {
+			Fail(c, http.StatusBadRequest, "显示名称不能超过 64 个字")
+			return
+		}
+		user.DisplayName = dn
 	}
 	if req.AvatarURL != nil {
 		avatar := strings.TrimSpace(*req.AvatarURL)
@@ -325,6 +388,10 @@ func (h *UserHandler) Update(c *gin.Context) {
 				Fail(c, http.StatusBadRequest, "无效的用户状态")
 				return
 			}
+			if st != "active" && id == CurrentUserID(c) {
+				Fail(c, http.StatusBadRequest, "不能停用当前登录的账号")
+				return
+			}
 			// 保护管理路径：不允许把平台上最后一个可用超管停用（包括操作者本人）。
 			if st != "active" && user.Status == "active" && isSuperAdmin(h.enforcer, id) {
 				if h.guardLastSuperAdmin(c, id, "不能停用最后一个可用的超级管理员") {
@@ -336,6 +403,10 @@ func (h *UserHandler) Update(c *gin.Context) {
 	}
 
 	if err := h.db.Save(&user).Error; err != nil {
+		if isUniqueViolation(err) {
+			Fail(c, http.StatusConflict, "该邮箱或手机号已被其他用户绑定")
+			return
+		}
 		Fail(c, http.StatusInternalServerError, "更新用户失败")
 		return
 	}
@@ -420,13 +491,7 @@ func (h *UserHandler) ResetPassword(c *gin.Context) {
 	if !decodeStrictJSON(c, &req) {
 		return
 	}
-	if n := len(req.NewPassword); n < 8 || n > 72 {
-		Fail(c, http.StatusBadRequest, "新密码需为 8~72 位")
-		return
-	}
-	var user models.User
-	if err := h.db.First(&user, id).Error; err != nil {
-		Fail(c, http.StatusNotFound, "用户不存在")
+	if !enforcePasswordPolicy(c, h.settingsSvc, req.NewPassword) {
 		return
 	}
 	// 超级管理员账号的密码绝不允许通过该接口重置（超管本人也不行）。
@@ -434,32 +499,13 @@ func (h *UserHandler) ResetPassword(c *gin.Context) {
 		Fail(c, http.StatusForbidden, "不允许重置超级管理员账号的密码")
 		return
 	}
-	// 密码是全局凭据：改一个跨域共享账号的密码等于动了别的域。
-	// 只有"角色绑定全部落在操作者域内"的账号，才允许由该域管理员重置；否则仅超管可重置。
-	bindings, bErr := userBindings(h.enforcer, id)
-	if bErr != nil {
-		Fail(c, http.StatusInternalServerError, "查询用户归属失败")
+	user, ok := h.loadCredentialTarget(c, id, "密码")
+	if !ok {
 		return
-	}
-	if !isSuperAdmin(h.enforcer, CurrentUserID(c)) {
-		dom := middleware.ResolveDomain(c)
-		if len(h.enforcer.GetRolesForUserInDomain(CurrentUserID(c), dom)) == 0 {
-			Fail(c, http.StatusForbidden, "无权在该域操作")
-			return
-		}
-		if len(bindings[dom]) == 0 {
-			denyTargetUserNotFound(c)
-			return
-		}
-		// 不在响应里列出其它域名：域管理员不应借此枚举他不该知道的域。
-		if outside := bindingsOutsideDomain(bindings, dom); len(outside) > 0 {
-			Fail(c, http.StatusForbidden, "该账号同时属于其它域，密码只能由超级管理员重置")
-			return
-		}
 	}
 	hash, err := security.HashPassword(req.NewPassword)
 	if err != nil {
-		Fail(c, http.StatusInternalServerError, "加密失败")
+		Fail(c, http.StatusInternalServerError, "重置密码失败，请稍后重试")
 		return
 	}
 	if err := h.db.Model(&user).Update("password_hash", hash).Error; err != nil {
@@ -478,6 +524,123 @@ func (h *UserHandler) ResetPassword(c *gin.Context) {
 		Fail(c, http.StatusInternalServerError, "密码已重置，但撤销旧会话失败，请重试")
 		return
 	}
+	notifySecurity(c, h.notifySvc, user.ID, "登录密码已被管理员重置", "管理员重置了你的登录密码，所有设备上的登录状态均已失效。请向管理员获取新密码，登录后尽快自行修改。")
+	OK(c, gin.H{"reset": true})
+}
+
+// loadCredentialTarget 加载要被管理员改动登录凭据（密码、两步验证、锁定状态）的目标账号并校验归属。
+// 凭据是全局的：动一个跨域共享账号的凭据等于动了别的域，所以只有"角色绑定全部落在操作者域内"
+// 的账号才允许由该域管理员处理，否则仅超管可处理。what 用于拼接错误提示。
+func (h *UserHandler) loadCredentialTarget(c *gin.Context, id uint64, what string) (models.User, bool) {
+	var user models.User
+	if err := h.db.First(&user, id).Error; err != nil {
+		Fail(c, http.StatusNotFound, "用户不存在")
+		return user, false
+	}
+	if isSuperAdmin(h.enforcer, CurrentUserID(c)) {
+		return user, true
+	}
+	bindings, bErr := userBindings(h.enforcer, id)
+	if bErr != nil {
+		Fail(c, http.StatusInternalServerError, "查询用户归属失败")
+		return user, false
+	}
+	dom := middleware.ResolveDomain(c)
+	if len(h.enforcer.GetRolesForUserInDomain(CurrentUserID(c), dom)) == 0 {
+		Fail(c, http.StatusForbidden, "无权在该域操作")
+		return user, false
+	}
+	if len(bindings[dom]) == 0 {
+		denyTargetUserNotFound(c)
+		return user, false
+	}
+	// 不在响应里列出其它域名：域管理员不应借此枚举他不该知道的域。
+	if outside := bindingsOutsideDomain(bindings, dom); len(outside) > 0 {
+		Fail(c, http.StatusForbidden, "该账号同时属于其它域，"+what+"只能由超级管理员处理")
+		return user, false
+	}
+	return user, true
+}
+
+// Unlock 解除账号因连续输错密码触发的临时锁定，并清零失败计数。
+func (h *UserHandler) Unlock(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		Fail(c, http.StatusBadRequest, "无效的用户 ID")
+		return
+	}
+	if isSuperAdmin(h.enforcer, id) && !isSuperAdmin(h.enforcer, CurrentUserID(c)) {
+		Fail(c, http.StatusForbidden, "超级管理员账号只能由超级管理员解锁")
+		return
+	}
+	user, ok := h.loadCredentialTarget(c, id, "锁定状态")
+	if !ok {
+		return
+	}
+	ctx := c.Request.Context()
+	// 失败计数同时按用户名和登录时输入的邮箱记录，两处都要清。
+	if err := h.stateStore.ClearLoginFailures(ctx, user.Username); err != nil {
+		Fail(c, http.StatusInternalServerError, "解锁失败，请稍后重试")
+		return
+	}
+	if user.Email != "" {
+		_ = h.stateStore.ClearLoginFailures(ctx, user.Email)
+		_ = h.stateStore.ClearLoginFailures(ctx, strings.ToLower(user.Email))
+	}
+	h.auditSvc.RecordFromContext(c, audit.Entry{
+		Action:       "user.unlock",
+		ResourceType: "user",
+		ResourceID:   fmt.Sprintf("%d", user.ID),
+		After:        map[string]interface{}{"username": user.Username},
+		Status:       "success",
+	})
+	OK(c, gin.H{"unlocked": true})
+}
+
+// ResetMFA 清除用户的身份验证器与恢复码，供用户丢失手机等情况下重新绑定。
+// 这会降低该账号的安全级别，所以要求操作者近期重新认证，并吊销该用户的全部会话。
+func (h *UserHandler) ResetMFA(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		Fail(c, http.StatusBadRequest, "无效的用户 ID")
+		return
+	}
+	if id == CurrentUserID(c) {
+		Fail(c, http.StatusBadRequest, "不能重置自己的两步验证，请在个人中心操作")
+		return
+	}
+	if isSuperAdmin(h.enforcer, id) && !isSuperAdmin(h.enforcer, CurrentUserID(c)) {
+		Fail(c, http.StatusForbidden, "超级管理员账号的两步验证只能由其他超级管理员重置")
+		return
+	}
+	user, ok := h.loadCredentialTarget(c, id, "两步验证")
+	if !ok {
+		return
+	}
+	if !requireReauth(c, h.db, h.stateStore) {
+		return
+	}
+	res := h.db.Where("user_id = ?", user.ID).Delete(&models.UserTOTP{})
+	if res.Error != nil {
+		Fail(c, http.StatusInternalServerError, "重置两步验证失败，请稍后重试")
+		return
+	}
+	if res.RowsAffected == 0 {
+		Fail(c, http.StatusBadRequest, "该用户未开启两步验证")
+		return
+	}
+	h.auditSvc.RecordFromContext(c, audit.Entry{
+		Action:       "user.reset_mfa",
+		ResourceType: "user",
+		ResourceID:   fmt.Sprintf("%d", user.ID),
+		After:        map[string]interface{}{"username": user.Username},
+		Status:       "success",
+	})
+	if err := h.stateStore.RevokeUserTokens(c.Request.Context(), user.ID); err != nil {
+		Fail(c, http.StatusInternalServerError, "两步验证已重置，但撤销旧会话失败，请重试")
+		return
+	}
+	notifySecurity(c, h.notifySvc, user.ID, "两步验证已被管理员重置", "管理员关闭了你账号的身份验证器两步验证，所有设备上的登录状态均已失效。登录后请尽快重新开启两步验证。")
 	OK(c, gin.H{"reset": true})
 }
 
@@ -564,7 +727,7 @@ func (h *UserHandler) AssignRoles(c *gin.Context) {
 
 	var req assignRolesReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		Fail(c, http.StatusBadRequest, "参数错误：需要 domain_code 与 role_codes")
 		return
 	}
 

@@ -35,7 +35,11 @@ func TestTOTPBindMFALoginAndRecoveryCode(t *testing.T) {
 	_ = adminToken
 	aliceToken, _ := loginAs(t, env.engine, "totpalice", "Alice@123456")
 
-	// 1. 生成 TOTP 密钥与 otpauth URI
+	// 1. 生成 TOTP 密钥与 otpauth URI（启用验证器前需重新认证）
+	noReauth := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/totp/setup", nil, aliceToken)
+	require.Equal(t, http.StatusForbidden, noReauth.Code)
+	reauthW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/reauth", map[string]string{"password": "Alice@123456"}, aliceToken)
+	require.Equal(t, http.StatusOK, reauthW.Code, reauthW.Body.String())
 	setupW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/totp/setup", nil, aliceToken)
 	require.Equal(t, http.StatusOK, setupW.Code, setupW.Body.String())
 	var setupResp struct {
@@ -80,6 +84,23 @@ func TestTOTPBindMFALoginAndRecoveryCode(t *testing.T) {
 	require.NoError(t, json.Unmarshal(loginW.Body.Bytes(), &mfaResp))
 	require.True(t, mfaResp.Data.MFARequired)
 	require.NotEmpty(t, mfaResp.Data.MFAToken)
+	assert.ElementsMatch(t, []string{"totp", "recovery_code"}, mfaResp.Data.Methods, "启用 TOTP 的账号不得提供邮件/短信替代方式")
+
+	// 已启用 TOTP 时不能改用邮件验证码完成二步验证
+	emailW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/mfa/verify", map[string]string{
+		"mfa_token": mfaResp.Data.MFAToken,
+		"method":    "email_otp",
+		"code":      "123456",
+	}, "")
+	assert.Equal(t, http.StatusBadRequest, emailW.Code)
+
+	// 绑定时用过的动态码不能在同一时间窗内再次使用
+	replayW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/mfa/verify", map[string]string{
+		"mfa_token": mfaResp.Data.MFAToken,
+		"method":    "totp",
+		"code":      code,
+	}, "")
+	assert.Equal(t, http.StatusUnauthorized, replayW.Code)
 
 	// 4. 使用一次性恢复码通过 MFA，第二次再使用同一个恢复码应失败
 	mfaW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/mfa/verify", map[string]string{
@@ -90,12 +111,29 @@ func TestTOTPBindMFALoginAndRecoveryCode(t *testing.T) {
 	require.Equal(t, http.StatusOK, mfaW.Code, mfaW.Body.String())
 	assert.Contains(t, mfaW.Body.String(), `"access_token"`)
 
-	// 验证解绑
-	freshCode, _ := totp.GenerateCode(setupResp.Data.Secret, time.Now())
-	unbindW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/totp/unbind", map[string]string{
-		"code": freshCode,
+	// 同一 mfa_token 只能换取一次会话
+	againW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/mfa/verify", map[string]string{
+		"mfa_token": mfaResp.Data.MFAToken,
+		"method":    "recovery_code",
+		"code":      bindResp.Data.RecoveryCodes[1],
+	}, "")
+	assert.Equal(t, http.StatusBadRequest, againW.Code)
+
+	// 解绑必须同时提供密码与第二因子，仅密码不足以关闭二步验证
+	pwOnly := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/totp/unbind", map[string]string{
+		"password": "Alice@123456",
 	}, aliceToken)
-	require.Equal(t, http.StatusOK, unbindW.Code)
+	assert.Equal(t, http.StatusBadRequest, pwOnly.Code)
+	usedRecovery := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/totp/unbind", map[string]string{
+		"password": "Alice@123456",
+		"code":     bindResp.Data.RecoveryCodes[0],
+	}, aliceToken)
+	assert.Equal(t, http.StatusBadRequest, usedRecovery.Code, "已使用的恢复码不能再次使用")
+	unbindW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/totp/unbind", map[string]string{
+		"password": "Alice@123456",
+		"code":     bindResp.Data.RecoveryCodes[2],
+	}, aliceToken)
+	require.Equal(t, http.StatusOK, unbindW.Code, unbindW.Body.String())
 }
 
 func TestOTPRateLimitCostAlertAndDegradation(t *testing.T) {
@@ -149,8 +187,18 @@ func TestOTPRateLimitCostAlertAndDegradation(t *testing.T) {
 		"channel": "sms",
 		"target":  "+8613800001111",
 	}, "")
-	assert.Equal(t, http.StatusBadRequest, send2.Code)
+	assert.Equal(t, http.StatusTooManyRequests, send2.Code)
 	assert.Contains(t, send2.Body.String(), "频繁")
+
+	// 未注册的地址同样受冷却约束，响应与已注册地址一致，不能据此枚举手机号
+	ghost1 := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/otp/send", map[string]string{
+		"scene": "login", "channel": "sms", "target": "+8613899998888",
+	}, "")
+	require.Equal(t, http.StatusOK, ghost1.Code)
+	ghost2 := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/otp/send", map[string]string{
+		"scene": "login", "channel": "sms", "target": "+86 138-9999-8888",
+	}, "")
+	assert.Equal(t, http.StatusTooManyRequests, ghost2.Code, "手机号归一化后应命中同一频控键")
 }
 
 func TestRiskAdaptiveSessionsAndCapLocalPlugin(t *testing.T) {
@@ -203,7 +251,7 @@ func TestRiskAdaptiveSessionsAndCapLocalPlugin(t *testing.T) {
 
 	msgW := doJSON(t, env.engine, http.MethodGet, "/api/v1/notifications?category=system_message", nil, tokA.Data.AccessToken)
 	require.Equal(t, http.StatusOK, msgW.Code)
-	assert.Contains(t, msgW.Body.String(), "账号安全提醒")
+	assert.Contains(t, msgW.Body.String(), "发现一次异常登录")
 
 	// 查询在线会话，并单会话下线其中之一，验证该令牌立即失效
 	sessW := doJSON(t, env.engine, http.MethodGet, "/api/v1/auth/sessions", nil, tokA.Data.AccessToken)
@@ -454,14 +502,30 @@ func TestOAuthPKCEFalseUserEditAndRegisterOTPSettings(t *testing.T) {
 	env := setupTestEnv(t, "")
 	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
 
-	// 1. 管理员关闭 RequirePKCE 与 IsConfidential 创建应用，应真实落库为 false 且 /oauth2/authorize 不强制 code_challenge
+	// 1. 公共客户端无法保管密钥，关闭 PKCE 必须被拒绝；危险协议的回调地址同样被拒绝
+	publicNoPKCE := doJSON(t, env.engine, http.MethodPost, "/api/v1/oauth-clients", map[string]any{
+		"name":            "PublicNoPKCE",
+		"domain_code":     rbac.DefaultDomain,
+		"redirect_uris":   []string{"https://app.example.com/cb"},
+		"require_pkce":    false,
+		"is_confidential": false,
+	}, adminToken)
+	require.Equal(t, http.StatusBadRequest, publicNoPKCE.Code, publicNoPKCE.Body.String())
+	jsRedirect := doJSON(t, env.engine, http.MethodPost, "/api/v1/oauth-clients", map[string]any{
+		"name":          "JSRedirect",
+		"domain_code":   rbac.DefaultDomain,
+		"redirect_uris": []string{"javascript:alert(document.cookie)"},
+	}, adminToken)
+	require.Equal(t, http.StatusBadRequest, jsRedirect.Code, jsRedirect.Body.String())
+
+	// 机密客户端可以关闭 RequirePKCE：应真实落库为 false 且 /oauth2/authorize 不强制 code_challenge
 	createW := doJSON(t, env.engine, http.MethodPost, "/api/v1/oauth-clients", map[string]any{
 		"name":            "NoPKCEApp",
 		"domain_code":     rbac.DefaultDomain,
 		"redirect_uris":   []string{"https://app.example.com/cb"},
 		"scopes":          []string{"openid", "profile", "email"},
 		"require_pkce":    false,
-		"is_confidential": false,
+		"is_confidential": true,
 	}, adminToken)
 	require.Equal(t, http.StatusCreated, createW.Code, createW.Body.String())
 	var createResp struct {
@@ -472,8 +536,8 @@ func TestOAuthPKCEFalseUserEditAndRegisterOTPSettings(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(createW.Body.Bytes(), &createResp))
 	assert.False(t, createResp.Data.Client.RequirePKCE, "require_pkce=false must be persisted")
-	assert.False(t, createResp.Data.Client.IsConfidential)
-	assert.Empty(t, createResp.Data.ClientSecret)
+	assert.True(t, createResp.Data.Client.IsConfidential)
+	assert.NotEmpty(t, createResp.Data.ClientSecret)
 
 	reqAuth := httptest.NewRequest(http.MethodGet,
 		fmt.Sprintf("/oauth2/authorize?response_type=code&client_id=%s&redirect_uri=https://app.example.com/cb&scope=openid&state=s1",
@@ -504,7 +568,13 @@ func TestOAuthPKCEFalseUserEditAndRegisterOTPSettings(t *testing.T) {
 	assert.Equal(t, "NoPKCEApp-Edited", updAppResp.Data.Name)
 	assert.True(t, updAppResp.Data.RequirePKCE)
 	assert.True(t, updAppResp.Data.IsConfidential)
-	assert.NotEmpty(t, updAppResp.Data.ClientSecret)
+
+	// 编辑为公共客户端同时关闭 PKCE 必须被拒绝
+	toPublic := doJSON(t, env.engine, http.MethodPut, fmt.Sprintf("/api/v1/oauth-clients/%d", createResp.Data.Client.ID), map[string]any{
+		"require_pkce":    false,
+		"is_confidential": false,
+	}, adminToken)
+	assert.Equal(t, http.StatusBadRequest, toPublic.Code, toPublic.Body.String())
 
 	// 2. 普通用户创建与编辑自有应用（关闭 PKCE）
 	doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/register", map[string]string{

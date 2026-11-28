@@ -110,6 +110,14 @@ func main() {
 	defer func() { _ = rdb.Close() }()
 	logger.Info("Redis connected", zap.String("redis", cfg.Redis.Addr))
 
+	// 敏感字段加密密钥必须在加载系统设置之前就绪：SMTP 密码等密文在 Reload 时解密。
+	if err := security.SetDataEncryptionKey(cfg.JWT.DataEncryptionKey); err != nil {
+		logger.Fatal("invalid OPENIAM_DATA_ENCRYPTION_KEY", zap.Error(err))
+	}
+	if !security.DataEncryptionEnabled() {
+		logger.Warn("OPENIAM_DATA_ENCRYPTION_KEY is not set: TOTP secrets, identity provider secrets, SMTP password and plugin secrets are stored in plaintext")
+	}
+
 	// 从数据库初始化与加载系统运行时配置
 	settingsSvc, err := settings.NewService(db)
 	if err != nil {
@@ -117,9 +125,18 @@ func main() {
 	}
 	snap := settingsSvc.Snapshot()
 
+	keyPath := cfg.JWT.PrivateKeyPath
+	if keyPath == "" && cfg.JWT.AutoKeyPath != "" {
+		if kErr := security.EnsurePrivateKeyFile(cfg.JWT.AutoKeyPath); kErr != nil {
+			logger.Warn("cannot persist auto-generated JWT signing key; tokens will be invalidated on every restart",
+				zap.String("path", cfg.JWT.AutoKeyPath), zap.Error(kErr))
+		} else {
+			keyPath = cfg.JWT.AutoKeyPath
+		}
+	}
 	jwtMgr, err := security.NewJWTManager(
 		snap.JWTIssuer,
-		cfg.JWT.PrivateKeyPath,
+		keyPath,
 		snap.JWTAccessTTL,
 	)
 	if err != nil {

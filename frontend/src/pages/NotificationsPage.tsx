@@ -28,6 +28,7 @@ import {
   Campaign as AnnounceIcon,
   DoneAll as DoneAllIcon,
   Edit as EditIcon,
+  GppMaybe as SecurityIcon,
   NotificationsActive as NotifIcon,
   ReportProblem as BounceIcon,
   Visibility as PreviewIcon,
@@ -71,10 +72,12 @@ export const NotificationsPage: React.FC = () => {
 
   // 发布全员公告弹窗
   const [annOpen, setAnnOpen] = useState(false);
+  const [annError, setAnnError] = useState('');
   const [annForm, setAnnForm] = useState({ title: '', content: '', level: 'info' });
 
   // 模板编辑与预览弹窗
   const [tplOpen, setTplOpen] = useState(false);
+  const [tplError, setTplError] = useState('');
   const [editingTpl, setEditingTpl] = useState<NotificationTemplate | null>(null);
   const [tplForm, setTplForm] = useState({
     code: '',
@@ -89,6 +92,7 @@ export const NotificationsPage: React.FC = () => {
 
   // 退信标记弹窗
   const [bounceTarget, setBounceTarget] = useState<NotificationDelivery | null>(null);
+  const [bounceError, setBounceError] = useState('');
   const [bounceReason, setBounceReason] = useState('收件地址不存在或拒收');
 
   const loadInbox = useCallback(async () => {
@@ -125,29 +129,40 @@ export const NotificationsPage: React.FC = () => {
   }, [loadInbox, loadTemplates, loadDeliveries]);
 
   const handleMarkRead = async (id: number) => {
-    await api.notifications.markRead(id);
-    await Promise.all([loadInbox(), refreshUnreadCount()]);
-  };
-
-  const handleReadAll = async () => {
-    await api.notifications.markAllRead();
-    await Promise.all([loadInbox(), refreshUnreadCount()]);
-  };
-
-  const handlePublishAnnouncement = async () => {
     setError('');
     try {
-      await api.notifications.createAnnouncement(annForm);
-      setAnnOpen(false);
-      setAnnForm({ title: '', content: '', level: 'info' });
-      setSuccess('已发布全员系统公告');
-      await Promise.all([loadInbox(), refreshUnreadCount()]);
+      await api.notifications.markRead(id);
+      await Promise.all([loadInbox(), refreshUnreadCount?.()]);
     } catch (err) {
       setError((err as Error).message);
     }
   };
 
+  const handleReadAll = async () => {
+    setError('');
+    try {
+      await api.notifications.markAllRead();
+      await Promise.all([loadInbox(), refreshUnreadCount?.()]);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const handlePublishAnnouncement = async () => {
+    setAnnError('');
+    try {
+      await api.notifications.createAnnouncement(annForm);
+      setAnnOpen(false);
+      setAnnForm({ title: '', content: '', level: 'info' });
+      setSuccess('已发布全员系统公告。');
+      await Promise.all([loadInbox(), refreshUnreadCount?.()]);
+    } catch (err) {
+      setAnnError((err as Error).message);
+    }
+  };
+
   const openEditTemplate = (tpl?: NotificationTemplate) => {
+    setTplError('');
     setPreviewResult(null);
     if (tpl) {
       setEditingTpl(tpl);
@@ -168,6 +183,7 @@ export const NotificationsPage: React.FC = () => {
   };
 
   const handleSaveTemplate = async () => {
+    setTplError('');
     const vars = tplForm.variablesText
       .split(',')
       .map((s) => s.trim())
@@ -188,36 +204,43 @@ export const NotificationsPage: React.FC = () => {
         await api.notifications.createTemplate(payload);
       }
       setTplOpen(false);
-      setSuccess('消息模板已保存');
+      setSuccess('消息模板已保存。');
       await loadTemplates();
     } catch (err) {
-      setError((err as Error).message);
+      setTplError((err as Error).message);
     }
   };
 
   const handlePreviewTemplate = async () => {
+    setTplError('');
     const vars: Record<string, string> = {};
     for (const k of tplForm.variablesText.split(',').map((s) => s.trim()).filter(Boolean)) {
       vars[k] = k === 'code' ? '824619' : `[示例_${k}]`;
     }
-    const res = await api.notifications.previewTemplate({ subject: tplForm.subject, body: tplForm.body, vars });
-    setPreviewResult(res);
+    try {
+      const res = await api.notifications.previewTemplate({ subject: tplForm.subject, body: tplForm.body, vars });
+      setPreviewResult(res);
+    } catch (err) {
+      setTplError((err as Error).message);
+    }
   };
 
   const handleOpenBounce = (row: NotificationDelivery) => {
+    setBounceError('');
     setBounceTarget(row);
     setBounceReason('收件地址不存在或拒收');
   };
 
   const handleConfirmBounced = async () => {
     if (!bounceTarget || !bounceReason.trim()) return;
+    setBounceError('');
     try {
       await api.notifications.markBounced(bounceTarget.id, bounceReason.trim());
       setBounceTarget(null);
-      setSuccess('已标记退信并触发管理员通知');
-      await Promise.all([loadDeliveries(), loadInbox(), refreshUnreadCount()]);
+      setSuccess('已标记退信并触发管理员通知。');
+      await Promise.all([loadDeliveries(), loadInbox(), refreshUnreadCount?.()]);
     } catch (err) {
-      setError((err as Error).message);
+      setBounceError((err as Error).message);
     }
   };
 
@@ -226,7 +249,7 @@ export const NotificationsPage: React.FC = () => {
       field: 'channel',
       headerName: '通道',
       width: 90,
-      valueFormatter: (v) => CHANNEL_LABELS[v as string] || String(v || '-'),
+      valueFormatter: (v) => CHANNEL_LABELS[v as string] || String(v || '—'),
     },
     { field: 'template_code', headerName: '模板', width: 130 },
     { field: 'recipient', headerName: '接收方', width: 200 },
@@ -241,13 +264,13 @@ export const NotificationsPage: React.FC = () => {
       },
     },
     { field: 'provider_name', headerName: '发送通道', width: 130 },
-    { field: 'cost_cents', headerName: '费用(分)', width: 90 },
-    { field: 'bounce_reason', headerName: '错误/退信原因', flex: 1, minWidth: 180, valueGetter: (_, r) => r.bounce_reason || r.error_message || '-' },
+    { field: 'cost_cents', headerName: '费用（分）', width: 100 },
+    { field: 'bounce_reason', headerName: '错误 / 退信原因', flex: 1, minWidth: 180, valueGetter: (_, r) => r.bounce_reason || r.error_message || '—' },
     {
       field: 'created_at',
       headerName: '时间',
       width: 155,
-      valueFormatter: (v) => (v ? dayjs(v as string).format('YYYY-MM-DD HH:mm') : '-'),
+      valueFormatter: (v) => (v ? dayjs(v as string).format('YYYY-MM-DD HH:mm') : '—'),
     },
     {
       field: 'actions',
@@ -264,13 +287,13 @@ export const NotificationsPage: React.FC = () => {
   const pageTitle = isPlatformAdmin
     ? '通知中心与模板管理'
     : adminTier === 'domain_admin' || adminTier === 'auditor'
-      ? '消息通知中心'
+      ? '通知中心'
       : '消息中心';
   const pageSubtitle = isPlatformAdmin
-    ? '管理全员系统公告、多通道消息模板及发送记录与退信处理'
+    ? '管理全员系统公告、多通道消息模板以及发送记录与退信处理。'
     : adminTier === 'domain_admin' || adminTier === 'auditor'
-      ? '查看账号安全提醒、系统公告与管理通知'
-      : '查看您的账号安全提醒、个人消息与平台公告';
+      ? '查看账号安全提醒、系统公告与管理通知。'
+      : '查看您的账号安全提醒、个人消息与系统公告。';
 
   return (
     <Box>
@@ -286,7 +309,14 @@ export const NotificationsPage: React.FC = () => {
         </Box>
         {isPlatformAdmin && (
           <Stack direction="row" spacing={1.2}>
-            <Button variant="outlined" startIcon={<AnnounceIcon />} onClick={() => setAnnOpen(true)}>
+            <Button
+              variant="outlined"
+              startIcon={<AnnounceIcon />}
+              onClick={() => {
+                setAnnError('');
+                setAnnOpen(true);
+              }}
+            >
               发布系统公告
             </Button>
             {tab === 'templates' && (
@@ -298,8 +328,16 @@ export const NotificationsPage: React.FC = () => {
         )}
       </Stack>
 
-      {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>{error}</Alert>}
-      {success && <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSuccess('')}>{success}</Alert>}
+      {error && (
+        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
+          {error}
+        </Alert>
+      )}
+      {success && (
+        <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSuccess('')}>
+          {success}
+        </Alert>
+      )}
 
       <Card>
         {isPlatformAdmin && (
@@ -314,7 +352,7 @@ export const NotificationsPage: React.FC = () => {
           {tab === 'inbox' && (
             <Box>
               <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={1} mb={2}>
-                <Stack direction="row" spacing={1} flexWrap="wrap">
+                <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
                   {[
                     { key: 'all', label: '全部' },
                     { key: 'system_message', label: '系统消息' },
@@ -330,71 +368,93 @@ export const NotificationsPage: React.FC = () => {
                     />
                   ))}
                 </Stack>
-                <Button size="small" startIcon={<DoneAllIcon />} onClick={handleReadAll}>
+                <Button size="small" startIcon={<DoneAllIcon />} onClick={() => void handleReadAll()}>
                   全部标为已读
                 </Button>
               </Stack>
 
               {items.length === 0 ? (
-                <Alert severity="info">当前分类暂无通知记录</Alert>
+                <Alert severity="info">暂无通知</Alert>
               ) : (
                 <Stack spacing={1.5}>
-                  {items.map((item) => (
-                    <Card key={item.id} variant="outlined" sx={{ opacity: item.is_read ? 0.72 : 1 }}>
-                      <CardContent sx={{ py: 1.6, '&:last-child': { pb: 1.6 } }}>
-                        <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={2}>
-                          <Box>
-                            <Stack direction="row" spacing={1} alignItems="center" mb={0.5}>
-                              <Chip
-                                size="small"
-                                label={CATEGORY_LABELS[item.category] || item.category}
-                                color={item.level === 'security' || item.level === 'error' ? 'error' : item.level === 'warning' ? 'warning' : 'primary'}
-                              />
-                              <Typography variant="subtitle2" fontWeight={700}>{item.title}</Typography>
-                              {!item.is_read && <Chip size="small" color="error" variant="outlined" label="未读" />}
-                            </Stack>
-                            <Typography variant="body2" color="text.secondary">{item.content}</Typography>
-                            <Typography variant="caption" color="text.disabled" display="block" mt={0.5}>
-                              {dayjs(item.created_at).format('YYYY-MM-DD HH:mm:ss')}
-                            </Typography>
-                          </Box>
-                          {!item.is_read && (
-                            <Button size="small" onClick={() => handleMarkRead(item.id)}>标为已读</Button>
-                          )}
-                        </Stack>
-                      </CardContent>
-                    </Card>
-                  ))}
+                  {items.map((item) => {
+                    const isSecurity = item.level === 'security';
+                    return (
+                      <Card key={item.id} variant="outlined" sx={{ opacity: item.is_read ? 0.72 : 1 }}>
+                        <CardContent sx={{ py: 1.6, '&:last-child': { pb: 1.6 } }}>
+                          <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={2}>
+                            <Box sx={{ flex: 1, minWidth: 0 }}>
+                              <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap mb={0.5}>
+                                {isSecurity ? (
+                                  <Chip
+                                    size="small"
+                                    icon={<SecurityIcon sx={{ fontSize: 15 }} />}
+                                    label="安全提醒"
+                                    color="error"
+                                  />
+                                ) : (
+                                  <Chip
+                                    size="small"
+                                    label={CATEGORY_LABELS[item.category] || item.category}
+                                    color={item.level === 'error' ? 'error' : item.level === 'warning' ? 'warning' : 'primary'}
+                                  />
+                                )}
+                                <Typography variant="subtitle2" fontWeight={700}>
+                                  {item.title}
+                                </Typography>
+                                {!item.is_read && <Chip size="small" color="error" variant="outlined" label="未读" />}
+                              </Stack>
+                              <Typography variant="body2" color="text.secondary" sx={{ whiteSpace: 'pre-line' }}>
+                                {item.content}
+                              </Typography>
+                              <Typography variant="caption" color="text.disabled" display="block" mt={0.5}>
+                                {dayjs(item.created_at).format('YYYY-MM-DD HH:mm:ss')}
+                              </Typography>
+                            </Box>
+                            {!item.is_read && (
+                              <Button size="small" sx={{ flexShrink: 0 }} onClick={() => void handleMarkRead(item.id)}>
+                                标为已读
+                              </Button>
+                            )}
+                          </Stack>
+                        </CardContent>
+                      </Card>
+                    );
+                  })}
                 </Stack>
               )}
             </Box>
           )}
 
           {tab === 'templates' && isPlatformAdmin && (
-            <Stack spacing={2}>
-              {templates.map((tpl) => (
-                <Card key={tpl.id} variant="outlined">
-                  <CardContent sx={{ py: 1.8, '&:last-child': { pb: 1.8 } }}>
-                    <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} spacing={1.5}>
-                      <Box>
-                        <Stack direction="row" spacing={1} alignItems="center">
-                          <Typography variant="subtitle2" fontWeight={700}>{tpl.name}</Typography>
-                          <Chip size="small" label={tpl.code} sx={{ fontFamily: 'monospace' }} />
-                          <Chip size="small" color="info" variant="outlined" label={CHANNEL_LABELS[tpl.channel] || tpl.channel} />
-                          <Chip size="small" color={tpl.enabled ? 'success' : 'default'} label={tpl.enabled ? '启用' : '停用'} />
-                        </Stack>
-                        <Typography variant="caption" color="text.secondary" display="block" mt={0.5}>
-                          变量：{(tpl.variables || []).map((v) => `{{${v}}}`).join(' ') || '无'}
-                        </Typography>
-                      </Box>
-                      <Button size="small" startIcon={<EditIcon />} variant="outlined" onClick={() => openEditTemplate(tpl)}>
-                        编辑与预览
-                      </Button>
-                    </Stack>
-                  </CardContent>
-                </Card>
-              ))}
-            </Stack>
+            templates.length === 0 ? (
+              <Alert severity="info">暂无消息模板</Alert>
+            ) : (
+              <Stack spacing={2}>
+                {templates.map((tpl) => (
+                  <Card key={tpl.id} variant="outlined">
+                    <CardContent sx={{ py: 1.8, '&:last-child': { pb: 1.8 } }}>
+                      <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} spacing={1.5}>
+                        <Box>
+                          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                            <Typography variant="subtitle2" fontWeight={700}>{tpl.name}</Typography>
+                            <Chip size="small" label={tpl.code} sx={{ fontFamily: 'monospace' }} />
+                            <Chip size="small" color="info" variant="outlined" label={CHANNEL_LABELS[tpl.channel] || tpl.channel} />
+                            <Chip size="small" color={tpl.enabled ? 'success' : 'default'} label={tpl.enabled ? '已启用' : '已停用'} />
+                          </Stack>
+                          <Typography variant="caption" color="text.secondary" display="block" mt={0.5}>
+                            变量：{(tpl.variables || []).map((v) => `{{${v}}}`).join(' ') || '无'}
+                          </Typography>
+                        </Box>
+                        <Button size="small" startIcon={<EditIcon />} variant="outlined" onClick={() => openEditTemplate(tpl)}>
+                          编辑与预览
+                        </Button>
+                      </Stack>
+                    </CardContent>
+                  </Card>
+                ))}
+              </Stack>
+            )
           )}
 
           {tab === 'deliveries' && isPlatformAdmin && (
@@ -410,13 +470,18 @@ export const NotificationsPage: React.FC = () => {
         <DialogTitle>发布全员系统公告</DialogTitle>
         <DialogContent>
           <Stack spacing={2} mt={1}>
+            {annError && (
+              <Alert severity="error" onClose={() => setAnnError('')}>
+                {annError}
+              </Alert>
+            )}
             <TextField label="公告标题" size="small" fullWidth value={annForm.title} onChange={(e) => setAnnForm({ ...annForm, title: e.target.value })} />
             <FormControl size="small" fullWidth>
               <InputLabel>级别</InputLabel>
               <Select label="级别" value={annForm.level} onChange={(e) => setAnnForm({ ...annForm, level: e.target.value })}>
                 <MenuItem value="info">普通通知</MenuItem>
                 <MenuItem value="warning">维护警告</MenuItem>
-                <MenuItem value="security">安全公告</MenuItem>
+                <MenuItem value="security">安全提醒</MenuItem>
               </Select>
             </FormControl>
             <TextField label="公告正文" size="small" fullWidth multiline minRows={4} value={annForm.content} onChange={(e) => setAnnForm({ ...annForm, content: e.target.value })} />
@@ -424,7 +489,7 @@ export const NotificationsPage: React.FC = () => {
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
           <Button onClick={() => setAnnOpen(false)}>取消</Button>
-          <Button variant="contained" onClick={handlePublishAnnouncement}>立即发布</Button>
+          <Button variant="contained" onClick={() => void handlePublishAnnouncement()}>立即发布</Button>
         </DialogActions>
       </Dialog>
 
@@ -433,6 +498,11 @@ export const NotificationsPage: React.FC = () => {
         <DialogTitle>{editingTpl ? `编辑模板：${editingTpl.code}` : '新建消息模板'}</DialogTitle>
         <DialogContent>
           <Stack spacing={2} mt={1}>
+            {tplError && (
+              <Alert severity="error" onClose={() => setTplError('')}>
+                {tplError}
+              </Alert>
+            )}
             <TextField label="模板编码" size="small" fullWidth disabled={Boolean(editingTpl)} value={tplForm.code} onChange={(e) => setTplForm({ ...tplForm, code: e.target.value })} />
             <TextField label="模板名称" size="small" fullWidth value={tplForm.name} onChange={(e) => setTplForm({ ...tplForm, name: e.target.value })} />
             <FormControl size="small" fullWidth>
@@ -445,24 +515,24 @@ export const NotificationsPage: React.FC = () => {
             </FormControl>
             <TextField label="主题 / 标题" size="small" fullWidth value={tplForm.subject} onChange={(e) => setTplForm({ ...tplForm, subject: e.target.value })} />
             <TextField label="正文（支持 {{变量名}} 占位符）" size="small" fullWidth multiline minRows={4} value={tplForm.body} onChange={(e) => setTplForm({ ...tplForm, body: e.target.value })} />
-            <TextField label="变量清单（逗号分隔）" size="small" fullWidth value={tplForm.variablesText} onChange={(e) => setTplForm({ ...tplForm, variablesText: e.target.value })} />
+            <TextField label="变量清单（以英文逗号分隔）" size="small" fullWidth value={tplForm.variablesText} onChange={(e) => setTplForm({ ...tplForm, variablesText: e.target.value })} />
             <FormControlLabel control={<Switch checked={tplForm.enabled} onChange={(e) => setTplForm({ ...tplForm, enabled: e.target.checked })} />} label="启用模板" />
             {previewResult && (
               <>
                 <Divider />
                 <Alert severity="info">
                   <Typography variant="subtitle2" fontWeight={700}>{previewResult.subject}</Typography>
-                  <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', mt: 0.5 }}>{previewResult.body}</Typography>
+                  <Typography variant="body2" sx={{ whiteSpace: 'pre-line', mt: 0.5 }}>{previewResult.body}</Typography>
                 </Alert>
               </>
             )}
           </Stack>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button startIcon={<PreviewIcon />} onClick={handlePreviewTemplate}>变量渲染预览</Button>
+          <Button startIcon={<PreviewIcon />} onClick={() => void handlePreviewTemplate()}>预览效果</Button>
           <Box sx={{ flex: 1 }} />
           <Button onClick={() => setTplOpen(false)}>取消</Button>
-          <Button variant="contained" onClick={handleSaveTemplate}>保存模板</Button>
+          <Button variant="contained" onClick={() => void handleSaveTemplate()}>保存模板</Button>
         </DialogActions>
       </Dialog>
 
@@ -471,6 +541,11 @@ export const NotificationsPage: React.FC = () => {
         <DialogTitle>标记投递退信</DialogTitle>
         <DialogContent>
           <Stack spacing={2} mt={1}>
+            {bounceError && (
+              <Alert severity="error" onClose={() => setBounceError('')}>
+                {bounceError}
+              </Alert>
+            )}
             <Typography variant="body2" color="text.secondary">
               接收方：{bounceTarget?.recipient}
             </Typography>
@@ -487,7 +562,7 @@ export const NotificationsPage: React.FC = () => {
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
           <Button onClick={() => setBounceTarget(null)}>取消</Button>
-          <Button color="warning" variant="contained" onClick={handleConfirmBounced} disabled={!bounceReason.trim()}>
+          <Button color="warning" variant="contained" onClick={() => void handleConfirmBounced()} disabled={!bounceReason.trim()}>
             确认标记退信
           </Button>
         </DialogActions>

@@ -13,8 +13,9 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-// NormalizeMySQLDSN 自动补全连接/读写超时、parseTime 与 multiStatements，
-// 防止因防火墙 DROP 导致启动无限卡死，或因缺少 multiStatements 导致迁移失败。
+// NormalizeMySQLDSN 自动补全连接/读写超时与 parseTime，防止因防火墙 DROP 导致启动无限卡死。
+// 业务连接池强制关闭 multiStatements：一旦出现 SQL 注入，多语句模式会把影响从读数据放大为任意写入；
+// 迁移所需的多语句能力只在迁移器的独立连接上开启（见 version.newIsolatedMigrator）。
 func NormalizeMySQLDSN(rawDSN string) (string, string, error) {
 	parsed, err := mysqldriver.ParseDSN(rawDSN)
 	if err != nil {
@@ -30,7 +31,7 @@ func NormalizeMySQLDSN(rawDSN string) (string, string, error) {
 		parsed.WriteTimeout = 15 * time.Second
 	}
 	parsed.ParseTime = true
-	parsed.MultiStatements = true
+	parsed.MultiStatements = false
 
 	safeAddr := fmt.Sprintf("%s/%s", parsed.Addr, parsed.DBName)
 	return parsed.FormatDSN(), safeAddr, nil

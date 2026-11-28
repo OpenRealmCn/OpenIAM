@@ -89,15 +89,21 @@ type createJITReq struct {
 func (h *JITHandler) Create(c *gin.Context) {
 	var req createJITReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		Fail(c, http.StatusBadRequest, "参数错误：需要 user_id 与 role_code")
 		return
 	}
+	// 目标用户归属按请求域判定，授权也必须落在同一个域，否则可把本域用户塞进另一个域。
+	requestDomain := middleware.ResolveDomain(c)
 	domain := strings.TrimSpace(req.DomainCode)
 	if domain == "" {
-		domain = middleware.ResolveDomain(c)
+		domain = requestDomain
 	}
 	roleCode := strings.TrimSpace(req.RoleCode)
 
+	if domain != requestDomain && !isSuperAdmin(h.enforcer, CurrentUserID(c)) {
+		Fail(c, http.StatusForbidden, "只能在当前办理的域内创建临时授权")
+		return
+	}
 	if !requireDomainPermission(c, h.enforcer, domain, "roles", "write") {
 		return
 	}
@@ -126,7 +132,11 @@ func (h *JITHandler) Create(c *gin.Context) {
 	}
 
 	// 非超管仅可临时授予策略全部在自身权限与可委派上限内的角色
-	rules, _ := h.enforcer.GetPolicies(domain, roleCode)
+	rules, err := h.enforcer.GetPolicies(domain, roleCode)
+	if err != nil {
+		Fail(c, http.StatusInternalServerError, "查询角色权限失败")
+		return
+	}
 	if !validateDelegablePolicies(c, h.enforcer, domain, policiesToPermissions(rules)) {
 		return
 	}

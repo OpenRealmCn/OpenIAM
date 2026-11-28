@@ -48,6 +48,10 @@ type MigrationConfig struct {
 
 type JWTBootstrapConfig struct {
 	PrivateKeyPath string
+	// AutoKeyPath 在未指定 PrivateKeyPath 时用于持久化自动生成的签名私钥，避免每次重启使全部令牌失效。
+	AutoKeyPath string
+	// DataEncryptionKey 用于加密库内的敏感字段（32 字节，base64 或 hex）。
+	DataEncryptionKey string
 }
 
 type SeedConfig struct {
@@ -64,10 +68,11 @@ func Default() *BootstrapConfig {
 		Server: ServerConfig{
 			Host: "0.0.0.0",
 			Port: 8080,
-			Mode: "debug",
+			// 默认 release：debug 模式会输出路由表与详细 SQL 日志，开发时显式设置 OPENIAM_MODE=debug
+			Mode: "release",
 		},
 		MySQL: MySQLConfig{
-			DSN:                    "openiam:openiam_password@tcp(127.0.0.1:3306)/openiam?charset=utf8mb4&parseTime=True&loc=Local&multiStatements=true",
+			DSN:                    "openiam:openiam_password@tcp(127.0.0.1:3306)/openiam?charset=utf8mb4&parseTime=True&loc=Local",
 			MaxIdleConns:           10,
 			MaxOpenConns:           100,
 			ConnMaxLifetimeMinutes: 60,
@@ -84,6 +89,7 @@ func Default() *BootstrapConfig {
 		},
 		JWT: JWTBootstrapConfig{
 			PrivateKeyPath: "",
+			AutoKeyPath:    "data/jwt_private.pem",
 		},
 		Seed: SeedConfig{
 			Enabled:       true,
@@ -108,7 +114,9 @@ func Load(envFilePath string) (*BootstrapConfig, error) {
 	cfg.Server.Host = getEnv("OPENIAM_HOST", cfg.Server.Host)
 	cfg.Server.Port = getEnvInt("OPENIAM_PORT", cfg.Server.Port)
 	cfg.Server.Mode = getEnv("OPENIAM_MODE", cfg.Server.Mode)
-	cfg.Server.TrustedProxies = splitList(getEnv("OPENIAM_TRUSTED_PROXIES", "127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"))
+	// 默认只信任本机回环代理；容器或内网部署需按实际反向代理地址显式配置，
+	// 否则同网段的任意客户端都能伪造 X-Forwarded-For 绕过 IP 限流与风控。
+	cfg.Server.TrustedProxies = splitList(getEnv("OPENIAM_TRUSTED_PROXIES", "127.0.0.1,::1"))
 
 	cfg.MySQL.DSN = getEnv("OPENIAM_MYSQL_DSN", cfg.MySQL.DSN)
 	cfg.MySQL.MaxIdleConns = getEnvInt("OPENIAM_MYSQL_MAX_IDLE_CONNS", cfg.MySQL.MaxIdleConns)
@@ -124,6 +132,8 @@ func Load(envFilePath string) (*BootstrapConfig, error) {
 	cfg.Migration.StrictVersionCheck = getEnvBool("OPENIAM_STRICT_VERSION_CHECK", cfg.Migration.StrictVersionCheck)
 
 	cfg.JWT.PrivateKeyPath = getEnv("OPENIAM_JWT_PRIVATE_KEY_PATH", cfg.JWT.PrivateKeyPath)
+	cfg.JWT.AutoKeyPath = getEnv("OPENIAM_JWT_AUTO_KEY_PATH", cfg.JWT.AutoKeyPath)
+	cfg.JWT.DataEncryptionKey = getEnv("OPENIAM_DATA_ENCRYPTION_KEY", cfg.JWT.DataEncryptionKey)
 
 	cfg.Seed.Enabled = getEnvBool("OPENIAM_SEED_ENABLED", cfg.Seed.Enabled)
 	cfg.Seed.AdminUsername = getEnv("OPENIAM_SEED_ADMIN_USERNAME", cfg.Seed.AdminUsername)

@@ -60,7 +60,7 @@ type createOAuthClientReq struct {
 func (h *OAuthClientHandler) Create(c *gin.Context) {
 	var req createOAuthClientReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		Fail(c, http.StatusBadRequest, "参数错误：请填写应用名称与至少一个回调地址")
 		return
 	}
 
@@ -94,6 +94,20 @@ func (h *OAuthClientHandler) Create(c *gin.Context) {
 	if req.IsConfidential != nil {
 		isConfidential = *req.IsConfidential
 	}
+	redirectURIs := make([]string, 0, len(req.RedirectURIs))
+	for _, u := range req.RedirectURIs {
+		if s := strings.TrimSpace(u); s != "" {
+			redirectURIs = append(redirectURIs, s)
+		}
+	}
+	if len(redirectURIs) == 0 {
+		Fail(c, http.StatusBadRequest, "请至少填写一个有效的回调地址")
+		return
+	}
+	if msg := validateClientCommon(redirectURIs, grantTypes, isConfidential, requirePKCE); msg != "" {
+		Fail(c, http.StatusBadRequest, msg)
+		return
+	}
 
 	clientID := generateClientCredential("oiam_cli_", 12)
 	plainSecret := ""
@@ -114,7 +128,7 @@ func (h *OAuthClientHandler) Create(c *gin.Context) {
 		Name:             strings.TrimSpace(req.Name),
 		Description:      strings.TrimSpace(req.Description),
 		DomainCode:       domain,
-		RedirectURIs:     models.StringSlice(req.RedirectURIs),
+		RedirectURIs:     models.StringSlice(redirectURIs),
 		GrantTypes:       models.StringSlice(grantTypes),
 		Scopes:           models.StringSlice(scopes),
 		RequirePKCE:      requirePKCE,
@@ -123,7 +137,7 @@ func (h *OAuthClientHandler) Create(c *gin.Context) {
 		CreatedBy:        CurrentUserID(c),
 	}
 	if err := h.db.Create(&client).Error; err != nil {
-		Fail(c, http.StatusInternalServerError, "创建 OAuth 应用失败: "+err.Error())
+		Fail(c, http.StatusInternalServerError, "创建 OAuth 应用失败")
 		return
 	}
 
@@ -230,6 +244,10 @@ func (h *OAuthClientHandler) Update(c *gin.Context) {
 			return
 		}
 		client.Status = st
+	}
+	if msg := validateClientCommon(client.RedirectURIs, client.GrantTypes, client.IsConfidential, client.RequirePKCE); msg != "" {
+		Fail(c, http.StatusBadRequest, msg)
+		return
 	}
 
 	if err := h.db.Save(&client).Error; err != nil {

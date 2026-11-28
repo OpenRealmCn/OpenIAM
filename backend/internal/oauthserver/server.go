@@ -1,7 +1,9 @@
 package oauthserver
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -36,16 +38,25 @@ func (g *JWTAccessGenerator) Token(ctx context.Context, data *oauth2.GenerateBas
 	username := ""
 	email := ""
 	if data.UserID != "" {
-		if id, parseErr := strconv.ParseUint(data.UserID, 10, 64); parseErr == nil {
-			userID = id
-			var user models.User
-			if err := g.db.WithContext(ctx).Select("id, username, email, must_change_password").First(&user, id).Error; err == nil {
-				if user.MustChangePassword {
-					return "", "", security.ErrPasswordChangeRequired
-				}
-				username = user.Username
-				email = user.Email
-			}
+		// 用户主体必须可解析且处于可用状态；查询失败按拒绝处理，避免为已禁用或已删除的账号签发令牌
+		id, parseErr := strconv.ParseUint(data.UserID, 10, 64)
+		if parseErr != nil {
+			return "", "", oautherrors.ErrInvalidGrant
+		}
+		userID = id
+		var user models.User
+		if err := g.db.WithContext(ctx).Select("id, username, email, status, must_change_password").First(&user, id).Error; err != nil {
+			return "", "", oautherrors.ErrInvalidGrant
+		}
+		if user.Status != "active" {
+			return "", "", oautherrors.ErrAccessDenied
+		}
+		if user.MustChangePassword {
+			return "", "", security.ErrPasswordChangeRequired
+		}
+		username = user.Username
+		if scopeHas(data.TokenInfo.GetScope(), "email") {
+			email = user.Email
 		}
 	}
 
@@ -184,42 +195,66 @@ func NewServer(
 		if !ok {
 			return false, nil
 		}
+		// 公共客户端没有可验证的身份，不能以自身名义取得令牌
+		if grant == oauth2.ClientCredentials && rec.IsPublic() {
+			return false, nil
+		}
 		return rec.AllowsGrantType(string(grant)), nil
 	})
 
-	srv.SetExtensionFieldsHandler(func(ti oauth2.TokenInfo) map[string]interface{} {
-		ext := make(map[string]interface{})
-		scopes := strings.Fields(ti.GetScope())
-		hasOpenID := false
-		for _, sc := range scopes {
-			if sc == "openid" {
-				hasOpenID = true
-				break
+	// client_credentials 请求的 scope 必须落在该应用登记的范围内；未设置处理器时 go-oauth2 会接受任意 scope
+	srv.SetClientScopeHandler(func(tgr *oauth2.TokenGenerateRequest) (bool, error) {
+		cli, err := clientStore.GetByID(context.Background(), tgr.ClientID)
+		if err != nil {
+			return false, nil
+		}
+		rec, ok := cli.(*ClientRecord)
+		if !ok {
+			return false, nil
+		}
+		for _, sc := range strings.Fields(tgr.Scope) {
+			if !slices.Contains(rec.Model.Scopes, sc) {
+				return false, nil
 			}
 		}
-		if hasOpenID && ti.GetUserID() != "" {
-			if uid, err := strconv.ParseUint(ti.GetUserID(), 10, 64); err == nil {
-				var user models.User
-				if err := db.First(&user, uid).Error; err == nil {
-					ttl := settingsSvc.Snapshot().OAuthServerAccessTokenTTL
-					if ttl <= 0 {
-						ttl = time.Hour
-					}
-					if idToken, err := jwtMgr.GenerateIDToken(
-						user.ID,
-						user.Username,
-						user.Email,
-						user.DisplayName,
-						user.AvatarURL,
-						ti.GetClientID(),
-						ttl,
-					); err == nil {
-						ext["id_token"] = idToken
-					}
-				}
+		return true, nil
+	})
+
+	// 刷新时只能缩小 scope，不能借刷新扩大原授权范围
+	srv.SetRefreshingScopeHandler(func(tgr *oauth2.TokenGenerateRequest, oldScope string) (bool, error) {
+		old := strings.Fields(oldScope)
+		for _, sc := range strings.Fields(tgr.Scope) {
+			if !slices.Contains(old, sc) {
+				return false, nil
 			}
 		}
-		return ext
+		return true, nil
+	})
+
+	// 刷新前复核应用与用户的当前状态：应用停用、用户被禁用/删除/强制改密，或在改密、禁用后统一吊销的令牌都不能续期
+	srv.SetRefreshingValidationHandler(func(ti oauth2.TokenInfo) (bool, error) {
+		ctx := context.Background()
+		if _, err := clientStore.GetByID(ctx, ti.GetClientID()); err != nil {
+			return false, oautherrors.ErrInvalidGrant
+		}
+		if ti.GetUserID() == "" {
+			return true, nil
+		}
+		uid, err := strconv.ParseUint(ti.GetUserID(), 10, 64)
+		if err != nil {
+			return false, oautherrors.ErrInvalidGrant
+		}
+		var user models.User
+		if err := db.WithContext(ctx).Select("id, status, must_change_password").First(&user, uid).Error; err != nil {
+			return false, oautherrors.ErrInvalidGrant
+		}
+		if user.Status != "active" || user.MustChangePassword {
+			return false, oautherrors.ErrInvalidGrant
+		}
+		if revoked, rErr := stateStore.IsIssuedBeforeRevocation(ctx, uid, ti.GetRefreshCreateAt().UnixMilli()); rErr != nil || revoked {
+			return false, oautherrors.ErrInvalidGrant
+		}
+		return true, nil
 	})
 
 	srv.SetResponseErrorHandler(func(ctx context.Context, re *oautherrors.Response) {
@@ -265,11 +300,24 @@ func (s *Server) Authorize(c *gin.Context) {
 		})
 		return
 	}
-	if client.RequirePKCE && req.CodeChallenge == "" {
+	// 公共客户端无法保管密钥，授权码一旦被截获即可兑换，因此无论配置如何都必须使用 PKCE
+	if (client.RequirePKCE || !client.IsConfidential) && req.CodeChallenge == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":             "invalid_request",
 			"error_description": "该应用强制要求启用 PKCE (code_challenge)",
 		})
+		return
+	}
+	if err := security.ValidateClientRedirectURI(req.RedirectURI, true); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":             "invalid_redirect_uri",
+			"error_description": "redirect_uri 协议不受支持",
+		})
+		return
+	}
+	nonce := c.Query("nonce")
+	if len(nonce) > 512 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "error_description": "nonce 过长"})
 		return
 	}
 
@@ -306,10 +354,11 @@ func (s *Server) Authorize(c *gin.Context) {
 		State:               req.State,
 		CodeChallenge:       req.CodeChallenge,
 		CodeChallengeMethod: string(req.CodeChallengeMethod),
+		Nonce:               nonce,
 		CreatedAt:           time.Now().Unix(),
 	}
 	if err := s.stateStore.SaveConsentRequest(c.Request.Context(), consentReq, 10*time.Minute); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "error_description": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error", "error_description": "保存授权请求失败"})
 		return
 	}
 
@@ -414,14 +463,20 @@ func (s *Server) SubmitConsentDecision(c *gin.Context) {
 
 	ti, err := s.oauthSrv.GetAuthorizeToken(c.Request.Context(), authReq)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "生成授权码失败: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "生成授权码失败"})
 		return
+	}
+	if reqData.Nonce != "" {
+		if err := s.stateStore.SaveCodeNonce(c.Request.Context(), ti.GetCode(), reqData.Nonce, s.codeTTL()); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "生成授权码失败"})
+			return
+		}
 	}
 
 	data := s.oauthSrv.GetAuthorizeData(oauth2.Code, ti)
 	finalRedirect, err := s.oauthSrv.GetRedirectURI(authReq, data)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "构建回调地址失败: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "构建回调地址失败"})
 		return
 	}
 
@@ -461,7 +516,7 @@ type createAuthCodeReq struct {
 func (s *Server) CreateAuthorizationCode(c *gin.Context) {
 	var req createAuthCodeReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "参数错误: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "参数错误：缺少 client_id"})
 		return
 	}
 
@@ -478,6 +533,19 @@ func (s *Server) CreateAuthorizationCode(c *gin.Context) {
 	rec := &ClientRecord{Model: client}
 	if !rec.AllowsRedirectURI(redirectURI) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "回调地址不在该应用白名单中"})
+		return
+	}
+	if err := security.ValidateClientRedirectURI(redirectURI, true); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "回调地址协议不受支持"})
+		return
+	}
+	// 与 /oauth2/authorize 相同的 PKCE 约束，避免借此接口绕过应用的 PKCE 要求
+	if (client.RequirePKCE || !client.IsConfidential) && req.CodeChallenge == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "该应用强制要求启用 PKCE (code_challenge)"})
+		return
+	}
+	if req.CodeChallenge != "" && req.CodeChallengeMethod != string(oauth2.CodeChallengeS256) {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "仅支持 S256 方式的 PKCE (code_challenge_method=S256)"})
 		return
 	}
 
@@ -513,7 +581,7 @@ func (s *Server) CreateAuthorizationCode(c *gin.Context) {
 
 	ti, err := s.oauthSrv.GetAuthorizeToken(c.Request.Context(), authReq)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "生成授权码失败: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "生成授权码失败"})
 		return
 	}
 
@@ -547,12 +615,67 @@ func (s *Server) CreateAuthorizationCode(c *gin.Context) {
 	})
 }
 
+func (s *Server) codeTTL() time.Duration {
+	if ttl := s.settingsSvc.Snapshot().OAuthServerAuthCodeTTL; ttl > 0 {
+		return ttl
+	}
+	return 10 * time.Minute
+}
+
+func (s *Server) refreshTTL() time.Duration {
+	if ttl := s.settingsSvc.Snapshot().OAuthServerRefreshTokenTTL; ttl > 0 {
+		return ttl
+	}
+	return 30 * 24 * time.Hour
+}
+
+func scopeHas(scope, want string) bool {
+	return slices.Contains(strings.Fields(scope), want)
+}
+
+// bufferedResponse 暂存 go-oauth2 写出的令牌响应，便于在返回客户端前补充 ID Token。
+type bufferedResponse struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (b *bufferedResponse) Header() http.Header         { return b.header }
+func (b *bufferedResponse) Write(p []byte) (int, error) { return b.body.Write(p) }
+func (b *bufferedResponse) WriteHeader(code int)        { b.status = code }
+
 // Token 处理 POST /oauth2/token。
 func (s *Server) Token(c *gin.Context) {
 	if s.rejectPasswordChangeGrant(c) {
 		return
 	}
-	if err := s.oauthSrv.HandleTokenRequest(c.Writer, c.Request); err != nil {
+	ctx := c.Request.Context()
+	grantType := c.Request.PostForm.Get("grant_type")
+	nonce := ""
+	// 授权码与刷新令牌都只能兑换一次。go-oauth2 的「读取→删除」不是原子的，并发提交同一凭据可能各自换到令牌，
+	// 因此先用 SETNX 抢占：只有第一个请求能进入兑换流程。
+	switch grantType {
+	case string(oauth2.AuthorizationCode):
+		code := c.Request.PostForm.Get("code")
+		if code != "" {
+			if ok, err := s.stateStore.AcquireOnce(ctx, "oauth_code", code, s.codeTTL()); err != nil || !ok {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "授权码已被使用或已失效"})
+				return
+			}
+			nonce = s.stateStore.ConsumeCodeNonce(ctx, code)
+		}
+	case string(oauth2.Refreshing):
+		if rt := c.Request.PostForm.Get("refresh_token"); rt != "" {
+			if ok, err := s.stateStore.AcquireOnce(ctx, "oauth_refresh", rt, s.refreshTTL()); err != nil || !ok {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "刷新令牌已被使用或已失效"})
+				return
+			}
+		}
+	}
+
+	buf := &bufferedResponse{header: http.Header{}, status: http.StatusOK}
+	err := s.oauthSrv.HandleTokenRequest(buf, c.Request)
+	if err != nil {
 		s.auditSvc.RecordFromContext(c, audit.Entry{
 			DomainCode:   rbac.DefaultDomain,
 			Action:       "oauth2.token.exchange",
@@ -561,6 +684,65 @@ func (s *Server) Token(c *gin.Context) {
 			ErrorMessage: err.Error(),
 		})
 	}
+	body := buf.body.Bytes()
+	if buf.status == http.StatusOK {
+		body = s.attachIDToken(ctx, body, nonce)
+	}
+	for k, vs := range buf.header {
+		for _, v := range vs {
+			c.Writer.Header().Add(k, v)
+		}
+	}
+	c.Writer.Header().Del("Content-Length")
+	c.Writer.WriteHeader(buf.status)
+	_, _ = c.Writer.Write(body)
+}
+
+// attachIDToken 为包含 openid scope 的用户令牌响应签发 ID Token：只放入已授予 scope 对应的声明，并带上授权请求的 nonce。
+func (s *Server) attachIDToken(ctx context.Context, body []byte, nonce string) []byte {
+	var resp map[string]interface{}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return body
+	}
+	access, _ := resp["access_token"].(string)
+	scope, _ := resp["scope"].(string)
+	if access == "" || !scopeHas(scope, "openid") {
+		return body
+	}
+	claims, err := s.jwtMgr.ParseAccessToken(access)
+	if err != nil || claims.UserID == 0 {
+		return body
+	}
+	var user models.User
+	if err := s.db.WithContext(ctx).First(&user, claims.UserID).Error; err != nil {
+		return body
+	}
+	opts := security.IDTokenOptions{
+		UserID:   user.ID,
+		ClientID: claims.ClientID,
+		Nonce:    nonce,
+		TTL:      s.settingsSvc.Snapshot().OAuthServerAccessTokenTTL,
+	}
+	if scopeHas(scope, "profile") {
+		opts.Username = user.Username
+		opts.DisplayName = user.DisplayName
+		opts.AvatarURL = user.AvatarURL
+	}
+	if scopeHas(scope, "email") && user.Email != "" {
+		verified := user.EmailVerified
+		opts.Email = user.Email
+		opts.EmailVerified = &verified
+	}
+	idToken, err := s.jwtMgr.GenerateIDTokenWithOptions(opts)
+	if err != nil {
+		return body
+	}
+	resp["id_token"] = idToken
+	out, err := json.Marshal(resp)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 // rejectPasswordChangeGrant 在 OAuth2 令牌端点拦下强制改密账号的 refresh_token 续期请求。
@@ -602,20 +784,26 @@ func (s *Server) rejectPasswordChangeGrant(c *gin.Context) bool {
 func (s *Server) UserInfo(c *gin.Context) {
 	ti, err := s.oauthSrv.ValidationBearerToken(c.Request)
 	if err != nil {
-		// 兼容直接使用 OpenIAM 登录颁发的 Access JWT
+		// 兼容直接使用 OpenIAM 登录颁发的 Access JWT：须与业务接口的鉴权中间件执行同等校验
+		// （单个令牌吊销、所属会话下线、用户级统一吊销、强制改密受限令牌）
 		authHeader := c.GetHeader("Authorization")
 		if strings.HasPrefix(authHeader, "Bearer ") {
 			tokenStr := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
 			if claims, jwtErr := s.jwtMgr.ParseAccessToken(tokenStr); jwtErr == nil && claims.UserID > 0 {
-				if s.userRevoked(c.Request.Context(), claims.UserID, claims.IssuedAtMs) {
+				if !s.loginTokenUsable(c.Request.Context(), claims) {
 					c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token"})
 					return
 				}
-				s.writeUserInfo(c, claims.UserID)
+				scope := claims.Scope
+				if claims.ClientID == "" {
+					// 控制台登录令牌代表用户本人，可读取完整资料
+					scope = "openid profile email"
+				}
+				s.writeUserInfo(c, claims.UserID, scope)
 				return
 			}
 		}
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "error_description": err.Error()})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token"})
 		return
 	}
 
@@ -635,13 +823,34 @@ func (s *Server) UserInfo(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "error_description": "令牌已失效"})
 		return
 	}
-	s.writeUserInfo(c, uid)
+	if !scopeHas(ti.GetScope(), "openid") {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient_scope", "error_description": "访问 userinfo 需要 openid scope"})
+		return
+	}
+	s.writeUserInfo(c, uid, ti.GetScope())
 }
 
-func (s *Server) writeUserInfo(c *gin.Context, uid uint64) {
+// loginTokenUsable 校验 OpenIAM 自签 Access JWT 的吊销状态；Redis 异常时按不可用处理。
+func (s *Server) loginTokenUsable(ctx context.Context, claims *security.AccessClaims) bool {
+	if claims.Scope == security.ScopePasswordChange {
+		return false
+	}
+	if revoked, err := s.stateStore.IsAccessTokenRevoked(ctx, claims.ID); err != nil || revoked {
+		return false
+	}
+	if claims.SessionID != "" {
+		if revoked, err := s.stateStore.IsSessionRevoked(ctx, claims.SessionID); err != nil || revoked {
+			return false
+		}
+	}
+	return !s.userRevoked(ctx, claims.UserID, claims.IssuedAtMs)
+}
+
+// writeUserInfo 按授予的 scope 返回 OIDC 标准声明：profile 才返回资料字段，email 才返回邮箱及其验证状态。
+func (s *Server) writeUserInfo(c *gin.Context, uid uint64, scope string) {
 	var user models.User
 	if err := s.db.First(&user, uid).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "user_not_found"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token"})
 		return
 	}
 	if user.Status != "active" {
@@ -652,13 +861,26 @@ func (s *Server) writeUserInfo(c *gin.Context, uid uint64) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "password_change_required", "error_description": "当前账号处于强制改密状态，请先修改密码"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"sub":                fmt.Sprintf("%d", user.ID),
-		"preferred_username": user.Username,
-		"name":               user.DisplayName,
-		"email":              user.Email,
-		"picture":            user.AvatarURL,
-	})
+	out := gin.H{"sub": fmt.Sprintf("%d", user.ID)}
+	if scopeHas(scope, "profile") {
+		out["preferred_username"] = user.Username
+		out["name"] = user.DisplayName
+		out["picture"] = user.AvatarURL
+	}
+	if scopeHas(scope, "email") && user.Email != "" {
+		out["email"] = user.Email
+		out["email_verified"] = user.EmailVerified
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+// subjectActive 判断用户主体当前是否可用（存在且未被禁用）；查询失败按不可用处理。
+func (s *Server) subjectActive(ctx context.Context, uid uint64) bool {
+	var user models.User
+	if err := s.db.WithContext(ctx).Select("id, status").First(&user, uid).Error; err != nil {
+		return false
+	}
+	return user.Status == "active"
 }
 
 // Revoke 处理 POST /oauth2/revoke (RFC 7009)。
@@ -726,7 +948,8 @@ func (s *Server) Introspect(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"active": false})
 			return
 		}
-		if uid, pErr := strconv.ParseUint(ti.GetUserID(), 10, 64); pErr == nil && s.userRevoked(ctx, uid, ti.GetAccessCreateAt().UnixMilli()) {
+		if uid, pErr := strconv.ParseUint(ti.GetUserID(), 10, 64); pErr == nil && uid > 0 &&
+			(s.userRevoked(ctx, uid, ti.GetAccessCreateAt().UnixMilli()) || !s.subjectActive(ctx, uid)) {
 			c.JSON(http.StatusOK, gin.H{"active": false})
 			return
 		}
@@ -755,7 +978,7 @@ func (s *Server) Introspect(c *gin.Context) {
 			revoked = true
 		}
 		if !revoked && claims.UserID > 0 {
-			revoked = s.userRevoked(ctx, claims.UserID, claims.IssuedAtMs)
+			revoked = !s.loginTokenUsable(ctx, claims) || !s.subjectActive(ctx, claims.UserID)
 		}
 		if !revoked {
 			// 与上面的令牌存储分支共用同一个主体判定：账号处于强制改密、已被删除、

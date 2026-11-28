@@ -18,6 +18,7 @@ import {
 } from '@mui/material';
 import {
   DoneAll as DoneAllIcon,
+  GppMaybe as SecurityIcon,
   NotificationsNone as BellIcon,
 } from '@mui/icons-material';
 import dayjs from 'dayjs';
@@ -50,25 +51,33 @@ export const NotificationBell: React.FC = () => {
 
   useEffect(() => {
     if (anchorEl) {
-      loadList();
+      void loadList();
     }
   }, [anchorEl, loadList]);
 
   const handleMarkRead = async (item: NotificationItem) => {
     if (!item.is_read) {
-      await api.notifications.markRead(item.id);
-      await Promise.all([loadList(), refreshUnreadCount()]);
+      try {
+        await api.notifications.markRead(item.id);
+        await Promise.all([loadList(), refreshUnreadCount?.()]);
+      } catch {
+        // 忽略偶发请求失败，保留当前列表
+      }
     }
   };
 
   const handleReadAll = async () => {
-    await api.notifications.markAllRead();
-    await Promise.all([loadList(), refreshUnreadCount()]);
+    try {
+      await api.notifications.markAllRead();
+      await Promise.all([loadList(), refreshUnreadCount?.()]);
+    } catch {
+      // 忽略偶发请求失败
+    }
   };
 
   return (
     <>
-      <Tooltip title="消息与公告中心">
+      <Tooltip title="通知中心">
         <IconButton size="small" onClick={(e) => setAnchorEl(e.currentTarget)}>
           <Badge badgeContent={unreadNotifications} color="error" max={99}>
             <BellIcon fontSize="small" />
@@ -88,8 +97,8 @@ export const NotificationBell: React.FC = () => {
           <Typography variant="subtitle2" fontWeight={700}>
             通知中心
           </Typography>
-          <Button size="small" startIcon={<DoneAllIcon fontSize="small" />} onClick={handleReadAll}>
-            全部已读
+          <Button size="small" startIcon={<DoneAllIcon fontSize="small" />} onClick={() => void handleReadAll()}>
+            全部标为已读
           </Button>
         </Box>
 
@@ -114,41 +123,59 @@ export const NotificationBell: React.FC = () => {
               </Typography>
             </Box>
           ) : (
-            items.map((item, idx) => (
-              <React.Fragment key={item.id}>
-                {idx > 0 && <Divider />}
-                <ListItemButton
-                  onClick={() => handleMarkRead(item)}
-                  sx={{ opacity: item.is_read ? 0.68 : 1, alignItems: 'flex-start', py: 1.2 }}
-                >
-                  <ListItemText
-                    primary={
-                      <Stack direction="row" spacing={1} alignItems="center" mb={0.3}>
-                        <Chip
-                          size="small"
-                          label={CATEGORY_LABEL[item.category] || item.category}
-                          color={item.level === 'security' || item.level === 'error' ? 'error' : item.level === 'warning' ? 'warning' : 'default'}
-                          sx={{ height: 18, fontSize: '0.68rem' }}
-                        />
-                        <Typography variant="body2" fontWeight={item.is_read ? 500 : 700} noWrap sx={{ flex: 1 }}>
-                          {item.title}
-                        </Typography>
-                      </Stack>
-                    }
-                    secondary={
-                      <>
-                        <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.3 }}>
-                          {item.content}
-                        </Typography>
-                        <Typography variant="caption" color="text.disabled">
-                          {dayjs(item.created_at).format('MM-DD HH:mm')}
-                        </Typography>
-                      </>
-                    }
-                  />
-                </ListItemButton>
-              </React.Fragment>
-            ))
+            items.map((item, idx) => {
+              const isSecurity = item.level === 'security';
+              return (
+                <React.Fragment key={item.id}>
+                  {idx > 0 && <Divider />}
+                  <ListItemButton
+                    onClick={() => void handleMarkRead(item)}
+                    sx={{ opacity: item.is_read ? 0.68 : 1, alignItems: 'flex-start', py: 1.2 }}
+                  >
+                    <ListItemText
+                      primary={
+                        <Stack direction="row" spacing={1} alignItems="center" mb={0.3}>
+                          {isSecurity ? (
+                            <Chip
+                              size="small"
+                              icon={<SecurityIcon sx={{ fontSize: 13 }} />}
+                              label="安全提醒"
+                              color="error"
+                              sx={{ height: 20, fontSize: '0.68rem' }}
+                            />
+                          ) : (
+                            <Chip
+                              size="small"
+                              label={CATEGORY_LABEL[item.category] || item.category}
+                              color={item.level === 'error' ? 'error' : item.level === 'warning' ? 'warning' : 'default'}
+                              sx={{ height: 20, fontSize: '0.68rem' }}
+                            />
+                          )}
+                          <Typography variant="body2" fontWeight={item.is_read ? 500 : 700} noWrap sx={{ flex: 1 }}>
+                            {item.title}
+                          </Typography>
+                        </Stack>
+                      }
+                      secondary={
+                        <>
+                          <Typography
+                            variant="caption"
+                            color="text.secondary"
+                            display="block"
+                            sx={{ mb: 0.3, whiteSpace: 'pre-line' }}
+                          >
+                            {item.content}
+                          </Typography>
+                          <Typography variant="caption" color="text.disabled">
+                            {dayjs(item.created_at).format('MM-DD HH:mm')}
+                          </Typography>
+                        </>
+                      }
+                    />
+                  </ListItemButton>
+                </React.Fragment>
+              );
+            })
           )}
         </List>
 
@@ -162,7 +189,7 @@ export const NotificationBell: React.FC = () => {
               navigate('/notifications');
             }}
           >
-            {isAdmin ? '进入通知中心' : '查看全部消息'}
+            {isAdmin ? '进入通知中心' : '查看全部通知'}
           </Button>
         </Box>
       </Popover>

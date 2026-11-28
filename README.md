@@ -60,6 +60,8 @@ docker compose --profile mysql up -d --build
 - 超级管理员账号: 用户名 `admin`，初始口令必须通过环境变量 `OPENIAM_SEED_ADMIN_PASSWORD` 显式设置（docker compose 未设置时会拒绝启动；后端也会在空库初始化时校验，未设置、长度/复杂度不达标或仍使用历史默认口令都会直接启动失败），初始化出来的账号带强制改密标记：登录后只能改密或退出，改密成功才解除限制；可信代理列表通过 `OPENIAM_TRUSTED_PROXIES` 配置
 - 浏览器端 Refresh Token 通过 HttpOnly Cookie 下发，Access Token 仅保存在内存；非浏览器客户端可在请求头加 `X-Token-Delivery: body` 从响应体获取 Refresh Token
 - 联合登录身份源与插件出站请求默认禁止指向内网地址（防 SSRF），自建内网服务可在管理员控制台「系统设置 -> 登录与安全」中开启 `security.allow_private_upstream`
+- 生产部署建议设置 `OPENIAM_DATA_ENCRYPTION_KEY`（`openssl rand -base64 32`），用于加密存储 TOTP 种子与各类第三方密钥；自动生成的 JWT 签名私钥持久化在 `openiam_backend_data` 卷中，删除该卷会使已签发令牌全部失效
+- 内置 Redis 以 `OPENIAM_REDIS_PASSWORD` 启用口令认证；compose 内部网络固定为 `OPENIAM_DOCKER_SUBNET`（默认 `172.28.0.0/24`），后端只信任该网段转发的客户端 IP 与协议头
 - 完整安全审查结论见 `SECURITY_AUDIT.md`
 
 ### 方式二：本地开发启动

@@ -2,9 +2,11 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/mail"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,7 +23,6 @@ import (
 	"github.com/openrealm/openiam/internal/risk"
 	"github.com/openrealm/openiam/internal/security"
 	"github.com/openrealm/openiam/internal/settings"
-	"github.com/openrealm/openiam/internal/totp"
 	"gorm.io/gorm"
 )
 
@@ -96,7 +97,12 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	username := strings.TrimSpace(req.Username)
 	ctx := c.Request.Context()
 
-	if locked, ttl, err := h.stateStore.IsLoginLocked(ctx, username); err == nil && locked {
+	locked, ttl, lockErr := h.stateStore.IsLoginLocked(ctx, username)
+	if lockErr != nil {
+		Fail(c, http.StatusServiceUnavailable, "认证服务暂不可用，请稍后再试")
+		return
+	}
+	if locked {
 		h.auditSvc.RecordFromContext(c, audit.Entry{
 			ActorUsername: username,
 			DomainCode:    rbac.DefaultDomain,
@@ -106,7 +112,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 			Status:        "failed",
 			ErrorMessage:  "account locked due to repeated login failures",
 		})
-		Fail(c, http.StatusTooManyRequests, fmt.Sprintf("连续登录失败次数过多，账号已锁定，请 %d 秒后重试", int(ttl.Seconds())))
+		Fail(c, http.StatusTooManyRequests, lockedMessage(ttl))
 		return
 	}
 
@@ -114,11 +120,8 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	var user models.User
 	if err := h.db.Where("username = ? OR (email <> '' AND LOWER(email) = ?)", username, strings.ToLower(username)).First(&user).Error; err != nil {
+		burnPasswordCheck(req.Password)
 		_, locked, _ := h.stateStore.RecordLoginFailure(ctx, username, snap.MaxLoginFailures, time.Duration(snap.LockoutMinutes)*time.Minute)
-		msg := "用户名或密码错误"
-		if locked {
-			msg = "连续登录失败次数过多，账号已被临时锁定"
-		}
 		h.auditSvc.RecordFromContext(c, audit.Entry{
 			ActorUsername: username,
 			DomainCode:    rbac.DefaultDomain,
@@ -128,17 +131,25 @@ func (h *AuthHandler) Login(c *gin.Context) {
 			Status:        "failed",
 			ErrorMessage:  "user not found",
 		})
-		Fail(c, http.StatusUnauthorized, msg)
+		if locked {
+			Fail(c, http.StatusTooManyRequests, lockedMessage(time.Duration(snap.LockoutMinutes)*time.Minute))
+			return
+		}
+		Fail(c, http.StatusUnauthorized, "用户名或密码错误")
 		return
 	}
 
 	// 以规范用户名检查锁定状态，防止通过邮箱登录绕过按用户名的失败计数
-	if locked, ttl, err := h.stateStore.IsLoginLocked(ctx, user.Username); err == nil && locked {
-		Fail(c, http.StatusTooManyRequests, fmt.Sprintf("连续登录失败次数过多，账号已锁定，请 %d 秒后重试", int(ttl.Seconds())))
+	if locked, ttl, err := h.stateStore.IsLoginLocked(ctx, user.Username); err != nil {
+		Fail(c, http.StatusServiceUnavailable, "认证服务暂不可用，请稍后再试")
+		return
+	} else if locked {
+		Fail(c, http.StatusTooManyRequests, lockedMessage(ttl))
 		return
 	}
 
 	if user.Status != "active" {
+		burnPasswordCheck(req.Password)
 		h.auditSvc.RecordFromContext(c, audit.Entry{
 			ActorID:       user.ID,
 			ActorUsername: user.Username,
@@ -168,7 +179,11 @@ func (h *AuthHandler) Login(c *gin.Context) {
 			ErrorMessage:  "invalid password",
 		})
 		if locked {
-			Fail(c, http.StatusTooManyRequests, "连续登录失败次数过多，账号已被临时锁定")
+			if int(count) == snap.MaxLoginFailures {
+				notifySecurity(c, h.notifySvc, user.ID, "账号已被临时锁定",
+					fmt.Sprintf("你的账号连续 %d 次密码输入错误，已被临时锁定 %d 分钟。如果不是你本人在尝试登录，建议尽快修改密码并开启两步验证。", count, snap.LockoutMinutes))
+			}
+			Fail(c, http.StatusTooManyRequests, lockedMessage(time.Duration(snap.LockoutMinutes)*time.Minute))
 			return
 		}
 		Fail(c, http.StatusUnauthorized, "用户名或密码错误")
@@ -177,130 +192,13 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	_ = h.stateStore.ClearLoginFailures(ctx, username)
 	_ = h.stateStore.ClearLoginFailures(ctx, user.Username)
-	now := time.Now()
-	_ = h.db.Model(&user).Updates(map[string]interface{}{
-		"last_login_at": &now,
-		"last_login_ip": clientip.FromGin(c),
-	}).Error
 
-	// 强制改密状态：只签发短期受限令牌，不下发 Refresh Token；
-	// 该令牌仅能用于修改密码与退出登录，其余接口由 AuthMiddleware 统一返回 403 password_change_required。
-	if user.MustChangePassword {
-		accessToken, _, _, err := h.jwtMgr.GenerateAccessToken(
-			user.ID, user.Username, user.Email,
-			security.ScopePasswordChange, "", security.PasswordChangeTokenTTL,
-		)
-		if err != nil {
-			Fail(c, http.StatusInternalServerError, "签发令牌失败")
-			return
-		}
-		clearRefreshCookie(c)
-		h.auditSvc.RecordFromContext(c, audit.Entry{
-			ActorID:       user.ID,
-			ActorUsername: user.Username,
-			DomainCode:    rbac.DefaultDomain,
-			Action:        "auth.login",
-			ResourceType:  "user",
-			ResourceID:    fmt.Sprintf("%d", user.ID),
-			After:         map[string]interface{}{"must_change_password": true},
-			Status:        "success",
-		})
-		OK(c, gin.H{
-			"access_token":         accessToken,
-			"expires_in":           int64(security.PasswordChangeTokenTTL.Seconds()),
-			"must_change_password": true,
-			"user":                 user,
-		})
+	// 风控与二步验证先于强制改密判定：否则仅凭初始口令即可拿到改密令牌并改掉密码，绕过风控阻断与 TOTP。
+	li := h.issuer()
+	if li.gate(c, user, gateOptions{Channel: "password", RequireTOTP: true, AllowRiskChallenge: true}, nil) {
 		return
 	}
-
-	// 风险自适应评估与 TOTP 多因素挑战检查
-	var riskEval *risk.Evaluation
-	if h.riskEngine != nil {
-		riskEval = h.riskEngine.EvaluateLogin(
-			ctx,
-			user,
-			clientip.FromGin(c),
-			truncateStr(c.GetHeader("User-Agent"), 512),
-			headerFingerprint(c),
-			headerGeo(c, h.settingsSvc),
-			now,
-		)
-		if riskEval.Action == "block" {
-			Fail(c, http.StatusForbidden, "当前登录环境存在高风险，已被系统安全策略阻断")
-			return
-		}
-	}
-
-	var userTOTP models.UserTOTP
-	totpEnabled := h.db.Where("user_id = ? AND enabled = ?", user.ID, true).First(&userTOTP).Error == nil
-	needMFA := totpEnabled || (riskEval != nil && riskEval.Action == "challenge_mfa")
-	if needMFA {
-		methods := make([]string, 0, 4)
-		if totpEnabled {
-			methods = append(methods, "totp", "recovery_code")
-		}
-		if user.Email != "" && snap.SMTPEnabled {
-			methods = append(methods, "email_otp")
-		}
-		if user.Phone != "" {
-			methods = append(methods, "sms_otp")
-		}
-		if len(methods) > 0 {
-			mfaToken := "mfa_" + uuid.NewString()
-			riskLevel := "low"
-			var riskReasons []string
-			if riskEval != nil {
-				riskLevel = riskEval.Level
-				riskReasons = riskEval.Reasons
-			}
-			payload, _ := json.Marshal(mfaChallengeState{
-				UserID:      user.ID,
-				Methods:     methods,
-				RiskLevel:   riskLevel,
-				RiskReasons: riskReasons,
-			})
-			if err := h.stateStore.SaveMFAChallenge(ctx, mfaToken, payload, 5*time.Minute); err != nil {
-				Fail(c, http.StatusInternalServerError, "创建二次验证会话失败")
-				return
-			}
-			OK(c, gin.H{
-				"mfa_required": true,
-				"mfa_token":    mfaToken,
-				"methods":      methods,
-				"risk_level":   riskLevel,
-				"risk_reasons": riskReasons,
-				"email_hint":   maskEmail(user.Email),
-				"phone_hint":   maskPhone(user.Phone),
-			})
-			return
-		}
-	}
-
-	accessToken, refreshToken, _, expiresIn, err := createSessionAndTokens(c, h.db, h.jwtMgr, h.stateStore, h.settingsSvc, user)
-	if err != nil {
-		Fail(c, http.StatusInternalServerError, "签发令牌与保存会话失败")
-		return
-	}
-
-	rolesMap, _ := h.enforcer.GetAllUserRoles(user.ID)
-	h.auditSvc.RecordFromContext(c, audit.Entry{
-		ActorID:       user.ID,
-		ActorUsername: user.Username,
-		DomainCode:    rbac.DefaultDomain,
-		Action:        "auth.login",
-		ResourceType:  "user",
-		ResourceID:    fmt.Sprintf("%d", user.ID),
-		Status:        "success",
-	})
-
-	OK(c, gin.H{
-		"access_token":  accessToken,
-		"refresh_token": h.deliverRefresh(c, refreshToken, snap.JWTRefreshTTL),
-		"expires_in":    expiresIn,
-		"user":          user,
-		"roles":         rolesMap,
-	})
+	li.finish(c, user, "auth.login", nil, nil)
 }
 
 type registerReq struct {
@@ -322,7 +220,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	}
 	var req registerReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "注册参数无效: "+err.Error())
+		Fail(c, http.StatusBadRequest, "注册参数无效：用户名 3~64 位且不含 @，密码至少 8 位")
 		return
 	}
 	if h.pluginMgr != nil {
@@ -342,8 +240,8 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	phoneEnabled := snap.RegisterPhoneMode != "disabled" || verifyMode == "sms" || verifyMode == "both" || verifyMode == "either"
 
 	username := strings.TrimSpace(req.Username)
-	email := strings.ToLower(strings.TrimSpace(req.Email))
-	phone := strings.TrimSpace(req.Phone)
+	email := normalizeEmail(req.Email)
+	phone := normalizePhone(req.Phone)
 
 	if !emailEnabled {
 		email = ""
@@ -377,6 +275,10 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		Fail(c, http.StatusBadRequest, "请至少填写邮箱或手机号完成验证码校验")
 		return
 	}
+	// 在消耗验证码之前校验密码，避免密码不合格时验证码作废、用户被迫重新获取。
+	if !h.checkPasswordPolicy(c, req.Password) {
+		return
+	}
 
 	var count int64
 	h.db.Model(&models.User{}).Where("username = ?", username).Count(&count)
@@ -384,6 +286,50 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		Fail(c, http.StatusConflict, "用户名已被占用")
 		return
 	}
+
+	// 当前验证模式下可验证的渠道，只要提交了就必须带上有效验证码；
+	// 否则「either」模式下可以用自己的邮箱过验证、顺带把他人手机号写进账号。
+	emailVerifiable := verifyMode == "email" || verifyMode == "both" || verifyMode == "either"
+	phoneVerifiable := verifyMode == "sms" || verifyMode == "both" || verifyMode == "either"
+	emailVerified := false
+	if verifyMode != "none" {
+		if h.otpSvc == nil {
+			Fail(c, http.StatusServiceUnavailable, "验证码服务暂不可用，请稍后重试")
+			return
+		}
+		if verifyMode == "email" && email == "" {
+			Fail(c, http.StatusBadRequest, "请填写邮箱地址")
+			return
+		}
+		if verifyMode == "sms" && phone == "" {
+			Fail(c, http.StatusBadRequest, "请填写手机号")
+			return
+		}
+		ctx := c.Request.Context()
+		if email != "" && emailVerifiable {
+			if strings.TrimSpace(req.EmailCode) == "" {
+				Fail(c, http.StatusBadRequest, "请填写邮箱验证码")
+				return
+			}
+			if _, vErr := h.otpSvc.VerifyCode(ctx, "register", email, req.EmailCode); vErr != nil {
+				Fail(c, http.StatusBadRequest, otpFailureMessage(vErr, "邮箱验证码无效或已过期"))
+				return
+			}
+			emailVerified = true
+		}
+		if phone != "" && phoneVerifiable {
+			if strings.TrimSpace(req.SMSCode) == "" {
+				Fail(c, http.StatusBadRequest, "请填写手机短信验证码")
+				return
+			}
+			if _, vErr := h.otpSvc.VerifyCode(ctx, "register", phone, req.SMSCode); vErr != nil {
+				Fail(c, http.StatusBadRequest, otpFailureMessage(vErr, "短信验证码无效或已过期"))
+				return
+			}
+		}
+	}
+
+	// 唯一性放在验证码之后：未持有验证码时无法借注册接口探测邮箱/手机号是否已注册。
 	if email != "" {
 		h.db.Model(&models.User{}).Where("email <> '' AND LOWER(email) = ?", email).Count(&count)
 		if count > 0 {
@@ -399,72 +345,9 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		}
 	}
 
-	if verifyMode != "none" {
-		if h.otpSvc == nil {
-			Fail(c, http.StatusServiceUnavailable, "验证码服务未初始化")
-			return
-		}
-		ctx := c.Request.Context()
-		switch verifyMode {
-		case "email":
-			if strings.TrimSpace(req.EmailCode) == "" {
-				Fail(c, http.StatusBadRequest, "请填写邮箱验证码")
-				return
-			}
-			if _, vErr := h.otpSvc.VerifyCode(ctx, "register", email, req.EmailCode); vErr != nil {
-				Fail(c, http.StatusBadRequest, "邮箱验证码无效或已过期: "+vErr.Error())
-				return
-			}
-		case "sms":
-			if strings.TrimSpace(req.SMSCode) == "" {
-				Fail(c, http.StatusBadRequest, "请填写手机短信验证码")
-				return
-			}
-			if _, vErr := h.otpSvc.VerifyCode(ctx, "register", phone, req.SMSCode); vErr != nil {
-				Fail(c, http.StatusBadRequest, "短信验证码无效或已过期: "+vErr.Error())
-				return
-			}
-		case "both":
-			if strings.TrimSpace(req.EmailCode) == "" || strings.TrimSpace(req.SMSCode) == "" {
-				Fail(c, http.StatusBadRequest, "请同时填写邮箱验证码和短信验证码")
-				return
-			}
-			if _, vErr := h.otpSvc.VerifyCode(ctx, "register", email, req.EmailCode); vErr != nil {
-				Fail(c, http.StatusBadRequest, "邮箱验证码无效或已过期: "+vErr.Error())
-				return
-			}
-			if _, vErr := h.otpSvc.VerifyCode(ctx, "register", phone, req.SMSCode); vErr != nil {
-				Fail(c, http.StatusBadRequest, "短信验证码无效或已过期: "+vErr.Error())
-				return
-			}
-		case "either":
-			verified := false
-			if email != "" && strings.TrimSpace(req.EmailCode) != "" {
-				if _, vErr := h.otpSvc.VerifyCode(ctx, "register", email, req.EmailCode); vErr == nil {
-					verified = true
-				} else {
-					Fail(c, http.StatusBadRequest, "邮箱验证码无效或已过期: "+vErr.Error())
-					return
-				}
-			}
-			if !verified && phone != "" && strings.TrimSpace(req.SMSCode) != "" {
-				if _, vErr := h.otpSvc.VerifyCode(ctx, "register", phone, req.SMSCode); vErr == nil {
-					verified = true
-				} else {
-					Fail(c, http.StatusBadRequest, "短信验证码无效或已过期: "+vErr.Error())
-					return
-				}
-			}
-			if !verified {
-				Fail(c, http.StatusBadRequest, "请完成邮箱或手机短信验证码校验")
-				return
-			}
-		}
-	}
-
 	hash, err := security.HashPassword(req.Password)
 	if err != nil {
-		Fail(c, http.StatusInternalServerError, "密码加密失败")
+		Fail(c, http.StatusInternalServerError, "注册失败，请稍后重试")
 		return
 	}
 
@@ -473,14 +356,19 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		displayName = username
 	}
 	user := models.User{
-		Username:     username,
-		Email:        email,
-		Phone:        phone,
-		DisplayName:  displayName,
-		PasswordHash: hash,
-		Status:       "active",
+		Username:      username,
+		Email:         email,
+		EmailVerified: emailVerified,
+		Phone:         phone,
+		DisplayName:   displayName,
+		PasswordHash:  hash,
+		Status:        "active",
 	}
 	if err := h.db.Create(&user).Error; err != nil {
+		if isUniqueViolation(err) {
+			Fail(c, http.StatusConflict, "用户名、邮箱或手机号已被占用")
+			return
+		}
 		Fail(c, http.StatusInternalServerError, "创建用户失败")
 		return
 	}
@@ -513,11 +401,29 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
+	refreshTTL := h.settingsSvc.Snapshot().JWTRefreshTTL
 	rec, err := h.stateStore.ConsumeRefreshToken(ctx, token)
 	if err != nil {
+		// 已轮换消费过的令牌再次出现，说明令牌被窃取并重放：下线整个会话，合法用户与攻击者都需重新登录
+		if sid, reused, _ := h.stateStore.RefreshReuse(ctx, token); reused {
+			if sid != "" {
+				now := time.Now()
+				_ = h.db.Model(&models.UserSession{}).Where("session_id = ?", sid).Update("revoked_at", &now).Error
+				_ = h.stateStore.RevokeSession(ctx, sid, refreshTTL)
+			}
+			h.auditSvc.RecordFromContext(c, audit.Entry{
+				DomainCode:   rbac.DefaultDomain,
+				Action:       "auth.refresh_reuse",
+				ResourceType: "user_session",
+				ResourceID:   sid,
+				Status:       "failed",
+				ErrorMessage: "rotated refresh token replayed; session revoked",
+			})
+		}
 		Fail(c, http.StatusUnauthorized, "Refresh Token 无效或已过期")
 		return
 	}
+	_ = h.stateStore.MarkRefreshUsed(ctx, token, rec.SessionID, refreshTTL)
 
 	var user models.User
 	if revoked, rErr := h.stateStore.IsIssuedBeforeRevocation(ctx, rec.UserID, rec.IssuedAt); rErr != nil || revoked {
@@ -543,6 +449,14 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 			Fail(c, http.StatusUnauthorized, "该设备会话已下线，请重新登录")
 			return
 		}
+		// Redis 中的下线标记有过期时间，数据库中的 revoked_at 是持久依据
+		var revokedCount int64
+		if dbErr := h.db.Model(&models.UserSession{}).
+			Where("session_id = ? AND revoked_at IS NOT NULL", rec.SessionID).
+			Count(&revokedCount).Error; dbErr != nil || revokedCount > 0 {
+			Fail(c, http.StatusUnauthorized, "该设备会话已下线，请重新登录")
+			return
+		}
 	}
 
 	accessToken, _, _, err := h.jwtMgr.GenerateAccessTokenWithSession(user.ID, user.Username, user.Email, "openid profile email", "", rec.SessionID)
@@ -555,22 +469,24 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 		UserID:    user.ID,
 		Username:  user.Username,
 		SessionID: rec.SessionID,
-	}, h.settingsSvc.Snapshot().JWTRefreshTTL); err != nil {
+	}, refreshTTL); err != nil {
 		Fail(c, http.StatusInternalServerError, "刷新会话失败")
 		return
 	}
 	if rec.SessionID != "" {
 		now := time.Now()
+		// 同步延长会话到期时间：下线标记的保留时长按 expires_at 计算，不延长会导致标记先于刷新令牌过期
 		_ = h.db.Model(&models.UserSession{}).Where("session_id = ?", rec.SessionID).Updates(map[string]interface{}{
 			"refresh_token_hash": hashRefreshToken(newRefresh),
 			"last_active_at":     now,
 			"ip_address":         clientip.FromGin(c),
+			"expires_at":         now.Add(refreshTTL),
 		}).Error
 	}
 
 	OK(c, gin.H{
 		"access_token":  accessToken,
-		"refresh_token": h.deliverRefresh(c, newRefresh, h.settingsSvc.Snapshot().JWTRefreshTTL),
+		"refresh_token": h.deliverRefresh(c, newRefresh, refreshTTL),
 		"expires_in":    int64(h.jwtMgr.AccessTTL().Seconds()),
 	})
 }
@@ -638,10 +554,7 @@ func (h *AuthHandler) Me(c *gin.Context) {
 	var totpRow models.UserTOTP
 	totpEnabled := h.db.Where("user_id = ? AND enabled = ?", uid, true).First(&totpRow).Error == nil
 
-	var unreadNotifs int64
-	_ = h.db.Model(&models.Notification{}).
-		Where("(user_id = ? OR (category = ? AND user_id = 0)) AND is_read = ?", uid, notify.CategoryAnnouncement, false).
-		Count(&unreadNotifs).Error
+	unreadNotifs := CountUnreadNotifications(h.db, uid)
 
 	capabilities := computeCapabilities(h.enforcer, uid, domain)
 	adminTier, isAdmin := resolveAdminTier(h.enforcer, uid, rolesMap, capabilities)
@@ -680,10 +593,26 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		return
 	}
 	if user.PasswordHash != "" {
+		// 先计数后校验：被盗的 Access Token 不能被用来无限次猜测原密码
+		if !factorAttempt(c, h.stateStore, "change_password", uid, reauthMaxFailures, reauthFailureWindow) {
+			return
+		}
 		if req.OldPassword == "" || !security.VerifyPassword(user.PasswordHash, req.OldPassword) {
+			h.auditSvc.RecordFromContext(c, audit.Entry{
+				DomainCode:   rbac.DefaultDomain,
+				Action:       "auth.change_password",
+				ResourceType: "user",
+				ResourceID:   fmt.Sprintf("%d", user.ID),
+				Status:       "failed",
+				ErrorMessage: "invalid old password",
+			})
 			Fail(c, http.StatusBadRequest, "原密码不正确")
 			return
 		}
+		clearFactorAttempts(c, h.stateStore, "change_password", uid)
+	} else if !requireReauth(c, h.db, h.stateStore) {
+		// 首次设置密码等同新增登录凭据；若账号已有 TOTP，需先用动态码再确认身份
+		return
 	}
 	// 新口令不得与当前口令相同：否则强制改密账号可以把已知的默认口令原样提交一次，
 	// 标记被清掉、默认口令继续可用，等于绕过整套初始凭据修复。
@@ -691,22 +620,21 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		Fail(c, http.StatusBadRequest, "新密码不能与当前密码相同")
 		return
 	}
-	if security.IsLegacyDefaultPassword(req.NewPassword) {
-		Fail(c, http.StatusBadRequest, "新密码不能使用历史默认口令")
-		return
-	}
 	// 强制改密（初始管理员）沿用初始口令策略，避免用 8 位弱口令替代初始强口令。
 	if user.MustChangePassword {
 		if vErr := security.ValidateInitialPassword(req.NewPassword); vErr != nil {
-			Fail(c, http.StatusBadRequest, "新密码不符合初始口令策略: "+vErr.Error())
+			Fail(c, http.StatusBadRequest, "新密码不符合要求："+strings.ReplaceAll(vErr.Error(), "口令", "密码"))
 			return
 		}
+	} else if !h.checkPasswordPolicy(c, req.NewPassword) {
+		return
 	}
 	hash, err := security.HashPassword(req.NewPassword)
 	if err != nil {
-		Fail(c, http.StatusInternalServerError, "密码加密失败")
+		Fail(c, http.StatusInternalServerError, "修改密码失败，请稍后重试")
 		return
 	}
+	hadPassword := user.PasswordHash != ""
 	// 改密成功即清除强制改密标记，并在下方吊销该用户此前签发的所有会话。
 	if err := h.db.Model(&user).Updates(map[string]interface{}{
 		"password_hash":        hash,
@@ -723,11 +651,27 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		ResourceID:   fmt.Sprintf("%d", user.ID),
 		Status:       "success",
 	})
+	now := time.Now()
+	_ = h.db.Model(&models.UserSession{}).Where("user_id = ? AND revoked_at IS NULL", user.ID).Update("revoked_at", &now).Error
 	if err := h.stateStore.RevokeUserTokens(c.Request.Context(), user.ID); err != nil {
 		Fail(c, http.StatusInternalServerError, "密码已修改，但撤销旧会话失败，请重新登录后重试")
 		return
 	}
+	title, what := "登录密码已修改", "你的账号登录密码已修改，所有设备上的登录状态均已失效，需要用新密码重新登录。"
+	if !hadPassword {
+		title, what = "已设置登录密码", "你的账号设置了登录密码，之后可以用用户名和密码登录。"
+	}
+	notifySecurity(c, h.notifySvc, user.ID, title, what)
 	OK(c, gin.H{"changed": true, "relogin_required": true})
+}
+
+// lockedMessage 生成账号锁定提示，剩余时间按分钟向上取整，避免出现"请 873 秒后重试"这类难读的数字。
+func lockedMessage(remaining time.Duration) string {
+	minutes := int((remaining + time.Minute - 1) / time.Minute)
+	if minutes < 1 {
+		minutes = 1
+	}
+	return fmt.Sprintf("密码错误次数过多，账号已临时锁定，请 %d 分钟后再试，或联系管理员解锁", minutes)
 }
 
 // ListPublicProviders 公开返回已启用的外部 OAuth 联合登录列表，供登录页渲染按钮。
@@ -754,9 +698,14 @@ func (h *AuthHandler) ListPublicProviders(c *gin.Context) {
 func (h *AuthHandler) OAuthAuthorize(c *gin.Context) {
 	providerName := c.Param("provider")
 	redirectOverride := c.Query("redirect_uri")
-	authURL, state, err := h.pluginSvc.StartLogin(c.Request.Context(), providerName, redirectOverride)
+	binding, err := issueOAuthBindingCookie(c)
 	if err != nil {
-		Fail(c, http.StatusBadRequest, err.Error())
+		Fail(c, http.StatusInternalServerError, "初始化联合登录失败")
+		return
+	}
+	authURL, state, err := h.pluginSvc.StartLogin(c.Request.Context(), providerName, redirectOverride, binding)
+	if err != nil {
+		Fail(c, http.StatusBadRequest, federatedErrorMessage(err, "发起联合登录失败"))
 		return
 	}
 	OK(c, gin.H{
@@ -784,40 +733,52 @@ func (h *AuthHandler) OAuthCallback(c *gin.Context) {
 		}
 	} else {
 		if err := c.ShouldBindJSON(&req); err != nil {
-			Fail(c, http.StatusBadRequest, "回调参数无效: "+err.Error())
+			Fail(c, http.StatusBadRequest, "回调参数无效")
 			return
 		}
 	}
 
+	binding := readOAuthBindingCookie(c)
+	clearOAuthBindingCookie(c)
 	result, err := h.pluginSvc.HandleCallback(
 		c.Request.Context(),
 		providerName,
 		req.Code,
 		req.State,
 		req.RedirectURI,
+		binding,
 		clientip.FromGin(c),
 		c.Request.UserAgent(),
 	)
 	if err != nil {
-		Fail(c, http.StatusBadRequest, "联合登录失败: "+err.Error())
+		Fail(c, http.StatusBadRequest, federatedErrorMessage(err, "联合登录失败，请稍后重试"))
 		return
 	}
-	rolesMap, _ := h.enforcer.GetAllUserRoles(result.User.ID)
-	OK(c, gin.H{
-		"access_token":  result.AccessToken,
-		"refresh_token": h.deliverRefresh(c, result.RefreshToken, h.settingsSvc.Snapshot().JWTRefreshTTL),
-		"expires_in":    result.ExpiresIn,
-		"user":          result.User,
-		"roles":         rolesMap,
-		"is_new_user":   result.IsNewUser,
-	})
+	// 绑定流程只建立关联，不签发新的登录会话：发起绑定的浏览器本就处于登录状态
+	if result.Bound {
+		OK(c, gin.H{"bound": true, "provider": providerName})
+		return
+	}
+
+	extra := gin.H{"is_new_user": result.IsNewUser}
+	li := h.issuer()
+	if li.gate(c, result.User, gateOptions{Channel: "federated", RequireTOTP: true, AllowRiskChallenge: true}, extra) {
+		return
+	}
+	li.finish(c, result.User, "auth.oauth_login", map[string]interface{}{
+		"provider":    providerName,
+		"is_new_user": result.IsNewUser,
+	}, extra)
 }
 
-type mfaChallengeState struct {
-	UserID      uint64   `json:"user_id"`
-	Methods     []string `json:"methods"`
-	RiskLevel   string   `json:"risk_level"`
-	RiskReasons []string `json:"risk_reasons"`
+// federatedErrorMessage 只向客户端返回联合登录插件明确标记为可公开的错误文本，其余错误统一使用兜底提示，
+// 避免把上游响应体、带密钥的请求地址或数据库错误透传给未认证的调用方。
+func federatedErrorMessage(err error, fallback string) string {
+	var pub *oauthplugin.PublicError
+	if errors.As(err, &pub) {
+		return pub.Error()
+	}
+	return fallback
 }
 
 type sendMFACodeReq struct {
@@ -828,7 +789,7 @@ type sendMFACodeReq struct {
 // SendMFACode 在二步验证阶段向当前用户的绑定手机或邮箱发送一次性验证码。
 func (h *AuthHandler) SendMFACode(c *gin.Context) {
 	if h.otpSvc == nil {
-		Fail(c, http.StatusServiceUnavailable, "验证码服务未初始化")
+		Fail(c, http.StatusServiceUnavailable, "验证码服务暂不可用，请稍后重试")
 		return
 	}
 	var req sendMFACodeReq
@@ -844,6 +805,17 @@ func (h *AuthHandler) SendMFACode(c *gin.Context) {
 	var ch mfaChallengeState
 	if err := json.Unmarshal(raw, &ch); err != nil {
 		Fail(c, http.StatusBadRequest, "验证会话无效")
+		return
+	}
+	method := ""
+	switch strings.ToLower(strings.TrimSpace(req.Channel)) {
+	case "email":
+		method = "email_otp"
+	case "sms":
+		method = "sms_otp"
+	}
+	if method == "" || !slices.Contains(ch.Methods, method) {
+		Fail(c, http.StatusBadRequest, "当前二步验证不支持该验证码通道")
 		return
 	}
 	var user models.User
@@ -888,90 +860,62 @@ func (h *AuthHandler) VerifyMFA(c *gin.Context) {
 		Fail(c, http.StatusBadRequest, "验证会话无效")
 		return
 	}
+	// 只接受挑战下发时允许的方式：已启用 TOTP 的账号不能改用邮件或短信验证码
+	if !slices.Contains(ch.Methods, req.Method) {
+		Fail(c, http.StatusBadRequest, "不支持的二次验证方式")
+		return
+	}
 	var user models.User
 	if err := h.db.First(&user, ch.UserID).Error; err != nil || user.Status != "active" {
 		Fail(c, http.StatusUnauthorized, "账号不可用")
 		return
 	}
 
-	if h.mfaLocked(c, ch.UserID) {
-		Fail(c, http.StatusTooManyRequests, "二步验证失败次数过多，账号已被临时限制，请稍后再试")
+	tokenFails, userFails, ok := h.mfaAttempt(c, req.MFAToken, user.ID)
+	if !ok {
 		return
 	}
 
 	code := strings.TrimSpace(req.Code)
+	verified := false
 	switch req.Method {
 	case "totp":
 		var row models.UserTOTP
-		if err := h.db.Where("user_id = ? AND enabled = ?", user.ID, true).First(&row).Error; err != nil {
-			Fail(c, http.StatusBadRequest, "未启用 TOTP 验证器")
-			return
-		}
-		if !totp.VerifyCode(row.Secret, code, time.Now()) {
-			h.mfaFailed(c, req.MFAToken, user.ID, "验证器动态码不正确")
-			return
+		if h.db.Where("user_id = ? AND enabled = ?", user.ID, true).First(&row).Error == nil {
+			verified = verifyTOTPFactor(ctx, h.stateStore, user.ID, row.Secret, code)
 		}
 	case "recovery_code":
 		var row models.UserTOTP
-		if err := h.db.Where("user_id = ? AND enabled = ?", user.ID, true).First(&row).Error; err != nil {
-			Fail(c, http.StatusBadRequest, "未启用 TOTP 验证器")
-			return
+		if h.db.Where("user_id = ? AND enabled = ?", user.ID, true).First(&row).Error == nil {
+			verified = consumeRecoveryCode(h.db, row, code)
 		}
-		nextHashes, ok := consumeRecoveryCodeHash(parseRecoveryHashes(row.RecoveryCodesJSON), code)
-		if !ok {
-			h.mfaFailed(c, req.MFAToken, user.ID, "备用恢复码不正确或已被使用")
-			return
-		}
-		b, _ := json.Marshal(nextHashes)
-		_ = h.db.Model(&row).Update("recovery_codes_json", string(b)).Error
 	case "email_otp":
-		if h.otpSvc == nil || user.Email == "" {
-			Fail(c, http.StatusBadRequest, "未配置邮箱验证码通道")
-			return
-		}
-		if _, err := h.otpSvc.VerifyCode(ctx, "mfa", user.Email, code); err != nil {
-			h.mfaFailed(c, req.MFAToken, user.ID, err.Error())
-			return
+		if h.otpSvc != nil && user.Email != "" {
+			_, vErr := h.otpSvc.VerifyCode(ctx, "mfa", user.Email, code)
+			verified = vErr == nil
 		}
 	case "sms_otp":
-		if h.otpSvc == nil || user.Phone == "" {
-			Fail(c, http.StatusBadRequest, "未配置短信验证码通道")
-			return
+		if h.otpSvc != nil && user.Phone != "" {
+			_, vErr := h.otpSvc.VerifyCode(ctx, "mfa", user.Phone, code)
+			verified = vErr == nil
 		}
-		if _, err := h.otpSvc.VerifyCode(ctx, "mfa", user.Phone, code); err != nil {
-			h.mfaFailed(c, req.MFAToken, user.ID, err.Error())
-			return
-		}
-	default:
-		Fail(c, http.StatusBadRequest, "不支持的二次验证方式")
+	}
+	if !verified {
+		h.mfaFailed(c, req.MFAToken, user.ID, tokenFails, userFails, "验证码不正确或已过期")
 		return
 	}
 
-	_, _ = h.stateStore.ConsumeMFAChallenge(ctx, req.MFAToken)
-	_ = h.stateStore.ClearFailures(ctx, "mfa_user", fmt.Sprintf("%d", user.ID))
-	accessToken, refreshToken, _, expiresIn, err := createSessionAndTokens(c, h.db, h.jwtMgr, h.stateStore, h.settingsSvc, user)
-	if err != nil {
-		Fail(c, http.StatusInternalServerError, "签发会话令牌失败")
+	// 以原子消费结果作为唯一放行依据：并发提交同一有效验证码时只有一个请求能拿到会话
+	if _, err := h.stateStore.ConsumeMFAChallenge(ctx, req.MFAToken); err != nil {
+		Fail(c, http.StatusBadRequest, "二步验证会话已失效，请重新登录")
 		return
 	}
-	rolesMap, _ := h.enforcer.GetAllUserRoles(user.ID)
-	h.auditSvc.RecordFromContext(c, audit.Entry{
-		ActorID:       user.ID,
-		ActorUsername: user.Username,
-		DomainCode:    rbac.DefaultDomain,
-		Action:        "auth.mfa_verify",
-		ResourceType:  "user",
-		ResourceID:    fmt.Sprintf("%d", user.ID),
-		After:         map[string]interface{}{"method": req.Method},
-		Status:        "success",
-	})
-	OK(c, gin.H{
-		"access_token":  accessToken,
-		"refresh_token": h.deliverRefresh(c, refreshToken, h.settingsSvc.Snapshot().JWTRefreshTTL),
-		"expires_in":    expiresIn,
-		"user":          user,
-		"roles":         rolesMap,
-	})
+	_ = h.stateStore.ClearFailures(ctx, "mfa_user", fmt.Sprintf("%d", user.ID))
+	_ = h.stateStore.ClearFailures(ctx, "mfa_token", req.MFAToken)
+	h.issuer().finish(c, user, "auth.mfa_verify", map[string]interface{}{
+		"method":  req.Method,
+		"channel": ch.Channel,
+	}, ch.Extra)
 }
 
 type otpLoginReq struct {
@@ -983,34 +927,25 @@ type otpLoginReq struct {
 // OTPLogin 使用一次性邮箱或短信验证码无密码登录。
 func (h *AuthHandler) OTPLogin(c *gin.Context) {
 	if h.otpSvc == nil {
-		Fail(c, http.StatusServiceUnavailable, "验证码服务未初始化")
+		Fail(c, http.StatusServiceUnavailable, "验证码服务暂不可用，请稍后重试")
 		return
 	}
 	var req otpLoginReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数错误")
+		Fail(c, http.StatusBadRequest, "请填写手机号或邮箱以及验证码")
 		return
 	}
-	if h.pluginMgr != nil {
-		if cErr := h.pluginMgr.VerifyCaptchaForScene(c.Request.Context(), "login", req.CaptchaToken); cErr != nil {
-			Fail(c, http.StatusBadRequest, cErr.Error())
-			return
-		}
-	}
-	target := strings.TrimSpace(req.Target)
+	// 人机验证在发码环节（otp 场景）完成：验证码只会发到账号本人的邮箱或手机，
+	// 且每个验证码的尝试次数有上限，提交环节再要求一次会让同一页面出现两道验证。
+	target := normalizeContactTarget(req.Target)
 	rec, err := h.otpSvc.VerifyCode(c.Request.Context(), "login", target, req.Code)
 	if err != nil {
-		Fail(c, http.StatusUnauthorized, err.Error())
+		Fail(c, http.StatusUnauthorized, otpFailureMessage(err, "验证码不正确或已过期"))
 		return
 	}
 	var user models.User
-	if rec.UserID > 0 {
-		err = h.db.First(&user, rec.UserID).Error
-	} else {
-		err = h.db.Where("(email <> '' AND LOWER(email) = ?) OR (phone <> '' AND phone = ?)", strings.ToLower(target), target).First(&user).Error
-	}
-	if err != nil || user.Status != "active" {
-		Fail(c, http.StatusUnauthorized, "该邮箱或手机号尚未绑定有效账号")
+	if rec.UserID == 0 || h.db.First(&user, rec.UserID).Error != nil || user.Status != "active" {
+		Fail(c, http.StatusUnauthorized, "验证码不正确或已过期")
 		return
 	}
 	// 已启用 TOTP 的账号不允许仅凭邮箱或短信验证码登录，否则等于绕过二步验证
@@ -1019,35 +954,11 @@ func (h *AuthHandler) OTPLogin(c *gin.Context) {
 		Fail(c, http.StatusForbidden, "该账号已启用二步验证，请使用账号密码登录并完成二步验证")
 		return
 	}
-	now := time.Now()
-	_ = h.db.Model(&user).Updates(map[string]interface{}{
-		"last_login_at": &now,
-		"last_login_ip": clientip.FromGin(c),
-	}).Error
-
-	accessToken, refreshToken, _, expiresIn, err := createSessionAndTokens(c, h.db, h.jwtMgr, h.stateStore, h.settingsSvc, user)
-	if err != nil {
-		Fail(c, http.StatusInternalServerError, "签发会话失败")
+	li := h.issuer()
+	if li.gate(c, user, gateOptions{Channel: "otp"}, nil) {
 		return
 	}
-	rolesMap, _ := h.enforcer.GetAllUserRoles(user.ID)
-	h.auditSvc.RecordFromContext(c, audit.Entry{
-		ActorID:       user.ID,
-		ActorUsername: user.Username,
-		DomainCode:    rbac.DefaultDomain,
-		Action:        "auth.otp_login",
-		ResourceType:  "user",
-		ResourceID:    fmt.Sprintf("%d", user.ID),
-		After:         map[string]interface{}{"channel": rec.Channel},
-		Status:        "success",
-	})
-	OK(c, gin.H{
-		"access_token":  accessToken,
-		"refresh_token": h.deliverRefresh(c, refreshToken, h.settingsSvc.Snapshot().JWTRefreshTTL),
-		"expires_in":    expiresIn,
-		"user":          user,
-		"roles":         rolesMap,
-	})
+	li.finish(c, user, "auth.otp_login", map[string]interface{}{"channel": rec.Channel}, nil)
 }
 
 func computeCapabilities(enforcer *rbac.Enforcer, uid uint64, domain string) []string {

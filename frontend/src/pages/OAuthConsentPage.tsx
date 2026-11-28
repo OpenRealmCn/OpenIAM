@@ -15,6 +15,24 @@ import { CheckCircle as AllowIcon, Cancel as DenyIcon, VerifiedUser as ShieldIco
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../context/AuthContext';
+import { isSafeClientRedirect } from '../utils/redirect';
+
+const SCOPE_LABELS: Record<string, string> = {
+  openid: '确认你的身份',
+  profile: '读取你的显示名称和头像',
+  email: '读取你的邮箱地址',
+  phone: '读取你的手机号',
+  offline_access: '在你未打开应用时保持访问',
+  roles: '读取你的角色',
+};
+
+function redirectHost(uri: string): string {
+  try {
+    return new URL(uri).host;
+  } catch {
+    return uri;
+  }
+}
 
 interface ConsentData {
   id: string;
@@ -36,7 +54,7 @@ export const OAuthConsentPage: React.FC = () => {
 
   useEffect(() => {
     if (!requestId) {
-      setError('缺少授权请求参数 request_id');
+      setError('授权链接无效，请返回应用重新登录');
       setLoading(false);
       return;
     }
@@ -52,6 +70,9 @@ export const OAuthConsentPage: React.FC = () => {
     setError('');
     try {
       const res = await api.oauth2Server.submitConsent(requestId, approved);
+      if (!isSafeClientRedirect(res.redirect_uri)) {
+        throw new Error('该应用的回调地址不安全，已阻止跳转，请联系应用管理员');
+      }
       window.location.href = res.redirect_uri;
     } catch (err) {
       setError((err as Error).message);
@@ -75,9 +96,9 @@ export const OAuthConsentPage: React.FC = () => {
           <Stack direction="row" spacing={1.5} alignItems="center" mb={2}>
             <ShieldIcon color="primary" fontSize="large" />
             <Box>
-              <Typography variant="h6">应用授权确认</Typography>
+              <Typography variant="h6">授权登录</Typography>
               <Typography variant="caption" color="text.secondary">
-                OpenIAM OAuth 2.0 / OIDC 统一授权中心
+                请确认是否允许该应用使用你的账号登录
               </Typography>
             </Box>
           </Stack>
@@ -88,27 +109,28 @@ export const OAuthConsentPage: React.FC = () => {
             <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
               <CircularProgress />
             </Box>
-          ) : error ? (
+          ) : error && !consent ? (
             <Alert severity="error">{error}</Alert>
           ) : consent ? (
             <Stack spacing={2.5}>
+              {error && <Alert severity="error">{error}</Alert>}
               <Box>
                 <Typography variant="body1">
-                  应用 <strong>{consent.client_name}</strong> 请求以您的身份{' '}
-                  <strong>{user?.display_name || user?.username}</strong> 登录并访问以下权限：
+                  <strong>{consent.client_name}</strong> 请求使用你的账号{' '}
+                  <strong>{user?.display_name || user?.username}</strong> 登录，并获得以下权限：
                 </Typography>
                 <Typography variant="caption" color="text.secondary" display="block" mt={0.5}>
-                  所属域: {consent.domain_code} · Client ID: {consent.client_id}
+                  授权后将跳转到 {redirectHost(consent.redirect_uri)}
                 </Typography>
               </Box>
 
               <Box sx={{ p: 2, borderRadius: 2, bgcolor: 'action.hover' }}>
-                <Typography variant="caption" color="text.secondary" display="block" mb={1}>
-                  申请的授权范围 (Scopes):
-                </Typography>
-                <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                <Stack spacing={0.75}>
                   {consent.scopes.map((s) => (
-                    <Chip key={s} label={s} color="primary" size="small" variant="outlined" />
+                    <Stack key={s} direction="row" spacing={1} alignItems="center">
+                      <Chip label={s} size="small" variant="outlined" sx={{ fontFamily: 'monospace' }} />
+                      <Typography variant="body2">{SCOPE_LABELS[s] || '应用自定义权限'}</Typography>
+                    </Stack>
                   ))}
                 </Stack>
               </Box>
@@ -122,7 +144,7 @@ export const OAuthConsentPage: React.FC = () => {
                   disabled={submitting}
                   onClick={() => handleDecision(false)}
                 >
-                  拒绝授权
+                  拒绝
                 </Button>
                 <Button
                   variant="contained"
@@ -131,7 +153,7 @@ export const OAuthConsentPage: React.FC = () => {
                   disabled={submitting}
                   onClick={() => handleDecision(true)}
                 >
-                  {submitting ? '正在跳转...' : '允许授权'}
+                  {submitting ? '正在跳转…' : '允许'}
                 </Button>
               </Stack>
             </Stack>

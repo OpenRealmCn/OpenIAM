@@ -46,14 +46,22 @@ func NewService(
 	}
 }
 
+// SendRequest 描述一次验证码发送。人机验证由调用方按场景完成：二步验证与换绑手机发生在已认证上下文，
+// 不应要求公开场景的人机验证。
 type SendRequest struct {
-	Scene        string // login | mfa | verify
-	Channel      string // sms | email
-	Target       string // 手机号或邮箱（或备用识别用户）
-	User         *models.User
-	ClientIP     string
-	CaptchaToken string
+	Scene    string // login | register | mfa | bind_phone
+	Channel  string // sms | email
+	Target   string // 手机号或邮箱（或备用识别用户）
+	User     *models.User
+	ClientIP string
+	// RateChecked 为 true 表示调用方已调用 CheckRate 完成频控（用于对存在与不存在的账号保持一致的频控行为）。
+	RateChecked bool
+	// NoFallback 禁止短信失败后降级到账号邮箱：用于必须证明持有目标手机号的场景（如换绑手机）。
+	NoFallback bool
 }
+
+// ErrDeliveryFailed 表示验证码投递失败；具体原因只写入投递记录，不返回给调用方。
+var ErrDeliveryFailed = errors.New("验证码发送失败，请稍后重试或联系管理员")
 
 type SendResult struct {
 	Sent       bool   `json:"sent"`
@@ -63,22 +71,30 @@ type SendResult struct {
 	TTLMinutes int    `json:"ttl_minutes"`
 }
 
-func generateCode() string {
+// GenerateCode 生成 6 位随机数字验证码；随机源失败时返回错误，绝不回退到固定值。
+func GenerateCode() (string, error) {
 	n, err := rand.Int(rand.Reader, big.NewInt(1000000))
 	if err != nil {
-		return "000000"
+		return "", err
 	}
-	return fmt.Sprintf("%06d", n.Int64())
+	return fmt.Sprintf("%06d", n.Int64()), nil
 }
 
-// SendCode 发送短信或邮件一次性验证码，内置人机验证检查、频控防刷、短信成本预算告警与异常自动降级。
-func (s *Service) SendCode(ctx context.Context, req SendRequest) (*SendResult, error) {
-	if s.pluginMgr != nil {
-		if err := s.pluginMgr.VerifyCaptchaForScene(ctx, "otp", req.CaptchaToken); err != nil {
-			return nil, err
-		}
-	}
+func rateKey(scene, target string) string {
+	return strings.ToLower(scene + ":" + strings.TrimSpace(target))
+}
 
+// CheckRate 按场景+目标与来源 IP 执行发送频控。
+func (s *Service) CheckRate(ctx context.Context, scene, target, clientIP string) error {
+	snap := s.settingsSvc.Snapshot()
+	return s.stateStore.CheckAndIncrOTPRate(
+		ctx, rateKey(scene, target), clientIP,
+		snap.OTPCooldownSeconds, snap.OTPMaxPerHourTarget, snap.OTPMaxPerIPHour,
+	)
+}
+
+// SendCode 发送短信或邮件一次性验证码，内置频控防刷、短信成本预算告警与异常自动降级。
+func (s *Service) SendCode(ctx context.Context, req SendRequest) (*SendResult, error) {
 	snap := s.settingsSvc.Snapshot()
 	channel := strings.ToLower(strings.TrimSpace(req.Channel))
 	if channel != "sms" && channel != "email" {
@@ -98,17 +114,18 @@ func (s *Service) SendCode(ctx context.Context, req SendRequest) (*SendResult, e
 	}
 
 	// 1. Redis 防刷频控
-	rateKey := strings.ToLower(req.Scene + ":" + target)
-	if err := s.stateStore.CheckAndIncrOTPRate(
-		ctx, rateKey, req.ClientIP,
-		snap.OTPCooldownSeconds, snap.OTPMaxPerHourTarget, snap.OTPMaxPerIPHour,
-	); err != nil {
-		return nil, err
+	if !req.RateChecked {
+		if err := s.CheckRate(ctx, req.Scene, target, req.ClientIP); err != nil {
+			return nil, err
+		}
 	}
 
-	code := generateCode()
+	code, err := GenerateCode()
+	if err != nil {
+		return nil, errors.New("生成验证码失败，请稍后重试")
+	}
 	const ttlMin = 10
-	scopeKey := strings.ToLower(req.Scene + ":" + target)
+	scopeKey := rateKey(req.Scene, target)
 	uid := uint64(0)
 	username := "用户"
 	emailAddr := ""
@@ -158,15 +175,14 @@ func (s *Service) SendCode(ctx context.Context, req SendRequest) (*SendResult, e
 				ErrorMessage: smsErr.Error(),
 			})
 			// 若开启了降级开关且有可用邮箱，则自动降级为邮件通道
-			if snap.OTPFallbackToEmail && emailAddr != "" && snap.SMTPEnabled {
+			if !req.NoFallback && snap.OTPFallbackToEmail && emailAddr != "" && snap.SMTPEnabled {
 				if eErr := s.dispatchEmail(ctx, uid, emailAddr, code, vars, "degraded"); eErr != nil {
-					return nil, fmt.Errorf("短信发送失败（%s），且降级邮件发送失败（%s）", smsErr.Error(), eErr.Error())
+					return nil, ErrDeliveryFailed
 				}
 				degraded = true
 				actualChannel = "email"
-				scopeKey = strings.ToLower(req.Scene + ":" + target) // 仍按原请求目标匹配或通过用户关联核销
 			} else {
-				return nil, fmt.Errorf("短信发送失败: %s", smsErr.Error())
+				return nil, ErrDeliveryFailed
 			}
 		} else {
 			costCents = int64(snap.OTPSMSCostCents)
@@ -219,7 +235,7 @@ func (s *Service) SendCode(ctx context.Context, req SendRequest) (*SendResult, e
 
 func (s *Service) dispatchSMS(ctx context.Context, phone, code string, vars map[string]string) (string, error) {
 	if s.pluginMgr == nil {
-		return "", errors.New("未初始化插件管理器")
+		return "", errors.New("短信服务暂不可用")
 	}
 	list, err := s.pluginMgr.ActiveBySlot(plugins.SlotSMS)
 	if err != nil || len(list) == 0 {
@@ -277,7 +293,7 @@ func (s *Service) dispatchEmail(ctx context.Context, uid uint64, emailAddr, code
 			ProviderName: "smtp",
 			ErrorMessage: sendErr.Error(),
 		})
-		return fmt.Errorf("邮件发送失败: %s", sendErr.Error())
+		return ErrDeliveryFailed
 	}
 	_ = s.notifySvc.RecordDelivery(ctx, &models.NotificationDelivery{
 		TemplateCode: "otp_verify",
@@ -293,6 +309,5 @@ func (s *Service) dispatchEmail(ctx context.Context, uid uint64, emailAddr, code
 
 // VerifyCode 校验并原子消费短信/邮件 OTP 验证码（最多允许输错 5 次）。
 func (s *Service) VerifyCode(ctx context.Context, scene, target, code string) (*security.OTPRecord, error) {
-	scopeKey := strings.ToLower(strings.TrimSpace(scene) + ":" + strings.TrimSpace(target))
-	return s.stateStore.VerifyAndConsumeOTP(ctx, scopeKey, strings.TrimSpace(code), 5)
+	return s.stateStore.VerifyAndConsumeOTP(ctx, rateKey(strings.TrimSpace(scene), target), strings.TrimSpace(code), 5)
 }

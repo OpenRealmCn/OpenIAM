@@ -1,9 +1,9 @@
 package handlers
 
 import (
-	"net/url"
 	"slices"
-	"strings"
+
+	"github.com/openrealm/openiam/internal/security"
 )
 
 // validateSelfServiceClient 校验普通用户自助创建或修改的 OAuth 应用参数，防止通过自助接口申请高权限授权。
@@ -20,14 +20,27 @@ func validateSelfServiceClient(grantTypes, scopes, redirectURIs []string) string
 		}
 	}
 	for _, raw := range redirectURIs {
-		u, err := url.Parse(strings.TrimSpace(raw))
-		if err != nil || u.Host == "" || u.Fragment != "" || strings.Contains(raw, "*") {
-			return "回调地址格式无效"
+		if err := security.ValidateClientRedirectURI(raw, false); err != nil {
+			return err.Error()
 		}
-		host := u.Hostname()
-		local := host == "localhost" || host == "127.0.0.1" || host == "::1"
-		if u.Scheme != "https" && !(u.Scheme == "http" && local) {
-			return "回调地址必须使用 https（本机回环地址允许 http）"
+	}
+	return ""
+}
+
+// validateClientCommon 对所有 OAuth 应用（含管理员创建）执行的基础校验：回调地址协议安全，
+// 公共客户端（无法保管密钥）必须强制 PKCE，且不能使用 client_credentials。
+func validateClientCommon(redirectURIs, grantTypes []string, isConfidential, requirePKCE bool) string {
+	for _, raw := range redirectURIs {
+		if err := security.ValidateClientRedirectURI(raw, true); err != nil {
+			return err.Error()
+		}
+	}
+	if !isConfidential {
+		if !requirePKCE {
+			return "公共客户端必须启用 PKCE"
+		}
+		if slices.Contains(grantTypes, "client_credentials") {
+			return "公共客户端不能使用 client_credentials 授权类型"
 		}
 	}
 	return ""

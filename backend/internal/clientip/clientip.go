@@ -211,6 +211,15 @@ func ResolveWithPolicy(r *http.Request, p *Policy) string {
 	return resolved
 }
 
+// IsFromTrustedProxy 判断请求的直连来源是否为当前策略中的可信代理；只有可信代理声明的转发头才能被采信。
+func IsFromTrustedProxy(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	addr, _ := parseRemoteAddr(r.RemoteAddr)
+	return isTrustedAddr(addr, CurrentPolicy().TrustedPrefixes)
+}
+
 // IsPublicIP 判断字符串是否为公网可路由 IP（排除回环、私网、链路本地、CGNAT、未指定地址等）。
 func IsPublicIP(ipStr string) bool {
 	addr, err := netip.ParseAddr(strings.TrimSpace(ipStr))

@@ -3,9 +3,11 @@ package oauthplugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -146,18 +148,28 @@ func fetchJSON(ctx context.Context, client *http.Client, req *http.Request, out 
 		client = upstreamClient
 	}
 	req = req.WithContext(ctx)
+	// 错误信息只保留主机与路径：部分身份源（如企业微信）要求把密钥放在查询参数里，完整 URL 不能进入日志或审计
+	endpoint := req.URL.Host + req.URL.Path
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			err = uerr.Err
+		}
+		return nil, fmt.Errorf("request %s failed: %w", endpoint, err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read %s response: %w", endpoint, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("upstream status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		snippet := strings.TrimSpace(string(body))
+		if len(snippet) > 256 {
+			snippet = snippet[:256] + "..."
+		}
+		return nil, fmt.Errorf("upstream %s status %d: %s", endpoint, resp.StatusCode, snippet)
 	}
 
 	var rawMap map[string]interface{}

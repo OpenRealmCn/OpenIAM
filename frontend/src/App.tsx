@@ -1,5 +1,5 @@
-import React, { useMemo } from 'react';
-import { CssBaseline, ThemeProvider, useMediaQuery } from '@mui/material';
+import React, { lazy, Suspense, useMemo } from 'react';
+import { Box, CircularProgress, CssBaseline, ThemeProvider, useMediaQuery } from '@mui/material';
 import { MotionConfig } from 'framer-motion';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import dayjs from 'dayjs';
@@ -11,28 +11,52 @@ import { buildOpenIAMTheme } from './theme/theme';
 import { AppLayout } from './components/AppLayout';
 import { CapabilityGuard } from './components/CapabilityGuard';
 import { ProtectedRoute } from './components/ProtectedRoute';
-import { LoginPage } from './pages/LoginPage';
-import { ChangePasswordPage } from './pages/ChangePasswordPage';
-import { OAuthCallbackPage } from './pages/OAuthCallbackPage';
-import { OAuthConsentPage } from './pages/OAuthConsentPage';
-import { DashboardPage } from './pages/DashboardPage';
-import { UserPortalPage } from './pages/UserPortalPage';
-import { ProfilePage } from './pages/ProfilePage';
-import { UsersPage } from './pages/UsersPage';
-import { DomainsPage } from './pages/DomainsPage';
-import { RolesPage } from './pages/RolesPage';
-import { PermissionsPage } from './pages/PermissionsPage';
-import { OAuthAppsPage } from './pages/OAuthAppsPage';
-import { AuditLogsPage } from './pages/AuditLogsPage';
-import { SystemSettingsPage } from './pages/SystemSettingsPage';
-import { SystemVersionPage } from './pages/SystemVersionPage';
-import { JitGrantsPage } from './pages/JitGrantsPage';
-import { SessionsPage } from './pages/SessionsPage';
-import { NotificationsPage } from './pages/NotificationsPage';
-import { PluginsPage } from './pages/PluginsPage';
-import { RiskEventsPage } from './pages/RiskEventsPage';
+import { ReauthDialog } from './components/ReauthDialog';
+import { ConfirmProvider } from './components/ConfirmDialog';
 
 dayjs.locale('zh-cn');
+
+function lazyPage<T extends React.ComponentType>(loader: () => Promise<T>) {
+  return lazy(() => loader().then((component) => ({ default: component })));
+}
+
+const LoginPage = lazyPage(() => import('./pages/LoginPage').then((m) => m.LoginPage));
+const ChangePasswordPage = lazyPage(() => import('./pages/ChangePasswordPage').then((m) => m.ChangePasswordPage));
+const OAuthCallbackPage = lazyPage(() => import('./pages/OAuthCallbackPage').then((m) => m.OAuthCallbackPage));
+const OAuthConsentPage = lazyPage(() => import('./pages/OAuthConsentPage').then((m) => m.OAuthConsentPage));
+const DashboardPage = lazyPage(() => import('./pages/DashboardPage').then((m) => m.DashboardPage));
+const UserPortalPage = lazyPage(() => import('./pages/UserPortalPage').then((m) => m.UserPortalPage));
+const ProfilePage = lazyPage(() => import('./pages/ProfilePage').then((m) => m.ProfilePage));
+const UsersPage = lazyPage(() => import('./pages/UsersPage').then((m) => m.UsersPage));
+const DomainsPage = lazyPage(() => import('./pages/DomainsPage').then((m) => m.DomainsPage));
+const RolesPage = lazyPage(() => import('./pages/RolesPage').then((m) => m.RolesPage));
+const PermissionsPage = lazyPage(() => import('./pages/PermissionsPage').then((m) => m.PermissionsPage));
+const OAuthAppsPage = lazyPage(() => import('./pages/OAuthAppsPage').then((m) => m.OAuthAppsPage));
+const AuditLogsPage = lazyPage(() => import('./pages/AuditLogsPage').then((m) => m.AuditLogsPage));
+const SystemSettingsPage = lazyPage(() => import('./pages/SystemSettingsPage').then((m) => m.SystemSettingsPage));
+const SystemVersionPage = lazyPage(() => import('./pages/SystemVersionPage').then((m) => m.SystemVersionPage));
+const JitGrantsPage = lazyPage(() => import('./pages/JitGrantsPage').then((m) => m.JitGrantsPage));
+const SessionsPage = lazyPage(() => import('./pages/SessionsPage').then((m) => m.SessionsPage));
+const NotificationsPage = lazyPage(() => import('./pages/NotificationsPage').then((m) => m.NotificationsPage));
+const PluginsPage = lazyPage(() => import('./pages/PluginsPage').then((m) => m.PluginsPage));
+const RiskEventsPage = lazyPage(() => import('./pages/RiskEventsPage').then((m) => m.RiskEventsPage));
+
+const RouteFallback: React.FC<{ fullPage?: boolean }> = ({ fullPage = false }) => (
+  <Box
+    sx={{
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minHeight: fullPage ? '100vh' : 280,
+    }}
+  >
+    <CircularProgress size={28} />
+  </Box>
+);
+
+function page(node: React.ReactNode, fullPage = false) {
+  return <Suspense fallback={<RouteFallback fullPage={fullPage} />}>{node}</Suspense>;
+}
 
 const HomeEntry: React.FC = () => {
   const { adminTier } = useAuth();
@@ -73,25 +97,29 @@ export const App: React.FC = () => {
       >
         <SiteProvider>
           <AuthProvider>
+            <ConfirmProvider>
+            <ReauthDialog />
             <BrowserRouter>
               <Routes>
-                <Route path="/login" element={<LoginPage />} />
+                <Route path="/login" element={page(<LoginPage />, true)} />
                 <Route
                   path="/change-password"
-                  element={
+                  element={page(
                     <ProtectedRoute>
                       <ChangePasswordPage />
-                    </ProtectedRoute>
-                  }
+                    </ProtectedRoute>,
+                    true,
+                  )}
                 />
-                <Route path="/oauth/callback/:provider" element={<OAuthCallbackPage />} />
+                <Route path="/oauth/callback/:provider" element={page(<OAuthCallbackPage />, true)} />
                 <Route
                   path="/oauth2/consent"
-                  element={
+                  element={page(
                     <ProtectedRoute>
                       <OAuthConsentPage />
-                    </ProtectedRoute>
-                  }
+                    </ProtectedRoute>,
+                    true,
+                  )}
                 />
                 <Route
                   path="/"
@@ -101,66 +129,66 @@ export const App: React.FC = () => {
                     </ProtectedRoute>
                   }
                 >
-                  <Route index element={<HomeEntry />} />
-                  <Route path="portal" element={<UserPortalPage />} />
-                  <Route path="profile" element={<ProfilePage />} />
-                  <Route path="notifications" element={<NotificationsPage />} />
-                  <Route path="oauth-apps" element={<OAuthAppsPage />} />
+                  <Route index element={page(<HomeEntry />)} />
+                  <Route path="portal" element={page(<UserPortalPage />)} />
+                  <Route path="profile" element={page(<ProfilePage />)} />
+                  <Route path="notifications" element={page(<NotificationsPage />)} />
+                  <Route path="oauth-apps" element={page(<OAuthAppsPage />)} />
                   <Route
                     path="users"
-                    element={
+                    element={page(
                       <CapabilityGuard cap="users:read">
                         <UsersPage />
-                      </CapabilityGuard>
-                    }
+                      </CapabilityGuard>,
+                    )}
                   />
                   <Route
                     path="domains"
-                    element={
+                    element={page(
                       <CapabilityGuard tiers={['platform_admin']}>
                         <DomainsPage />
-                      </CapabilityGuard>
-                    }
+                      </CapabilityGuard>,
+                    )}
                   />
                   <Route
                     path="roles"
-                    element={
+                    element={page(
                       <CapabilityGuard cap="roles:read">
                         <RolesPage />
-                      </CapabilityGuard>
-                    }
+                      </CapabilityGuard>,
+                    )}
                   />
                   <Route
                     path="permissions"
-                    element={
+                    element={page(
                       <CapabilityGuard cap="permissions:read">
                         <PermissionsPage />
-                      </CapabilityGuard>
-                    }
+                      </CapabilityGuard>,
+                    )}
                   />
                   <Route
                     path="jit-grants"
-                    element={
+                    element={page(
                       <CapabilityGuard cap="jit:read">
                         <JitGrantsPage />
-                      </CapabilityGuard>
-                    }
+                      </CapabilityGuard>,
+                    )}
                   />
                   <Route
                     path="sessions"
-                    element={
+                    element={page(
                       <CapabilityGuard cap="sessions:read">
                         <SessionsPage />
-                      </CapabilityGuard>
-                    }
+                      </CapabilityGuard>,
+                    )}
                   />
                   <Route
                     path="risk-events"
-                    element={
+                    element={page(
                       <CapabilityGuard cap="risk:read">
                         <RiskEventsPage />
-                      </CapabilityGuard>
-                    }
+                      </CapabilityGuard>,
+                    )}
                   />
                   <Route
                     path="identity-providers"
@@ -168,40 +196,41 @@ export const App: React.FC = () => {
                   />
                   <Route
                     path="plugins"
-                    element={
+                    element={page(
                       <CapabilityGuard tiers={['platform_admin']}>
                         <PluginsPage />
-                      </CapabilityGuard>
-                    }
+                      </CapabilityGuard>,
+                    )}
                   />
                   <Route
                     path="audit-logs"
-                    element={
+                    element={page(
                       <CapabilityGuard cap="audit_logs:read">
                         <AuditLogsPage />
-                      </CapabilityGuard>
-                    }
+                      </CapabilityGuard>,
+                    )}
                   />
                   <Route
                     path="system-settings"
-                    element={
+                    element={page(
                       <CapabilityGuard tiers={['platform_admin']}>
                         <SystemSettingsPage />
-                      </CapabilityGuard>
-                    }
+                      </CapabilityGuard>,
+                    )}
                   />
                   <Route
                     path="system-version"
-                    element={
+                    element={page(
                       <CapabilityGuard cap="system:read">
                         <SystemVersionPage />
-                      </CapabilityGuard>
-                    }
+                      </CapabilityGuard>,
+                    )}
                   />
                 </Route>
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
             </BrowserRouter>
+            </ConfirmProvider>
           </AuthProvider>
         </SiteProvider>
       </MotionConfig>

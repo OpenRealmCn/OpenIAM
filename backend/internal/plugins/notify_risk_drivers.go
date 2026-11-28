@@ -3,9 +3,14 @@ package plugins
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/openrealm/openiam/internal/models"
 )
@@ -26,7 +31,7 @@ func (d *WebhookNotifyDriver) Metadata() DriverMetadata {
 		Description: "当发生高风险登录或短信成本预算告警时，同步推送消息至飞书/钉钉/企业微信或运维 Webhook。",
 		Fields: []ConfigField{
 			{Key: "webhook_url", Label: "Webhook URL", Type: "url", Required: true, Placeholder: "https://open.feishu.cn/open-apis/bot/v2/hook/..."},
-			{Key: "secret", Label: "签名密钥（可选）", Type: "password"},
+			{Key: "secret", Label: "签名密钥（可选）", Type: "password", Description: "设置后请求头携带 X-OpenIAM-Timestamp 与 X-OpenIAM-Signature: sha256=HMAC-SHA256(secret, timestamp + \".\" + body)。"},
 		},
 	}
 }
@@ -55,6 +60,11 @@ func (d *WebhookNotifyDriver) Push(ctx context.Context, cfg models.JSONMap, titl
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if secret := cfgStr(cfg, "secret", ""); secret != "" {
+		ts, sig := signWebhook(secret, body, time.Now())
+		req.Header.Set("X-OpenIAM-Timestamp", ts)
+		req.Header.Set("X-OpenIAM-Signature", sig)
+	}
 	resp, err := NewSafeHTTPClient().Do(req)
 	if err != nil {
 		return err
@@ -64,6 +74,17 @@ func (d *WebhookNotifyDriver) Push(ctx context.Context, cfg models.JSONMap, titl
 		return fmt.Errorf("Webhook 返回状态码 %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// signWebhook 计算 Webhook 签名：sha256=hex(HMAC-SHA256(secret, timestamp + "." + body))。
+// 接收方应校验签名并拒绝时间戳偏差过大的请求以防重放。
+func signWebhook(secret string, body []byte, now time.Time) (timestamp, signature string) {
+	timestamp = strconv.FormatInt(now.Unix(), 10)
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(timestamp))
+	mac.Write([]byte("."))
+	mac.Write(body)
+	return timestamp, "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
 // LocalIPReputationRiskDriver 内置 IP 信誉与频次评估风控插件。

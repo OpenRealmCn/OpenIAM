@@ -15,17 +15,22 @@ const (
 	mfaMaxFailuresPerUser  = 10
 )
 
-// mfaLocked 判断用户是否因二步验证连续失败而被临时限制；Redis 异常时按已锁定处理（fail-closed）。
-func (h *AuthHandler) mfaLocked(c *gin.Context, userID uint64) bool {
-	n, err := h.stateStore.FailureCount(c.Request.Context(), "mfa_user", fmt.Sprintf("%d", userID))
-	return err != nil || n >= mfaMaxFailuresPerUser
-}
-
-// mfaFailed 记录一次二步验证失败：同时按 mfa_token 与用户累计，任一超限即销毁当前挑战，防止暴力猜测动态码或恢复码。
-func (h *AuthHandler) mfaFailed(c *gin.Context, token string, userID uint64, msg string) {
+// mfaAttempt 在校验因子之前先累计尝试次数：先计数后校验，保证并发请求无法在计数生效前挤进额外的猜测。
+// 超限或 Redis 异常时销毁当前挑战并直接响应，返回 ok=false。
+func (h *AuthHandler) mfaAttempt(c *gin.Context, token string, userID uint64) (tokenFails, userFails int64, ok bool) {
 	ctx := c.Request.Context()
 	tokenFails, tErr := h.stateStore.IncrFailure(ctx, "mfa_token", token, 5*time.Minute)
 	userFails, uErr := h.stateStore.IncrFailure(ctx, "mfa_user", fmt.Sprintf("%d", userID), 15*time.Minute)
+	if tErr != nil || uErr != nil || tokenFails > mfaMaxFailuresPerToken || userFails > mfaMaxFailuresPerUser {
+		_, _ = h.stateStore.ConsumeMFAChallenge(ctx, token)
+		Fail(c, http.StatusTooManyRequests, "二步验证失败次数过多，请重新登录后再试")
+		return tokenFails, userFails, false
+	}
+	return tokenFails, userFails, true
+}
+
+// mfaFailed 处理一次校验失败：写审计，并在本次已用满额度时销毁挑战，迫使攻击者重新通过密码校验。
+func (h *AuthHandler) mfaFailed(c *gin.Context, token string, userID uint64, tokenFails, userFails int64, msg string) {
 	h.auditSvc.RecordFromContext(c, audit.Entry{
 		ActorID:      userID,
 		DomainCode:   rbac.DefaultDomain,
@@ -35,8 +40,8 @@ func (h *AuthHandler) mfaFailed(c *gin.Context, token string, userID uint64, msg
 		Status:       "failed",
 		ErrorMessage: "invalid mfa factor",
 	})
-	if tErr != nil || uErr != nil || tokenFails >= mfaMaxFailuresPerToken || userFails >= mfaMaxFailuresPerUser {
-		_, _ = h.stateStore.ConsumeMFAChallenge(ctx, token)
+	if tokenFails >= mfaMaxFailuresPerToken || userFails >= mfaMaxFailuresPerUser {
+		_, _ = h.stateStore.ConsumeMFAChallenge(c.Request.Context(), token)
 		Fail(c, http.StatusTooManyRequests, "二步验证失败次数过多，请重新登录后再试")
 		return
 	}

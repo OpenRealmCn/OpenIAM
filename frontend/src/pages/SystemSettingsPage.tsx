@@ -30,50 +30,51 @@ import {
 } from '@mui/icons-material';
 import dayjs from 'dayjs';
 import { api } from '../api/client';
+import { useConfirm } from '../components/ConfirmDialog';
 import { AnimatedRefreshIcon } from '../components/PageTransition';
 import { useSite } from '../context/SiteContext';
 import { ClientIPMethodPreview, ClientIPPreviewResult, SystemSetting } from '../types/api';
 
 const categoryMeta: Record<string, { label: string; desc: string }> = {
-  site: { label: '站点与公告', desc: '配置站点名称、全局图标、浏览器标签图标、页脚版权与全站首页公告' },
-  smtp: { label: '邮件服务', desc: '配置 SMTP 发件服务器，用于发送测试邮件、邮箱验证码与找回密码' },
-  otp: { label: '验证码与防刷', desc: '配置短信与邮件验证码的频控阈值、单条成本折算、日预算告警及异常降级策略' },
-  risk: { label: '风险自适应认证', desc: '配置 IP 信誉、异地、设备变化等维度的风险阈值与处置动作' },
-  captcha: { label: '人机验证策略', desc: '配置登录、注册、发送验证码场景是否启用人机验证（在插件中心配置验证服务）' },
-  security: { label: '登录与安全', desc: '管理账号锁定阈值、锁定时长及用户公开注册开关' },
-  jwt: { label: '令牌设置', desc: '配置访问令牌与刷新令牌的签发方及有效期' },
-  ratelimit: { label: '请求限流', desc: '配置按来源 IP 的接口频率保护规则' },
-  oauth_server: { label: 'OAuth / OIDC 服务', desc: '配置对外授权服务的标识、确认页与令牌有效期' },
-  oauth_plugin: { label: '第三方登录回调', desc: '配置外部登录方式的默认回调地址前缀' },
-  server: { label: '网络与真实 IP', desc: '配置客户端真实 IP 获取方式、可信反向代理网段及跨域来源白名单' },
+  site: { label: '站点与公告', desc: '配置站点名称、全局图标、浏览器标签图标、页脚版权与全站首页公告。' },
+  smtp: { label: '邮件服务', desc: '配置 SMTP 发件服务器，用于发送测试邮件、邮箱验证码与找回密码邮件。' },
+  otp: { label: '验证码与防刷', desc: '配置短信与邮件验证码的频控阈值、单条成本折算、日预算告警及异常降级策略。' },
+  risk: { label: '风险自适应认证', desc: '配置来源 IP 信誉、异地登录、设备变化等维度的风险阈值与处置动作。' },
+  captcha: { label: '人机验证策略', desc: '配置登录、注册、发送验证码场景是否启用人机验证（可在插件中心配置验证服务）。' },
+  security: { label: '登录与安全', desc: '管理密码策略、账号锁定阈值、锁定时长及用户自主注册开关。' },
+  jwt: { label: '令牌设置', desc: '配置访问令牌与刷新令牌的签发方及有效期。' },
+  ratelimit: { label: '请求限流', desc: '配置按来源 IP 的接口频率保护规则。' },
+  oauth_server: { label: 'OAuth / OIDC 服务', desc: '配置对外授权服务的标识、确认页与令牌有效期。' },
+  oauth_plugin: { label: '第三方登录回调', desc: '配置外部登录方式的默认回调地址前缀。' },
+  server: { label: '网络与真实 IP', desc: '配置客户端真实 IP 获取方式、可信反向代理网段及跨域来源白名单。' },
 };
 
 const categoryOrder = ['site', 'smtp', 'otp', 'risk', 'captcha', 'security', 'jwt', 'ratelimit', 'oauth_server', 'oauth_plugin', 'server'];
 
 const SELECT_OPTIONS: Record<string, { value: string; label: string }[]> = {
   'site.announcement_type': [
-    { value: 'info', label: '普通通知（蓝色）' },
-    { value: 'success', label: '积极提示（绿色）' },
-    { value: 'warning', label: '维护警告（橙色）' },
-    { value: 'error', label: '重要告警（红色）' },
+    { value: 'info', label: '提示（蓝色）' },
+    { value: 'success', label: '成功（绿色）' },
+    { value: 'warning', label: '警告（橙色）' },
+    { value: 'error', label: '错误（红色）' },
   ],
   'smtp.encryption': [
     { value: 'starttls', label: 'STARTTLS（推荐，常用端口 587）' },
-    { value: 'tls', label: '隐式 SSL/TLS（常用端口 465）' },
-    { value: 'none', label: '明文无加密（仅限内网中继）' },
+    { value: 'tls', label: 'SSL/TLS（隐式加密，常用端口 465）' },
+    { value: 'none', label: '不加密（仅限内网中继）' },
   ],
   'risk.high_action': [
-    { value: 'challenge_mfa', label: '强制二次身份验证（推荐）' },
-    { value: 'notify', label: '仅写入风险日志并发送安全提醒' },
-    { value: 'block', label: '直接阻断该次登录请求' },
+    { value: 'challenge_mfa', label: '要求两步验证（推荐）' },
+    { value: 'notify', label: '仅通知（记录风险日志并发送安全提醒）' },
+    { value: 'block', label: '直接阻断' },
   ],
   'server.client_ip_method': [
-    { value: 'remote_addr', label: '直连来源 IP（TCP RemoteAddr）' },
-    { value: 'x_forwarded_for', label: '反向代理链（X-Forwarded-For，默认）' },
-    { value: 'x_real_ip', label: '单层反代头（X-Real-IP）' },
-    { value: 'cf_connecting_ip', label: 'Cloudflare CDN（CF-Connecting-IP）' },
-    { value: 'true_client_ip', label: '通用 CDN / WAF（True-Client-IP）' },
-    { value: 'custom_header', label: '自定义请求头（Custom Header）' },
+    { value: 'remote_addr', label: 'RemoteAddr（直连来源 IP）' },
+    { value: 'x_forwarded_for', label: 'X-Forwarded-For（反向代理链，默认）' },
+    { value: 'x_real_ip', label: 'X-Real-IP（单层反向代理头）' },
+    { value: 'cf_connecting_ip', label: 'CF-Connecting-IP（Cloudflare CDN）' },
+    { value: 'true_client_ip', label: 'True-Client-IP（通用 CDN / WAF）' },
+    { value: 'custom_header', label: 'Custom Header（自定义请求头）' },
   ],
   'security.register_email_mode': [
     { value: 'disabled', label: '关闭（注册时不收集邮箱）' },
@@ -86,13 +87,49 @@ const SELECT_OPTIONS: Record<string, { value: string; label: string }[]> = {
     { value: 'required', label: '必填（必须提供手机号）' },
   ],
   'security.register_verify_mode': [
-    { value: 'none', label: '无需验证码（直接注册）' },
-    { value: 'email', label: '需验证邮箱验证码' },
-    { value: 'sms', label: '需验证手机短信验证码' },
-    { value: 'either', label: '邮箱或短信验证码二选一' },
-    { value: 'both', label: '邮箱与短信验证码均需验证' },
+    { value: 'none', label: '无需验证码' },
+    { value: 'email', label: '邮箱验证码' },
+    { value: 'sms', label: '短信验证码' },
+    { value: 'either', label: '二选一（邮箱或短信验证码）' },
+    { value: 'both', label: '两者均需（邮箱与短信验证码）' },
   ],
 };
+
+const INT_CONSTRAINTS: Record<string, { min?: number; max?: number; helperText?: string }> = {
+  'password.min_length': { min: 8, max: 64, helperText: '取值范围：8 至 64 位' },
+};
+
+function getDangerousChangeRisk(key: string, prevVal: string, nextVal: string): string | null {
+  if (prevVal === nextVal) return null;
+  switch (key) {
+    case 'security.allow_private_upstream':
+      return nextVal === 'true' ? '允许访问内网或私网地址，可能增加服务端请求伪造风险。' : null;
+    case 'server.cors_allow_origins':
+      return '变更跨域来源白名单可能影响前端正常访问，或意外放宽跨域限制。';
+    case 'server.trusted_proxies':
+      return '变更可信反向代理网段会影响真实客户端 IP 识别、审计与限流防护。';
+    case 'server.client_ip_method':
+      return '变更真实客户端 IP 获取方式会影响登录审计、风控判定与请求限流。';
+    case 'risk.trust_geo_header':
+      return nextVal === 'true' ? '开启后将采信地理位置请求头；若前置网关未覆写该头，客户端可能伪造归属地。' : null;
+    case 'ratelimit.enabled':
+      return nextVal === 'false' ? '关闭请求限流将降低系统抵御暴力破解与恶意高频请求的能力。' : null;
+    case 'security.allow_public_register':
+      return nextVal === 'true' ? '开放用户自主注册后，任何访客均可自行创建账号。' : null;
+    case 'captcha.protect_login':
+      return nextVal === 'false' ? '关闭登录人机验证将增加撞库与暴力破解风险。' : null;
+    case 'captcha.protect_register':
+      return nextVal === 'false' ? '关闭注册人机验证将增加批量恶意注册风险。' : null;
+    case 'captcha.protect_otp':
+      return nextVal === 'false' ? '关闭验证码发送人机验证将增加短信与邮件通道被恶意刷取的风险。' : null;
+    case 'jwt.access_token_ttl_minutes':
+      return '变更访问令牌有效期将影响全局会话安全窗口，过长会增大令牌泄露后的影响时间。';
+    case 'jwt.refresh_token_ttl_hours':
+      return '变更刷新令牌有效期将影响用户的免登录保持时长与会话回收周期。';
+    default:
+      return null;
+  }
+}
 
 const IP_PREVIEW_STATUS_META: Record<
   ClientIPMethodPreview['status'],
@@ -108,6 +145,7 @@ const IP_PREVIEW_STATUS_META: Record<
 
 export const SystemSettingsPage: React.FC = () => {
   const theme = useTheme();
+  const confirm = useConfirm();
   const { refreshSiteInfo } = useSite();
   const [items, setItems] = useState<SystemSetting[]>([]);
   const [draft, setDraft] = useState<Record<string, string>>({});
@@ -204,22 +242,62 @@ export const SystemSettingsPage: React.FC = () => {
   }, [items, draft]);
 
   const handleSave = async () => {
-    setSaving(true);
     setError('');
     setSuccess('');
-    try {
-      const changed: Record<string, string> = {};
-      for (const item of items) {
-        const val = draft[item.setting_key] ?? '';
-        if (val !== item.value) {
-          changed[item.setting_key] = val;
+    const changed: Record<string, string> = {};
+    const dangerousChanges: { label: string; key: string; risk: string }[] = [];
+    for (const item of items) {
+      const val = draft[item.setting_key] ?? '';
+      if (val !== item.value) {
+        changed[item.setting_key] = val;
+        const risk = getDangerousChangeRisk(item.setting_key, item.value, val);
+        if (risk) {
+          dangerousChanges.push({
+            label: item.label || item.setting_key,
+            key: item.setting_key,
+            risk,
+          });
         }
       }
-      if (Object.keys(changed).length === 0) {
-        setSuccess('当前没有需要保存的更改');
-        setSaving(false);
-        return;
-      }
+    }
+    if (Object.keys(changed).length === 0) {
+      setSuccess('当前没有需要保存的更改。');
+      return;
+    }
+
+    if (dangerousChanges.length > 0) {
+      const ok = await confirm({
+        title: '确认保存高风险安全设置',
+        content: (
+          <Stack spacing={1.2}>
+            <Typography variant="body2">
+              本次保存包含以下高风险配置变更，保存后将立即生效，请确认已评估相关影响：
+            </Typography>
+            <Stack spacing={1}>
+              {dangerousChanges.map((d) => (
+                <Box
+                  key={d.key}
+                  sx={{ p: 1.2, borderRadius: 1.5, bgcolor: 'action.hover', border: 1, borderColor: 'divider' }}
+                >
+                  <Typography variant="subtitle2" fontWeight={600}>
+                    {d.label}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    {d.risk}
+                  </Typography>
+                </Box>
+              ))}
+            </Stack>
+          </Stack>
+        ),
+        confirmText: '确认保存',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+
+    setSaving(true);
+    try {
       const updated: SystemSetting[] = await api.system.updateSettings(changed);
       setItems(updated || []);
       const nextDraft: Record<string, string> = {};
@@ -231,7 +309,7 @@ export const SystemSettingsPage: React.FC = () => {
       if (activeTab === 'server') {
         void loadClientIPPreview(nextDraft);
       }
-      setSuccess(`已保存 ${Object.keys(changed).length} 项系统设置并立即生效`);
+      setSuccess(`已保存 ${Object.keys(changed).length} 项系统设置并立即生效。`);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -243,17 +321,17 @@ export const SystemSettingsPage: React.FC = () => {
     setError('');
     setSuccess('');
     if (!testEmailTo.trim()) {
-      setError('请先填写测试收件人邮箱');
+      setError('请先填写测试收件人邮箱。');
       return;
     }
     if (dirtyCount > 0) {
-      setError('请先点击右上角「保存更改」，再发送测试邮件以使用最新配置');
+      setError('请先点击右上角「保存更改」，再发送测试邮件以使用最新配置。');
       return;
     }
     setSendingTest(true);
     try {
       await api.system.testSMTP(testEmailTo.trim());
-      setSuccess(`测试邮件已成功发送至 ${testEmailTo.trim()}`);
+      setSuccess(`测试邮件已成功发送至 ${testEmailTo.trim()}。`);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -277,7 +355,7 @@ export const SystemSettingsPage: React.FC = () => {
             {dirtyCount > 0 && <Chip size="small" color="warning" label={`${dirtyCount} 项未保存`} />}
           </Stack>
           <Typography variant="body2" color="text.secondary" mt={0.5}>
-            配置站点品牌、首页公告、邮件发信服务及全局安全策略，保存后立即生效
+            配置站点品牌、首页公告、邮件发信服务及全局安全策略，保存后立即生效。
           </Typography>
         </Box>
         <Stack direction="row" spacing={1.5}>
@@ -295,7 +373,7 @@ export const SystemSettingsPage: React.FC = () => {
           <Button
             variant="contained"
             startIcon={<SaveIcon />}
-            onClick={handleSave}
+            onClick={() => void handleSave()}
             disabled={loading || saving || dirtyCount === 0}
           >
             {saving ? '保存中...' : '保存更改'}
@@ -346,6 +424,15 @@ export const SystemSettingsPage: React.FC = () => {
                 const isModified = currentVal !== item.value;
                 const selectOpts = SELECT_OPTIONS[item.setting_key];
                 const isLogoField = item.setting_key === 'site.logo_url' || item.setting_key === 'site.favicon_url';
+                const intConstraint = INT_CONSTRAINTS[item.setting_key];
+
+                const resolvedSelectValue = selectOpts
+                  ? selectOpts.some((opt) => opt.value === currentVal)
+                    ? currentVal
+                    : selectOpts.some((opt) => opt.value === item.value)
+                      ? item.value
+                      : selectOpts[0].value
+                  : '';
 
                 return (
                   <Box key={item.setting_key}>
@@ -367,7 +454,7 @@ export const SystemSettingsPage: React.FC = () => {
                           {item.description}
                         </Typography>
                         <Typography variant="caption" color="text.secondary">
-                          最近更新: {dayjs(item.updated_at).format('YYYY-MM-DD HH:mm:ss')}
+                          最近更新：{dayjs(item.updated_at).format('YYYY-MM-DD HH:mm:ss')}
                         </Typography>
                       </Box>
 
@@ -382,12 +469,12 @@ export const SystemSettingsPage: React.FC = () => {
                                 }
                               />
                             }
-                            label={currentVal === 'true' ? '已开启' : '已关闭'}
+                            label={currentVal === 'true' ? '已启用' : '已停用'}
                           />
                         ) : selectOpts ? (
                           <FormControl fullWidth size="small">
                             <Select
-                              value={currentVal || selectOpts[0].value}
+                              value={resolvedSelectValue}
                               onChange={(e) => setDraft({ ...draft, [item.setting_key]: e.target.value })}
                             >
                               {selectOpts.map((opt) => (
@@ -412,7 +499,7 @@ export const SystemSettingsPage: React.FC = () => {
                             fullWidth
                             size="small"
                             type="password"
-                            placeholder="留空则保持当前密码不变"
+                            placeholder="留空则保持当前密钥不变"
                             autoComplete="new-password"
                             value={currentVal}
                             onChange={(e) => setDraft({ ...draft, [item.setting_key]: e.target.value })}
@@ -439,6 +526,12 @@ export const SystemSettingsPage: React.FC = () => {
                               fullWidth
                               size="small"
                               type={item.value_type === 'int' ? 'number' : 'text'}
+                              inputProps={
+                                item.value_type === 'int' && intConstraint
+                                  ? { min: intConstraint.min, max: intConstraint.max }
+                                  : undefined
+                              }
+                              helperText={intConstraint?.helperText}
                               value={currentVal}
                               onChange={(e) => setDraft({ ...draft, [item.setting_key]: e.target.value })}
                             />
@@ -478,7 +571,7 @@ export const SystemSettingsPage: React.FC = () => {
                       </Typography>
                     </Stack>
                     <Typography variant="body2" color="text.secondary" mt={0.4}>
-                      以下是基于您当前浏览器发起的这次真实请求，各获取方式实时解析出的客户端 IP；请对照您的实际出口 IP 核对后再点击「保存更改」。
+                      以下基于当前浏览器发起的真实请求，展示各获取方式实时解析出的客户端 IP；请对照实际出口 IP 核对后再点击「保存更改」。
                     </Typography>
                   </Box>
                   <Button
@@ -615,7 +708,7 @@ export const SystemSettingsPage: React.FC = () => {
                                       size="small"
                                       variant="outlined"
                                       color={opt.is_public ? 'success' : 'default'}
-                                      label={opt.is_public ? '公网' : '内网/本地'}
+                                      label={opt.is_public ? '公网' : '内网 / 本地'}
                                     />
                                   </Stack>
                                   <Chip size="small" color={statusMeta.color} variant="outlined" label={statusMeta.label} />
@@ -647,7 +740,7 @@ export const SystemSettingsPage: React.FC = () => {
                   发送测试邮件
                 </Typography>
                 <Typography variant="body2" color="text.secondary" mb={2}>
-                  验证当前已保存的 SMTP 服务器、端口、加密方式与账号密码是否能够正常投递邮件
+                  验证当前已保存的 SMTP 服务器、端口、加密方式与账号密码是否能够正常投递邮件。
                 </Typography>
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
                   <TextField

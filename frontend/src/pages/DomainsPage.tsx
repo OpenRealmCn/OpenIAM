@@ -16,16 +16,21 @@ import { Add as AddIcon, Delete as DeleteIcon } from '@mui/icons-material';
 import { DataGrid, GridActionsCellItem, GridColDef, GridToolbar } from '@mui/x-data-grid';
 import dayjs from 'dayjs';
 import { api } from '../api/client';
+import { useConfirm } from '../components/ConfirmDialog';
 import { useAuth } from '../context/AuthContext';
 import { Domain } from '../types/api';
 
 export const DomainsPage: React.FC = () => {
-  const { refreshDomains } = useAuth();
+  const { refreshDomains, hasCap } = useAuth();
+  const confirm = useConfirm();
   const [rows, setRows] = useState<Domain[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [open, setOpen] = useState(false);
+  const [dialogError, setDialogError] = useState('');
   const [form, setForm] = useState({ code: '', name: '', description: '' });
+
+  const canWrite = hasCap('domains:write');
 
   const load = async () => {
     setLoading(true);
@@ -43,19 +48,37 @@ export const DomainsPage: React.FC = () => {
     load();
   }, []);
 
+  const openCreateDialog = () => {
+    setDialogError('');
+    setForm({ code: '', name: '', description: '' });
+    setOpen(true);
+  };
+
   const handleCreate = async () => {
+    setDialogError('');
     try {
-      await api.domains.create(form);
+      await api.domains.create({
+        code: form.code.trim(),
+        name: form.name.trim(),
+        description: form.description.trim(),
+      });
       setOpen(false);
       setForm({ code: '', name: '', description: '' });
       await load();
       await refreshDomains();
     } catch (err) {
-      setError((err as Error).message);
+      setDialogError((err as Error).message);
     }
   };
 
   const handleDelete = async (row: Domain) => {
+    const ok = await confirm({
+      title: '确认删除域',
+      content: `确定要删除域「${row.name}」（${row.code}）吗？删除后该域下的角色与授权关系将一并失效。`,
+      confirmText: '确认删除',
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await api.domains.delete(row.id);
       await load();
@@ -78,7 +101,7 @@ export const DomainsPage: React.FC = () => {
         <Chip
           size="small"
           color={p.value === 'active' ? 'success' : 'default'}
-          label={p.value === 'active' ? '正常' : '已停用'}
+          label={p.value === 'active' ? '启用' : '停用'}
         />
       ),
     },
@@ -88,30 +111,43 @@ export const DomainsPage: React.FC = () => {
       width: 170,
       valueFormatter: (v) => dayjs(v as string).format('YYYY-MM-DD HH:mm'),
     },
-    {
-      field: 'actions',
-      type: 'actions',
-      headerName: '操作',
-      width: 90,
-      getActions: (p) =>
-        p.row.code === 'openiam'
-          ? []
-          : [<GridActionsCellItem key="del" icon={<DeleteIcon />} label="删除" onClick={() => handleDelete(p.row)} />],
-    },
+    ...(canWrite
+      ? [
+          {
+            field: 'actions',
+            type: 'actions' as const,
+            headerName: '操作',
+            width: 90,
+            getActions: (p: { row: Domain }) =>
+              p.row.code === 'openiam'
+                ? []
+                : [
+                    <GridActionsCellItem
+                      key="del"
+                      icon={<DeleteIcon />}
+                      label="删除域"
+                      onClick={() => void handleDelete(p.row)}
+                    />,
+                  ],
+          },
+        ]
+      : []),
   ];
 
   return (
     <Box>
       <Stack direction="row" justifyContent="space-between" alignItems="center" mb={2.5}>
         <Box>
-          <Typography variant="h5">业务域</Typography>
+          <Typography variant="h5">域管理</Typography>
           <Typography variant="body2" color="text.secondary">
-            按业务系统或团队隔离角色与权限
+            按业务系统或团队隔离角色、权限点与授权策略。
           </Typography>
         </Box>
-        <Button variant="contained" startIcon={<AddIcon />} onClick={() => setOpen(true)}>
-          新建域
-        </Button>
+        {canWrite && (
+          <Button variant="contained" startIcon={<AddIcon />} onClick={openCreateDialog}>
+            新建域
+          </Button>
+        )}
       </Stack>
 
       {error && (
@@ -132,11 +168,16 @@ export const DomainsPage: React.FC = () => {
       </Box>
 
       <Dialog open={open} onClose={() => setOpen(false)} maxWidth="xs" fullWidth>
-        <DialogTitle>新建业务域</DialogTitle>
+        <DialogTitle>新建域</DialogTitle>
         <DialogContent>
           <Stack spacing={2} mt={1}>
+            {dialogError && (
+              <Alert severity="error" onClose={() => setDialogError('')}>
+                {dialogError}
+              </Alert>
+            )}
             <TextField
-              label="域标识 (如 billing, cms)"
+              label="域标识（如 billing、cms）"
               size="small"
               required
               value={form.code}

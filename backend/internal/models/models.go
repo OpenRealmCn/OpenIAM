@@ -92,14 +92,16 @@ func (Domain) TableName() string { return "domains" }
 
 // User 代表平台身份主体。
 type User struct {
-	ID           uint64 `gorm:"primaryKey" json:"id"`
-	Username     string `gorm:"size:64;uniqueIndex;not null" json:"username"`
-	Email        string `gorm:"size:128;index;not null;default:''" json:"email"`
-	Phone        string `gorm:"size:32;index;not null;default:''" json:"phone"`
-	DisplayName  string `gorm:"size:128;not null;default:''" json:"display_name"`
-	PasswordHash string `gorm:"size:255;not null;default:''" json:"-"`
-	AvatarURL    string `gorm:"size:512;not null;default:''" json:"avatar_url"`
-	Status       string `gorm:"size:32;not null;default:'active'" json:"status"` // active | disabled
+	ID       uint64 `gorm:"primaryKey" json:"id"`
+	Username string `gorm:"size:64;uniqueIndex;not null" json:"username"`
+	Email    string `gorm:"size:128;index;not null;default:''" json:"email"`
+	// EmailVerified 表示邮箱已通过验证码证明归属；只有已验证的邮箱才会以 email_verified=true 提供给下游应用。
+	EmailVerified bool   `gorm:"not null;default:false" json:"email_verified"`
+	Phone         string `gorm:"size:32;index;not null;default:''" json:"phone"`
+	DisplayName   string `gorm:"size:128;not null;default:''" json:"display_name"`
+	PasswordHash  string `gorm:"size:255;not null;default:''" json:"-"`
+	AvatarURL     string `gorm:"size:512;not null;default:''" json:"avatar_url"`
+	Status        string `gorm:"size:32;not null;default:'active'" json:"status"` // active | disabled
 	// MustChangePassword 表示账号处于强制改密状态：登录后只能修改密码或退出，不能访问任何业务接口。
 	MustChangePassword bool       `gorm:"not null;default:false" json:"must_change_password"`
 	LastLoginAt        *time.Time `json:"last_login_at"`
@@ -312,6 +314,16 @@ type Notification struct {
 }
 
 func (Notification) TableName() string { return "notifications" }
+
+// NotificationRead 记录全员公告（user_id=0）被某个用户读过；公告是共享记录，不能用其自身的 is_read 字段表示个人已读状态。
+type NotificationRead struct {
+	ID             uint64    `gorm:"primaryKey" json:"id"`
+	NotificationID uint64    `gorm:"not null;uniqueIndex:uk_notification_reads" json:"notification_id"`
+	UserID         uint64    `gorm:"not null;uniqueIndex:uk_notification_reads;index" json:"user_id"`
+	ReadAt         time.Time `gorm:"not null" json:"read_at"`
+}
+
+func (NotificationRead) TableName() string { return "notification_reads" }
 
 // NotificationTemplate 定义邮件、短信或站内信的统一消息模板。
 type NotificationTemplate struct {

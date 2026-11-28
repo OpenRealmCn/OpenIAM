@@ -14,6 +14,7 @@ import (
 var intBounds = map[string][2]int{
 	KeySecurityMaxLoginFailures:        {1, 100},
 	KeySecurityLockoutMinutes:          {1, 1440},
+	KeyPasswordMinLength:               {8, 64},
 	KeyJWTAccessTokenTTLMin:            {1, 1440},
 	KeyJWTRefreshTokenTTLHours:         {1, 8760},
 	KeyOAuthServerAuthCodeTTLMin:       {1, 60},
@@ -45,16 +46,16 @@ var assetURLKeys = map[string]bool{
 
 // optionalEmptyKeys 允许留空的字符串设置项。
 var optionalEmptyKeys = map[string]bool{
-	KeySiteSubtitle:            true,
-	KeySiteLogoURL:             true,
-	KeySiteFaviconURL:          true,
-	KeySiteAnnouncementTitle:   true,
-	KeySiteAnnouncementContent: true,
-	KeySiteFooterText:          true,
-	KeySMTPHost:                true,
-	KeySMTPUsername:            true,
-	KeySMTPPassword:            true,
-	KeySMTPFromName:            true,
+	KeySiteSubtitle:               true,
+	KeySiteLogoURL:                true,
+	KeySiteFaviconURL:             true,
+	KeySiteAnnouncementTitle:      true,
+	KeySiteAnnouncementContent:    true,
+	KeySiteFooterText:             true,
+	KeySMTPHost:                   true,
+	KeySMTPUsername:               true,
+	KeySMTPPassword:               true,
+	KeySMTPFromName:               true,
 	KeySMTPFromEmail:              true,
 	KeyRiskBlockedIPs:             true,
 	KeyServerClientIPCustomHeader: true,
@@ -70,9 +71,19 @@ func IsSecretKey(key string) bool {
 	return secretKeys[key]
 }
 
+// displayName 返回设置项在控制台展示的中文名称，用于校验错误提示。
+func displayName(key string) string {
+	for _, spec := range defaultSpecs {
+		if spec.Key == key {
+			return spec.Label
+		}
+	}
+	return key
+}
+
 func checkIntBounds(key string, n int) error {
 	if b, ok := intBounds[key]; ok && (n < b[0] || n > b[1]) {
-		return fmt.Errorf("设置项 %s 的取值范围为 %d~%d", key, b[0], b[1])
+		return fmt.Errorf("「%s」的取值范围为 %d~%d", displayName(key), b[0], b[1])
 	}
 	return nil
 }
@@ -87,7 +98,7 @@ func validateURLSetting(key, raw string) error {
 		}
 		u, err := url.Parse(raw)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("设置项 %s 必须是站内路径（如 /logo.png）或有效的 http(s) 地址", key)
+			return fmt.Errorf("「%s」必须是站内路径（如 /logo.png）或以 http:// 或 https:// 开头的地址", displayName(key))
 		}
 		return nil
 	}
@@ -96,7 +107,7 @@ func validateURLSetting(key, raw string) error {
 	}
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.Fragment != "" {
-		return fmt.Errorf("设置项 %s 必须是有效的 http(s) 地址，且不得包含用户信息或片段", key)
+		return fmt.Errorf("「%s」必须是以 http:// 或 https:// 开头的完整地址，且不能包含账号密码或 # 片段", displayName(key))
 	}
 	return nil
 }
@@ -108,14 +119,14 @@ func validateEnumOrSpecialSetting(key, raw string) error {
 		case "info", "success", "warning", "error":
 			return nil
 		default:
-			return fmt.Errorf("公告类型必须为 info、success、warning 或 error")
+			return fmt.Errorf("公告类型只能是提示、成功、警告或错误")
 		}
 	case KeySMTPEncryption:
 		switch strings.ToLower(raw) {
 		case "starttls", "tls", "none":
 			return nil
 		default:
-			return fmt.Errorf("SMTP 加密方式必须为 starttls、tls 或 none")
+			return fmt.Errorf("SMTP 加密方式只能是 STARTTLS、SSL/TLS 或不加密")
 		}
 	case KeySMTPFromEmail:
 		if raw == "" {
@@ -129,11 +140,11 @@ func validateEnumOrSpecialSetting(key, raw string) error {
 		case "challenge_mfa", "notify", "block":
 			return nil
 		default:
-			return fmt.Errorf("高风险处置策略必须为 challenge_mfa、notify 或 block")
+			return fmt.Errorf("高风险处置策略只能是要求二次验证、仅通知或直接阻断")
 		}
 	case KeyServerClientIPMethod:
 		if !clientip.IsValidMethod(raw) {
-			return fmt.Errorf("不支持的客户端 IP 获取方式: %s", raw)
+			return fmt.Errorf("不支持的客户端 IP 获取方式：%s", raw)
 		}
 	case KeyServerClientIPCustomHeader:
 		return clientip.ValidateCustomHeader(raw)
@@ -142,14 +153,14 @@ func validateEnumOrSpecialSetting(key, raw string) error {
 		case "disabled", "optional", "required":
 			return nil
 		default:
-			return fmt.Errorf("设置项 %s 必须为 disabled、optional 或 required", key)
+			return fmt.Errorf("「%s」只能是关闭、选填或必填", displayName(key))
 		}
 	case KeySecurityRegisterVerifyMode:
 		switch raw {
 		case "none", "email", "sms", "either", "both":
 			return nil
 		default:
-			return fmt.Errorf("注册验证码校验方式必须为 none、email、sms、either 或 both")
+			return fmt.Errorf("注册验证码校验方式只能是无需验证码、邮箱验证码、短信验证码、二选一或两者均需")
 		}
 	}
 	return nil

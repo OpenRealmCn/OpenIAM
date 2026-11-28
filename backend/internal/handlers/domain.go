@@ -56,7 +56,7 @@ type createDomainReq struct {
 func (h *DomainHandler) Create(c *gin.Context) {
 	var req createDomainReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		Fail(c, http.StatusBadRequest, bindError(err))
 		return
 	}
 	code := strings.TrimSpace(req.Code)
@@ -78,7 +78,7 @@ func (h *DomainHandler) Create(c *gin.Context) {
 		Status:      status,
 	}
 	if err := h.db.Create(&dom).Error; err != nil {
-		Fail(c, http.StatusInternalServerError, "创建域失败: "+err.Error())
+		failWrite(c, err, "域编码已存在", "创建域失败")
 		return
 	}
 

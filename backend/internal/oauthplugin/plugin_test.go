@@ -143,25 +143,33 @@ func TestFederatedLoginFlowWithMockGitHubAndFeishu(t *testing.T) {
 	}).Error)
 
 	// 1. 测试 GitHub 联合登录发起与回调自动建号
-	authURL, state, err := svc.StartLogin(context.Background(), "github_mock", "")
+	authURL, state, err := svc.StartLogin(context.Background(), "github_mock", "", "browser-a")
 	require.NoError(t, err)
 	parsed, err := url.Parse(authURL)
 	require.NoError(t, err)
 	assert.Equal(t, state, parsed.Query().Get("state"))
 
-	res, err := svc.HandleCallback(context.Background(), "github_mock", "mock_code", state, "", "127.0.0.1", "go-test")
+	res, err := svc.HandleCallback(context.Background(), "github_mock", "mock_code", state, "", "browser-a", "127.0.0.1", "go-test")
 	require.NoError(t, err)
 	assert.True(t, res.IsNewUser)
+	assert.False(t, res.Bound)
 	assert.Equal(t, "octocat_openrealm", res.User.Username)
 	assert.Equal(t, "octo@openrealm.local", res.User.Email)
-	assert.NotEmpty(t, res.AccessToken)
+
+	// 回调必须由发起授权的同一浏览器完成，换一个浏览器绑定值应被拒绝
+	_, hijackState, err := svc.StartLogin(context.Background(), "github_mock", "", "attacker-browser")
+	require.NoError(t, err)
+	_, err = svc.HandleCallback(context.Background(), "github_mock", "mock_code", hijackState, "", "victim-browser", "127.0.0.1", "go-test")
+	require.Error(t, err)
+	var pub *oauthplugin.PublicError
+	assert.ErrorAs(t, err, &pub)
 
 	// 2. 测试飞书联合登录发起与回调自动建号
-	fsURL, fsState, err := svc.StartLogin(context.Background(), "feishu_mock", "")
+	fsURL, fsState, err := svc.StartLogin(context.Background(), "feishu_mock", "", "browser-b")
 	require.NoError(t, err)
 	assert.Contains(t, fsURL, "/open-apis/authen/v1/authorize")
 
-	fsRes, err := svc.HandleCallback(context.Background(), "feishu_mock", "fs_code", fsState, "", "127.0.0.1", "go-test")
+	fsRes, err := svc.HandleCallback(context.Background(), "feishu_mock", "fs_code", fsState, "", "browser-b", "127.0.0.1", "go-test")
 	require.NoError(t, err)
 	assert.True(t, fsRes.IsNewUser)
 	assert.Equal(t, "zhangsan@openrealm.local", fsRes.User.Email)

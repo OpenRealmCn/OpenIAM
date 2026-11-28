@@ -195,12 +195,6 @@ func TestAuthLifecycleAndLockout(t *testing.T) {
 	require.NoError(t, json.Unmarshal(refW.Body.Bytes(), &refResp))
 	assert.NotEqual(t, refresh, refResp.Data.RefreshToken)
 
-	// 旧 refresh token 不能重复使用
-	reuseW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/refresh", map[string]string{
-		"refresh_token": refresh,
-	}, "")
-	assert.Equal(t, http.StatusUnauthorized, reuseW.Code)
-
 	// 登出后旧 access token 被 Redis 黑名单拦截
 	outW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/logout", map[string]string{
 		"refresh_token": refResp.Data.RefreshToken,
@@ -209,6 +203,30 @@ func TestAuthLifecycleAndLockout(t *testing.T) {
 
 	blockedW := doJSON(t, env.engine, http.MethodGet, "/api/v1/auth/me", nil, refResp.Data.AccessToken)
 	assert.Equal(t, http.StatusUnauthorized, blockedW.Code)
+
+	// 已轮换的 refresh token 被重放：拒绝，并下线该令牌所属的整个会话
+	access2, refresh2 := loginAs(t, env.engine, "alice", "Alice@123456")
+	rotW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/refresh", map[string]string{
+		"refresh_token": refresh2,
+	}, "", map[string]string{"X-Token-Delivery": "body"})
+	require.Equal(t, http.StatusOK, rotW.Code)
+	var rotResp struct {
+		Data struct {
+			AccessToken  string `json:"access_token"`
+			RefreshToken string `json:"refresh_token"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rotW.Body.Bytes(), &rotResp))
+	reuseW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/refresh", map[string]string{
+		"refresh_token": refresh2,
+	}, "")
+	assert.Equal(t, http.StatusUnauthorized, reuseW.Code)
+	afterReuse := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/refresh", map[string]string{
+		"refresh_token": rotResp.Data.RefreshToken,
+	}, "")
+	assert.Equal(t, http.StatusUnauthorized, afterReuse.Code, "重放检测后，攻击者或用户手中的新 refresh token 也必须失效")
+	assert.Equal(t, http.StatusUnauthorized, doJSON(t, env.engine, http.MethodGet, "/api/v1/auth/me", nil, rotResp.Data.AccessToken).Code)
+	_ = access2
 
 	// 3. 连续失败登录触发账号锁定
 	for i := 0; i < 3; i++ {
@@ -227,9 +245,10 @@ func TestAuthLifecycleAndLockout(t *testing.T) {
 func TestIPRateLimiting(t *testing.T) {
 	env := setupTestEnv(t, "3-M")
 
+	// 使用不同用户名，避免触发账号级锁定（不存在的账号与真实账号一样会被锁定，防止借锁定行为枚举账号）
 	for i := 0; i < 3; i++ {
 		w := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/login", map[string]string{
-			"username": "nobody",
+			"username": fmt.Sprintf("nobody%d", i),
 			"password": "bad",
 		}, "")
 		assert.Equal(t, http.StatusUnauthorized, w.Code)
@@ -237,7 +256,7 @@ func TestIPRateLimiting(t *testing.T) {
 
 	// 第 4 次请求超出 3-M 限制，应返回 429
 	w := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/login", map[string]string{
-		"username": "nobody",
+		"username": "nobody9",
 		"password": "bad",
 	}, "")
 	assert.Equal(t, http.StatusTooManyRequests, w.Code)
@@ -374,7 +393,7 @@ func TestOpenIAMOAuth2ServerFullFlow(t *testing.T) {
 	sum := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
 
-	authURL := fmt.Sprintf("/oauth2/authorize?response_type=code&client_id=%s&redirect_uri=%s&scope=%s&state=xyz&code_challenge=%s&code_challenge_method=S256",
+	authURL := fmt.Sprintf("/oauth2/authorize?response_type=code&client_id=%s&redirect_uri=%s&scope=%s&state=xyz&nonce=n-0S6_WzA2Mj&code_challenge=%s&code_challenge_method=S256",
 		url.QueryEscape(clientID),
 		url.QueryEscape("http://localhost:3000/cb"),
 		url.QueryEscape("openid profile email"),
@@ -430,6 +449,35 @@ func TestOpenIAMOAuth2ServerFullFlow(t *testing.T) {
 	require.NoError(t, json.Unmarshal(tokW.Body.Bytes(), &tokResp))
 	require.NotEmpty(t, tokResp.AccessToken)
 	require.NotEmpty(t, tokResp.IDToken)
+
+	// ID Token 必须回带授权请求的 nonce，且不能被当作 Access Token 使用
+	idParts := strings.Split(tokResp.IDToken, ".")
+	require.Len(t, idParts, 3)
+	idPayload, err := base64.RawURLEncoding.DecodeString(idParts[1])
+	require.NoError(t, err)
+	assert.Contains(t, string(idPayload), `"nonce":"n-0S6_WzA2Mj"`)
+	assert.Contains(t, string(idPayload), `"email_verified":`)
+	assert.Equal(t, http.StatusUnauthorized, doJSON(t, env.engine, http.MethodGet, "/api/v1/auth/me", nil, tokResp.IDToken).Code)
+
+	// 同一授权码不能兑换第二次
+	tokReq2 := httptest.NewRequest(http.MethodPost, "/oauth2/token", strings.NewReader(form.Encode()))
+	tokReq2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokW2 := httptest.NewRecorder()
+	env.engine.ServeHTTP(tokW2, tokReq2)
+	assert.Equal(t, http.StatusBadRequest, tokW2.Code, tokW2.Body.String())
+
+	// 刷新时不能扩大 scope
+	widen := url.Values{}
+	widen.Set("grant_type", "refresh_token")
+	widen.Set("refresh_token", tokResp.RefreshToken)
+	widen.Set("scope", "openid profile email users:write")
+	widen.Set("client_id", clientID)
+	widen.Set("client_secret", clientSecret)
+	widenReq := httptest.NewRequest(http.MethodPost, "/oauth2/token", strings.NewReader(widen.Encode()))
+	widenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	widenW := httptest.NewRecorder()
+	env.engine.ServeHTTP(widenW, widenReq)
+	assert.NotEqual(t, http.StatusOK, widenW.Code, widenW.Body.String())
 
 	// 6. 请求 /oauth2/userinfo & /oauth2/introspect & /oauth2/revoke
 	uiReq := httptest.NewRequest(http.MethodGet, "/oauth2/userinfo", nil)
@@ -675,6 +723,16 @@ func TestProfilePasskeySiteAndSMTPSettings(t *testing.T) {
 	// 6. 通行密钥列表与注册 Challenge 生成
 	pkListW := doJSON(t, env.engine, http.MethodGet, "/api/v1/auth/passkeys", nil, memberToken)
 	require.Equal(t, http.StatusOK, pkListW.Code)
+
+	// 新增通行密钥属于新增登录凭据，未重新认证时必须被拒绝
+	pkNoReauth := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/passkeys/register/begin", nil, memberToken)
+	require.Equal(t, http.StatusForbidden, pkNoReauth.Code, pkNoReauth.Body.String())
+	assert.Contains(t, pkNoReauth.Body.String(), "reauth_required")
+
+	badReauth := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/reauth", map[string]string{"password": "wrong"}, memberToken)
+	require.Equal(t, http.StatusBadRequest, badReauth.Code)
+	reauthW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/reauth", map[string]string{"password": "Member@12345"}, memberToken)
+	require.Equal(t, http.StatusOK, reauthW.Code, reauthW.Body.String())
 
 	pkBeginW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/passkeys/register/begin", nil, memberToken)
 	require.Equal(t, http.StatusOK, pkBeginW.Code, pkBeginW.Body.String())

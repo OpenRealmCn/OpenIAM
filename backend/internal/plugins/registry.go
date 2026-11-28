@@ -214,10 +214,71 @@ func (m *Manager) ListInstances(slot string) ([]models.PluginInstance, error) {
 	return rows, nil
 }
 
+// secretFieldKeys 返回驱动声明为密码类型的配置字段。
+func secretFieldKeys(drv PluginDriver) map[string]bool {
+	keys := make(map[string]bool)
+	for _, f := range drv.Metadata().Fields {
+		if f.Type == "password" {
+			keys[f.Key] = true
+		}
+	}
+	return keys
+}
+
+// transformSecrets 对密码类字段逐个应用 fn（加密或解密），返回新的配置副本。
+func transformSecrets(drv PluginDriver, cfg models.JSONMap, fn func(string) (string, error)) (models.JSONMap, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	keys := secretFieldKeys(drv)
+	out := make(models.JSONMap, len(cfg))
+	for k, v := range cfg {
+		if s, ok := v.(string); ok && keys[k] && s != "" {
+			t, err := fn(s)
+			if err != nil {
+				return nil, fmt.Errorf("处理插件密钥字段 %s 失败: %w", k, err)
+			}
+			out[k] = t
+			continue
+		}
+		out[k] = v
+	}
+	return out, nil
+}
+
+// openInstance 解密实例配置中的密码类字段，供驱动实际使用。
+func (m *Manager) openInstance(inst *models.PluginInstance) error {
+	drv, ok := m.GetDriver(inst.PluginType)
+	if !ok {
+		return nil
+	}
+	cfg, err := transformSecrets(drv, inst.Config, security.OpenField)
+	if err != nil {
+		return err
+	}
+	inst.Config = cfg
+	return nil
+}
+
+// HasActive 报告插槽内是否至少有一个已启用的实例，用于公开站点信息，不解密配置。
+func (m *Manager) HasActive(slot string) bool {
+	var n int64
+	m.db.Model(&models.PluginInstance{}).Where("slot = ? AND enabled = ?", slot, true).Count(&n)
+	return n > 0
+}
+
+// ActiveBySlot 返回插槽内已启用的实例，配置中的密钥已解密。
 func (m *Manager) ActiveBySlot(slot string) ([]models.PluginInstance, error) {
 	var rows []models.PluginInstance
-	err := m.db.Where("slot = ? AND enabled = ?", slot, true).Order("priority ASC, id ASC").Find(&rows).Error
-	return rows, err
+	if err := m.db.Where("slot = ? AND enabled = ?", slot, true).Order("priority ASC, id ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		if err := m.openInstance(&rows[i]); err != nil {
+			return nil, err
+		}
+	}
+	return rows, nil
 }
 
 func (m *Manager) CreateInstance(inst *models.PluginInstance) error {
@@ -235,6 +296,11 @@ func (m *Manager) CreateInstance(inst *models.PluginInstance) error {
 	if err := drv.ValidateConfig(inst.Config); err != nil {
 		return err
 	}
+	sealed, err := transformSecrets(drv, inst.Config, security.SealField)
+	if err != nil {
+		return err
+	}
+	inst.Config = sealed
 	return m.db.Create(inst).Error
 }
 
@@ -281,9 +347,19 @@ func (m *Manager) UpdateInstance(id uint64, displayName string, cfg models.JSONM
 		}
 		inst.Config = merged
 	}
-	if err := drv.ValidateConfig(inst.Config); err != nil {
+	// 库里的旧值可能已是密文、新提交的是明文：校验用解密后的副本，落库统一加密。
+	plainCfg, err := transformSecrets(drv, inst.Config, security.OpenField)
+	if err != nil {
 		return nil, err
 	}
+	if err := drv.ValidateConfig(plainCfg); err != nil {
+		return nil, err
+	}
+	sealedCfg, err := transformSecrets(drv, plainCfg, security.SealField)
+	if err != nil {
+		return nil, err
+	}
+	inst.Config = sealedCfg
 	if err := m.db.Save(&inst).Error; err != nil {
 		return nil, err
 	}
@@ -299,6 +375,9 @@ func (m *Manager) TestInstance(ctx context.Context, id uint64) (string, error) {
 	drv, ok := m.GetDriver(inst.PluginType)
 	if !ok {
 		return "", fmt.Errorf("未知插件驱动: %s", inst.PluginType)
+	}
+	if oErr := m.openInstance(&inst); oErr != nil {
+		return "unhealthy", oErr
 	}
 	err := drv.HealthCheck(ctx, inst.Config)
 	now := time.Now()

@@ -9,6 +9,7 @@ import {
   DialogContent,
   DialogTitle,
   FormControl,
+  FormHelperText,
   InputLabel,
   MenuItem,
   Select,
@@ -20,9 +21,13 @@ import { Add as AddIcon, Block as RevokeIcon, MoreTime as JitIcon } from '@mui/i
 import { DataGrid, GridActionsCellItem, GridColDef, GridToolbar } from '@mui/x-data-grid';
 import dayjs from 'dayjs';
 import { api } from '../api/client';
+import { useConfirm } from '../components/ConfirmDialog';
 import { AnimatedRefreshIcon } from '../components/PageTransition';
 import { useAuth } from '../context/AuthContext';
 import { Role, TempRoleGrant, User } from '../types/api';
+
+const MAX_TTL_MINUTES = 30 * 24 * 60; // 30 天（与后端限制一致）
+const MIN_REASON_LENGTH = 4;
 
 const STATUS_MAP: Record<string, { label: string; color: 'success' | 'warning' | 'default' | 'error' }> = {
   active: { label: '生效中', color: 'success' },
@@ -31,8 +36,17 @@ const STATUS_MAP: Record<string, { label: string; color: 'success' | 'warning' |
   revoked: { label: '已撤销', color: 'error' },
 };
 
+interface FieldErrors {
+  userId?: string;
+  roleCode?: string;
+  startsAt?: string;
+  ttlMinutes?: string;
+  reason?: string;
+}
+
 export const JitGrantsPage: React.FC = () => {
   const { currentDomain, hasCap } = useAuth();
+  const confirm = useConfirm();
   const canWrite = hasCap('jit:write');
   const [grants, setGrants] = useState<TempRoleGrant[]>([]);
   const [users, setUsers] = useState<User[]>([]);
@@ -43,9 +57,12 @@ export const JitGrantsPage: React.FC = () => {
   const [success, setSuccess] = useState('');
 
   const [open, setOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [dialogError, setDialogError] = useState('');
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [userId, setUserId] = useState<number>(0);
   const [roleCode, setRoleCode] = useState('');
-  const [ttlMinutes, setTtlMinutes] = useState(120);
+  const [ttlInput, setTtlInput] = useState('120');
   const [startsAtLocal, setStartsAtLocal] = useState('');
   const [reason, setReason] = useState('');
 
@@ -72,13 +89,70 @@ export const JitGrantsPage: React.FC = () => {
     void loadData();
   }, [loadData]);
 
-  const handleCreate = async () => {
-    setError('');
-    setSuccess('');
-    if (!userId || !roleCode) {
-      setError('请选择目标用户和临时角色');
-      return;
+  const openCreateDialog = () => {
+    setDialogError('');
+    setFieldErrors({});
+    setUserId(0);
+    setRoleCode('');
+    setTtlInput('120');
+    setStartsAtLocal('');
+    setReason('');
+    setOpen(true);
+  };
+
+  const handleCloseDialog = () => {
+    if (submitting) return;
+    setOpen(false);
+  };
+
+  const validateForm = (): { valid: boolean; ttlNum: number; startsAtIso?: string } => {
+    const nextErrors: FieldErrors = {};
+
+    if (!userId) {
+      nextErrors.userId = '请选择目标用户';
     }
+    if (!roleCode) {
+      nextErrors.roleCode = '请选择临时角色';
+    }
+
+    const trimmedTtl = ttlInput.trim();
+    const ttlNum = Number(trimmedTtl);
+    if (!trimmedTtl || !Number.isInteger(ttlNum) || ttlNum < 1 || ttlNum > MAX_TTL_MINUTES) {
+      nextErrors.ttlMinutes = `请输入 1 至 ${MAX_TTL_MINUTES} 之间的正整数（最长 30 天）`;
+    }
+
+    let startsAtIso: string | undefined;
+    if (startsAtLocal) {
+      const parsedStart = dayjs(startsAtLocal);
+      const now = dayjs();
+      if (!parsedStart.isValid()) {
+        nextErrors.startsAt = '生效时间格式无效';
+      } else if (parsedStart.isAfter(now.add(30, 'day'))) {
+        nextErrors.startsAt = '预约生效时间不得晚于 30 天后';
+      } else if (!nextErrors.ttlMinutes && !parsedStart.add(ttlNum, 'minute').isAfter(now)) {
+        nextErrors.startsAt = '到期时间必须晚于当前时间';
+      } else {
+        startsAtIso = parsedStart.toDate().toISOString();
+      }
+    }
+
+    const trimmedReason = reason.trim();
+    if (!trimmedReason) {
+      nextErrors.reason = '请填写授权原因';
+    } else if (trimmedReason.length < MIN_REASON_LENGTH) {
+      nextErrors.reason = `授权原因至少需要 ${MIN_REASON_LENGTH} 个字符`;
+    }
+
+    setFieldErrors(nextErrors);
+    return { valid: Object.keys(nextErrors).length === 0, ttlNum, startsAtIso };
+  };
+
+  const handleCreate = async () => {
+    setDialogError('');
+    const { valid, ttlNum, startsAtIso } = validateForm();
+    if (!valid) return;
+
+    setSubmitting(true);
     try {
       const payload: {
         user_id: number;
@@ -92,27 +166,36 @@ export const JitGrantsPage: React.FC = () => {
         domain_code: currentDomain,
         role_code: roleCode,
         reason: reason.trim(),
-        ttl_minutes: Number(ttlMinutes) || 120,
+        ttl_minutes: ttlNum,
       };
-      if (startsAtLocal) {
-        payload.starts_at = new Date(startsAtLocal).toISOString();
+      if (startsAtIso) {
+        payload.starts_at = startsAtIso;
       }
       await api.jit.create(payload);
       setOpen(false);
-      setReason('');
-      setStartsAtLocal('');
-      setSuccess('已创建临时权限授权，到期后将由后台任务自动回收');
+      setSuccess('已创建临时授权，到期后将由系统自动回收。');
       await loadData();
     } catch (err) {
-      setError((err as Error).message);
+      setDialogError((err as Error).message);
+    } finally {
+      setSubmitting(false);
     }
   };
 
   const handleRevoke = async (row: TempRoleGrant) => {
-    if (!window.confirm(`确认提前撤销用户 ${row.username || row.user_id} 的临时角色「${row.role_code}」？`)) return;
+    const ok = await confirm({
+      title: '撤销临时授权',
+      content: `确认提前撤销用户「${row.username || `#${row.user_id}`}」的临时角色「${row.role_code}」？撤销后该临时角色将立即失效。`,
+      confirmText: '确认撤销',
+      danger: true,
+    });
+    if (!ok) return;
+
+    setError('');
+    setSuccess('');
     try {
       await api.jit.revoke(row.id);
-      setSuccess('已提前撤销该临时权限');
+      setSuccess('已提前撤销该临时授权。');
       await loadData();
     } catch (err) {
       setError((err as Error).message);
@@ -128,22 +211,28 @@ export const JitGrantsPage: React.FC = () => {
       headerName: '状态',
       width: 120,
       renderCell: (p) => {
-        const meta = STATUS_MAP[p.value as string] || { label: p.value, color: 'default' as const };
+        const meta = STATUS_MAP[p.value as string] || { label: String(p.value || '—'), color: 'default' as const };
         return <Chip size="small" color={meta.color} label={meta.label} />;
       },
     },
-    { field: 'reason', headerName: '授权原因', flex: 1, minWidth: 160 },
+    {
+      field: 'reason',
+      headerName: '授权原因',
+      flex: 1,
+      minWidth: 180,
+      valueGetter: (_, r) => r.reason || '—',
+    },
     {
       field: 'starts_at',
       headerName: '生效时间',
-      width: 155,
-      valueFormatter: (v) => (v ? dayjs(v as string).format('YYYY-MM-DD HH:mm') : '-'),
+      width: 160,
+      valueFormatter: (v) => (v ? dayjs(v as string).format('YYYY-MM-DD HH:mm') : '—'),
     },
     {
       field: 'expires_at',
       headerName: '到期自动回收',
-      width: 155,
-      valueFormatter: (v) => (v ? dayjs(v as string).format('YYYY-MM-DD HH:mm') : '-'),
+      width: 160,
+      valueFormatter: (v) => (v ? dayjs(v as string).format('YYYY-MM-DD HH:mm') : '—'),
     },
     ...(canWrite
       ? [
@@ -154,7 +243,14 @@ export const JitGrantsPage: React.FC = () => {
             width: 75,
             getActions: (p: { row: TempRoleGrant }) =>
               p.row.status === 'active' || p.row.status === 'pending'
-                ? [<GridActionsCellItem key="rev" icon={<RevokeIcon color="error" />} label="提前撤销" onClick={() => handleRevoke(p.row)} />]
+                ? [
+                    <GridActionsCellItem
+                      key="rev"
+                      icon={<RevokeIcon color="error" />}
+                      label="提前撤销"
+                      onClick={() => void handleRevoke(p.row)}
+                    />,
+                  ]
                 : [],
           } as GridColDef<TempRoleGrant>,
         ]
@@ -167,10 +263,10 @@ export const JitGrantsPage: React.FC = () => {
         <Box>
           <Stack direction="row" spacing={1} alignItems="center">
             <JitIcon color="primary" />
-            <Typography variant="h5">临时权限（JIT）</Typography>
+            <Typography variant="h5">临时授权（JIT）</Typography>
           </Stack>
           <Typography variant="body2" color="text.secondary" mt={0.4}>
-            为应急运维或临时协作授予限时角色，支持预约生效并由定时调度器到期自动回收
+            为应急运维或临时协作授予限时角色，支持预约生效，到期后由系统自动回收。
           </Typography>
         </Box>
         <Stack direction="row" spacing={1.5}>
@@ -185,15 +281,23 @@ export const JitGrantsPage: React.FC = () => {
             刷新
           </Button>
           {canWrite && (
-            <Button variant="contained" startIcon={<AddIcon />} onClick={() => setOpen(true)}>
-              授予临时权限
+            <Button variant="contained" startIcon={<AddIcon />} onClick={openCreateDialog}>
+              新增临时授权
             </Button>
           )}
         </Stack>
       </Stack>
 
-      {error && <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>{error}</Alert>}
-      {success && <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSuccess('')}>{success}</Alert>}
+      {error && (
+        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
+          {error}
+        </Alert>
+      )}
+      {success && (
+        <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSuccess('')}>
+          {success}
+        </Alert>
+      )}
 
       <Box sx={{ height: 520 }}>
         <DataGrid
@@ -206,67 +310,113 @@ export const JitGrantsPage: React.FC = () => {
         />
       </Box>
 
-      <Dialog open={open} onClose={() => setOpen(false)} maxWidth="xs" fullWidth>
-        <DialogTitle>授予临时角色（域：{currentDomain}）</DialogTitle>
-        <DialogContent>
-          <Stack spacing={2} mt={1}>
-            <FormControl size="small" fullWidth>
-              <InputLabel>目标用户</InputLabel>
-              <Select label="目标用户" value={userId || ''} onChange={(e) => setUserId(Number(e.target.value))}>
-                {users.map((u) => (
-                  <MenuItem key={u.id} value={u.id}>
-                    {u.username} ({u.display_name || u.email})
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+      {canWrite && (
+        <Dialog open={open} onClose={handleCloseDialog} maxWidth="xs" fullWidth>
+          <DialogTitle>新增临时授权（域：{currentDomain}）</DialogTitle>
+          <DialogContent>
+            <Stack spacing={2} mt={1}>
+              {dialogError && (
+                <Alert severity="error" onClose={() => setDialogError('')}>
+                  {dialogError}
+                </Alert>
+              )}
 
-            <FormControl size="small" fullWidth>
-              <InputLabel>临时角色</InputLabel>
-              <Select label="临时角色" value={roleCode} onChange={(e) => setRoleCode(e.target.value)}>
-                {roles.map((r) => (
-                  <MenuItem key={r.id} value={r.code}>
-                    {r.name} ({r.code})
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+              <FormControl size="small" fullWidth required error={Boolean(fieldErrors.userId)}>
+                <InputLabel>目标用户</InputLabel>
+                <Select
+                  label="目标用户"
+                  value={userId || ''}
+                  onChange={(e) => {
+                    setUserId(Number(e.target.value));
+                    if (fieldErrors.userId) setFieldErrors((prev) => ({ ...prev, userId: undefined }));
+                  }}
+                >
+                  {users.map((u) => (
+                    <MenuItem key={u.id} value={u.id}>
+                      {u.username}（{u.display_name || u.email || '未命名'}）
+                    </MenuItem>
+                  ))}
+                </Select>
+                {fieldErrors.userId && <FormHelperText>{fieldErrors.userId}</FormHelperText>}
+              </FormControl>
 
-            <TextField
-              label="预约生效时间（留空则立即生效）"
-              type="datetime-local"
-              size="small"
-              fullWidth
-              InputLabelProps={{ shrink: true }}
-              value={startsAtLocal}
-              onChange={(e) => setStartsAtLocal(e.target.value)}
-            />
+              <FormControl size="small" fullWidth required error={Boolean(fieldErrors.roleCode)}>
+                <InputLabel>临时角色</InputLabel>
+                <Select
+                  label="临时角色"
+                  value={roleCode}
+                  onChange={(e) => {
+                    setRoleCode(e.target.value);
+                    if (fieldErrors.roleCode) setFieldErrors((prev) => ({ ...prev, roleCode: undefined }));
+                  }}
+                >
+                  {roles.map((r) => (
+                    <MenuItem key={r.id} value={r.code}>
+                      {r.name}（{r.code}）
+                    </MenuItem>
+                  ))}
+                </Select>
+                {fieldErrors.roleCode && <FormHelperText>{fieldErrors.roleCode}</FormHelperText>}
+              </FormControl>
 
-            <TextField
-              label="有效时长（分钟）"
-              type="number"
-              size="small"
-              fullWidth
-              value={ttlMinutes}
-              onChange={(e) => setTtlMinutes(Number(e.target.value))}
-            />
+              <TextField
+                label="预约生效时间（留空则立即生效）"
+                type="datetime-local"
+                size="small"
+                fullWidth
+                InputLabelProps={{ shrink: true }}
+                value={startsAtLocal}
+                error={Boolean(fieldErrors.startsAt)}
+                helperText={fieldErrors.startsAt || '使用本地时间，最晚可预约 30 天内生效'}
+                onChange={(e) => {
+                  setStartsAtLocal(e.target.value);
+                  if (fieldErrors.startsAt) setFieldErrors((prev) => ({ ...prev, startsAt: undefined }));
+                }}
+              />
 
-            <TextField
-              label="授权理由（写入审计日志）"
-              size="small"
-              fullWidth
-              multiline
-              minRows={2}
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-            />
-          </Stack>
-        </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={() => setOpen(false)}>取消</Button>
-          <Button variant="contained" onClick={handleCreate}>确认授权</Button>
-        </DialogActions>
-      </Dialog>
+              <TextField
+                label="有效时长（分钟）"
+                type="number"
+                size="small"
+                fullWidth
+                required
+                inputProps={{ min: 1, max: MAX_TTL_MINUTES, step: 1 }}
+                value={ttlInput}
+                error={Boolean(fieldErrors.ttlMinutes)}
+                helperText={fieldErrors.ttlMinutes || `请输入 1 至 ${MAX_TTL_MINUTES} 之间的正整数（最长 30 天）`}
+                onChange={(e) => {
+                  setTtlInput(e.target.value);
+                  if (fieldErrors.ttlMinutes) setFieldErrors((prev) => ({ ...prev, ttlMinutes: undefined }));
+                }}
+              />
+
+              <TextField
+                label="授权原因（将写入审计日志）"
+                size="small"
+                fullWidth
+                required
+                multiline
+                minRows={2}
+                value={reason}
+                error={Boolean(fieldErrors.reason)}
+                helperText={fieldErrors.reason || `请简要说明授权背景，至少 ${MIN_REASON_LENGTH} 个字符`}
+                onChange={(e) => {
+                  setReason(e.target.value);
+                  if (fieldErrors.reason) setFieldErrors((prev) => ({ ...prev, reason: undefined }));
+                }}
+              />
+            </Stack>
+          </DialogContent>
+          <DialogActions sx={{ px: 3, pb: 2 }}>
+            <Button onClick={handleCloseDialog} disabled={submitting}>
+              取消
+            </Button>
+            <Button variant="contained" onClick={() => void handleCreate()} disabled={submitting}>
+              {submitting ? '提交中…' : '确认授权'}
+            </Button>
+          </DialogActions>
+        </Dialog>
+      )}
     </Box>
   );
 };

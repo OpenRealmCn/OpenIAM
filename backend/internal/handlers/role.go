@@ -65,7 +65,7 @@ type createRoleReq struct {
 func (h *RoleHandler) Create(c *gin.Context) {
 	var req createRoleReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		Fail(c, http.StatusBadRequest, bindError(err))
 		return
 	}
 	domain := strings.TrimSpace(req.DomainCode)
@@ -97,7 +97,7 @@ func (h *RoleHandler) Create(c *gin.Context) {
 		IsSystem:    false,
 	}
 	if err := h.db.Create(&role).Error; err != nil {
-		Fail(c, http.StatusInternalServerError, "创建角色失败: "+err.Error())
+		failWrite(c, err, "该域下角色编码已存在", "创建角色失败")
 		return
 	}
 
@@ -251,7 +251,7 @@ func (h *RoleHandler) SetPermissions(c *gin.Context) {
 	}
 	var req setRolePermissionsReq
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, http.StatusBadRequest, "参数错误: "+err.Error())
+		Fail(c, http.StatusBadRequest, bindError(err))
 		return
 	}
 
@@ -271,6 +271,19 @@ func (h *RoleHandler) SetPermissions(c *gin.Context) {
 	// 否则「先建空角色→授给自己→再加高权」就能绕过授予侧。
 	if !validateDelegablePolicies(c, h.enforcer, role.DomainCode, requested) {
 		return
+	}
+	if isSuperAdminWildcardPolicy(role.Code, role.DomainCode, "*", "*") {
+		kept := false
+		for _, p := range requested {
+			if p.Resource == "*" && p.Action == "*" {
+				kept = true
+				break
+			}
+		}
+		if !kept {
+			Fail(c, http.StatusBadRequest, "超级管理员角色必须保留全部权限（* / *），否则所有超级管理员将无法使用控制台")
+			return
+		}
 	}
 
 	beforePolicies, _ := h.enforcer.GetPolicies(role.DomainCode, role.Code)

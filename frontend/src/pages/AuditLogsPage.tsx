@@ -14,12 +14,19 @@ import {
   Typography,
 } from '@mui/material';
 import { Visibility as DetailIcon } from '@mui/icons-material';
-import { DataGrid, GridActionsCellItem, GridColDef, GridToolbar } from '@mui/x-data-grid';
+import {
+  DataGrid,
+  GridActionsCellItem,
+  GridColDef,
+  GridPaginationModel,
+  GridToolbar,
+} from '@mui/x-data-grid';
 import { DateTimePicker } from '@mui/x-date-pickers/DateTimePicker';
 import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider';
 import { AdapterDayjs } from '@mui/x-date-pickers/AdapterDayjs';
 import dayjs, { Dayjs } from 'dayjs';
 import { api } from '../api/client';
+import { useAuth } from '../context/AuthContext';
 import { AuditLog } from '../types/api';
 
 const STATUS_LABELS: Record<string, { label: string; color: 'success' | 'error' }> = {
@@ -39,10 +46,11 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
   system_setting: '系统设置',
   temp_role_grant: '临时权限',
   plugin: '插件配置',
-  domain: '业务域',
+  domain: '域',
 };
 
 export const AuditLogsPage: React.FC = () => {
+  const { currentDomain } = useAuth();
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -54,17 +62,29 @@ export const AuditLogsPage: React.FC = () => {
   const [status, setStatus] = useState('');
   const [startTime, setStartTime] = useState<Dayjs | null>(null);
   const [endTime, setEndTime] = useState<Dayjs | null>(null);
+  const [paginationModel, setPaginationModel] = useState<GridPaginationModel>({
+    page: 0,
+    pageSize: 20,
+  });
   const [detailLog, setDetailLog] = useState<AuditLog | null>(null);
+
+  const resetToFirstPage = () => {
+    setPaginationModel((prev) => (prev.page === 0 ? prev : { ...prev, page: 0 }));
+  };
+
+  useEffect(() => {
+    setPaginationModel((prev) => (prev.page === 0 ? prev : { ...prev, page: 0 }));
+  }, [currentDomain]);
 
   const loadLogs = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
       const res = await api.audit.list({
-        page: 1,
-        page_size: 100,
-        actor: actor || undefined,
-        action: action || undefined,
+        page: paginationModel.page + 1,
+        page_size: paginationModel.pageSize,
+        actor: actor.trim() || undefined,
+        action: action.trim() || undefined,
         resource_type: resourceType || undefined,
         status: status || undefined,
         start_time: startTime ? startTime.toISOString() : undefined,
@@ -77,10 +97,20 @@ export const AuditLogsPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [actor, action, resourceType, status, startTime, endTime]);
+  }, [
+    currentDomain,
+    paginationModel.page,
+    paginationModel.pageSize,
+    actor,
+    action,
+    resourceType,
+    status,
+    startTime,
+    endTime,
+  ]);
 
   useEffect(() => {
-    loadLogs();
+    void loadLogs();
   }, [loadLogs]);
 
   const columns: GridColDef<AuditLog>[] = [
@@ -125,10 +155,15 @@ export const AuditLogsPage: React.FC = () => {
     {
       field: 'actions',
       type: 'actions',
-      headerName: '快照',
+      headerName: '详情',
       width: 75,
       getActions: (p) => [
-        <GridActionsCellItem key="view" icon={<DetailIcon />} label="查看变更快照" onClick={() => setDetailLog(p.row)} />,
+        <GridActionsCellItem
+          key="view"
+          icon={<DetailIcon />}
+          label="查看变更详情"
+          onClick={() => setDetailLog(p.row)}
+        />,
       ],
     },
   ];
@@ -140,11 +175,11 @@ export const AuditLogsPage: React.FC = () => {
           审计日志
         </Typography>
         <Typography variant="body2" color="text.secondary" mb={2.5}>
-          查看登录记录与用户、角色、权限变更历史（共 {total} 条）
+          查看登录记录与用户、角色、权限变更历史（共 {total} 条）。
         </Typography>
 
         {error && (
-          <Alert severity="error" sx={{ mb: 2 }}>
+          <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError('')}>
             {error}
           </Alert>
         )}
@@ -154,19 +189,32 @@ export const AuditLogsPage: React.FC = () => {
             size="small"
             label="操作人"
             value={actor}
-            onChange={(e) => setActor(e.target.value)}
+            onChange={(e) => {
+              setActor(e.target.value);
+              resetToFirstPage();
+            }}
             sx={{ width: 140 }}
           />
           <TextField
             size="small"
             label="事件动作关键词"
             value={action}
-            onChange={(e) => setAction(e.target.value)}
+            onChange={(e) => {
+              setAction(e.target.value);
+              resetToFirstPage();
+            }}
             sx={{ width: 180 }}
           />
           <FormControl size="small" sx={{ width: 150 }}>
             <InputLabel>资源类型</InputLabel>
-            <Select value={resourceType} label="资源类型" onChange={(e) => setResourceType(e.target.value)}>
+            <Select
+              value={resourceType}
+              label="资源类型"
+              onChange={(e) => {
+                setResourceType(e.target.value);
+                resetToFirstPage();
+              }}
+            >
               <MenuItem value="">全部</MenuItem>
               <MenuItem value="role">角色</MenuItem>
               <MenuItem value="role_policy">角色权限</MenuItem>
@@ -178,11 +226,19 @@ export const AuditLogsPage: React.FC = () => {
               <MenuItem value="oauth_provider">第三方登录</MenuItem>
               <MenuItem value="system_setting">系统设置</MenuItem>
               <MenuItem value="temp_role_grant">临时权限</MenuItem>
+              <MenuItem value="domain">域</MenuItem>
             </Select>
           </FormControl>
           <FormControl size="small" sx={{ width: 110 }}>
             <InputLabel>状态</InputLabel>
-            <Select value={status} label="状态" onChange={(e) => setStatus(e.target.value)}>
+            <Select
+              value={status}
+              label="状态"
+              onChange={(e) => {
+                setStatus(e.target.value);
+                resetToFirstPage();
+              }}
+            >
               <MenuItem value="">全部</MenuItem>
               <MenuItem value="success">成功</MenuItem>
               <MenuItem value="failed">失败</MenuItem>
@@ -191,13 +247,19 @@ export const AuditLogsPage: React.FC = () => {
           <DateTimePicker
             label="开始时间"
             value={startTime}
-            onChange={setStartTime}
+            onChange={(v) => {
+              setStartTime(v);
+              resetToFirstPage();
+            }}
             slotProps={{ textField: { size: 'small', sx: { width: 205 } } }}
           />
           <DateTimePicker
             label="结束时间"
             value={endTime}
-            onChange={setEndTime}
+            onChange={(v) => {
+              setEndTime(v);
+              resetToFirstPage();
+            }}
             slotProps={{ textField: { size: 'small', sx: { width: 205 } } }}
           />
           <Button
@@ -209,6 +271,7 @@ export const AuditLogsPage: React.FC = () => {
               setStatus('');
               setStartTime(null);
               setEndTime(null);
+              resetToFirstPage();
             }}
           >
             重置
@@ -221,6 +284,11 @@ export const AuditLogsPage: React.FC = () => {
             columns={columns}
             loading={loading}
             disableRowSelectionOnClick
+            paginationMode="server"
+            rowCount={total}
+            paginationModel={paginationModel}
+            onPaginationModelChange={setPaginationModel}
+            pageSizeOptions={[10, 20, 50]}
             slots={{ toolbar: GridToolbar }}
           />
         </Box>
@@ -228,10 +296,10 @@ export const AuditLogsPage: React.FC = () => {
         <Drawer anchor="right" open={Boolean(detailLog)} onClose={() => setDetailLog(null)}>
           <Box sx={{ width: { xs: 340, sm: 500 }, p: 3 }}>
             <Typography variant="h6" mb={1}>
-              审计事件快照 #{detailLog?.id}
+              审计事件详情（#{detailLog?.id}）
             </Typography>
             <Typography variant="body2" color="text.secondary" mb={2}>
-              {detailLog?.action} · {detailLog?.actor_username || '系统自动'} @ {detailLog?.ip_address}
+              {detailLog?.action} · {detailLog?.actor_username || '系统'} · {detailLog?.ip_address || '-'}
             </Typography>
             {detailLog?.error_message && (
               <Alert severity="error" sx={{ mb: 2 }}>
