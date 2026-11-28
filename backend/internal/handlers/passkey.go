@@ -520,7 +520,7 @@ func (h *PasskeyHandler) FinishPasskeyLogin(c *gin.Context) {
 	}
 	// 签名计数器只增不减：新值不大于已存值说明可能是克隆的凭证。
 	if stored := findStoredCredential(matchedUser.creds, cred.ID); stored != nil {
-		if stored.Authenticator.SignCount > 0 && cred.Authenticator.SignCount <= stored.Authenticator.SignCount {
+		if signCountRejected(stored.Authenticator.SignCount, cred.Authenticator.SignCount) {
 			h.auditSvc.RecordFromContext(c, audit.Entry{
 				DomainCode:   rbac.DefaultDomain,
 				Action:       "auth.passkey_login",
@@ -605,4 +605,10 @@ func findStoredCredential(creds []webauthn.Credential, id []byte) *webauthn.Cred
 		}
 	}
 	return nil
+}
+
+// signCountRejected 判断通行密钥签名计数器是否异常：认证器支持计数器（已存值大于 0）时，
+// 新值必须严格大于已存值，否则说明凭证可能被克隆，登录必须拒绝并记录安全事件。
+func signCountRejected(stored, presented uint32) bool {
+	return stored > 0 && presented <= stored
 }
