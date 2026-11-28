@@ -552,6 +552,9 @@ func (s *Server) Token(c *gin.Context) {
 	if s.rejectPasswordChangeGrant(c) {
 		return
 	}
+	if s.rejectStaleRefreshGrant(c) {
+		return
+	}
 	if err := s.oauthSrv.HandleTokenRequest(c.Writer, c.Request); err != nil {
 		s.auditSvc.RecordFromContext(c, audit.Entry{
 			DomainCode:   rbac.DefaultDomain,
@@ -594,6 +597,61 @@ func (s *Server) rejectPasswordChangeGrant(c *gin.Context) bool {
 	c.JSON(http.StatusForbidden, gin.H{
 		"error":             "password_change_required",
 		"error_description": "当前账号处于强制改密状态，请先修改密码",
+	})
+	return true
+}
+
+// rejectStaleRefreshGrant 拦下签发时间早于用户「凭据有效起点」的 refresh_token。
+// 改密 / 重置密码 / 踢下线时服务端会推进 users.tokens_valid_after，
+// 此前签发的刷新令牌即使还在 Redis 里也必须返回 invalid_grant，否则攻击者手里的旧令牌
+// 可以换出签发时间晚于撤销时刻的新令牌，内省还会判为 active。
+func (s *Server) rejectStaleRefreshGrant(c *gin.Context) bool {
+	if err := c.Request.ParseForm(); err != nil {
+		return false
+	}
+	if c.Request.PostForm.Get("grant_type") != string(oauth2.Refreshing) {
+		return false
+	}
+	token := c.Request.PostForm.Get("refresh_token")
+	if token == "" {
+		return false
+	}
+	ti, err := s.tokenStore.GetByRefresh(c.Request.Context(), token)
+	if err != nil || ti == nil {
+		return false
+	}
+	uid, err := strconv.ParseUint(ti.GetUserID(), 10, 64)
+	if err != nil || uid == 0 {
+		return false
+	}
+	issuedAt := ti.GetRefreshCreateAt()
+	if issuedAt.IsZero() {
+		issuedAt = ti.GetAccessCreateAt()
+	}
+	if issuedAt.IsZero() {
+		return false
+	}
+	var user models.User
+	if err := s.db.WithContext(c.Request.Context()).
+		Select("id, tokens_valid_after").
+		First(&user, uid).Error; err != nil {
+		return false
+	}
+	if user.TokensValidAfterMs == nil || *user.TokensValidAfterMs <= 0 ||
+		issuedAt.UnixMilli() > *user.TokensValidAfterMs {
+		return false
+	}
+	s.auditSvc.RecordFromContext(c, audit.Entry{
+		DomainCode:   rbac.DefaultDomain,
+		Action:       "oauth2.token.stale_refresh",
+		ResourceType: "oauth_token",
+		ResourceID:   fmt.Sprintf("%d", uid),
+		Status:       "failed",
+		ErrorMessage: "refresh token issued at or before the user's tokens_valid_after",
+	})
+	c.JSON(http.StatusBadRequest, gin.H{
+		"error":             "invalid_grant",
+		"error_description": "refresh_token 已失效，请重新登录",
 	})
 	return true
 }

@@ -676,7 +676,9 @@ func TestProfilePasskeySiteAndSMTPSettings(t *testing.T) {
 	pkListW := doJSON(t, env.engine, http.MethodGet, "/api/v1/auth/passkeys", nil, memberToken)
 	require.Equal(t, http.StatusOK, pkListW.Code)
 
-	pkBeginW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/passkeys/register/begin", nil, memberToken)
+	// 通行密钥的允许来源改由服务端配置决定，浏览器一定会带 Origin 头，这里按默认白名单的 Origin 发起。
+	pkBeginW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/passkeys/register/begin", nil, memberToken,
+		map[string]string{"Origin": "http://localhost:5173"})
 	require.Equal(t, http.StatusOK, pkBeginW.Code, pkBeginW.Body.String())
 	assert.Contains(t, pkBeginW.Body.String(), `"session_id"`)
 	assert.Contains(t, pkBeginW.Body.String(), `"challenge"`)
