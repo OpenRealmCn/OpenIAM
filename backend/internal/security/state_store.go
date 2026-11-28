@@ -273,67 +273,82 @@ var (
 	ErrPasswordResetTooManyAttempts = errors.New("验证码错误次数过多，验证码已失效，请重新获取")
 )
 
+// passwordResetConsumeScript 在一次 Redis 执行里完成「读取 → 比对 → 计数 → 删除」：
+//   - 验证码不存在：返回 -1（已被并发请求消费或已过期）
+//   - 验证码不匹配：INCR 失败计数（首次设置有效期），达到上限则作废验证码并返回 -2
+//   - 验证码匹配：删除验证码、记录与失败计数，返回 1 和记录内容
+//
+// 因为整个判断在 Redis 内部一次完成，并发请求里只有一个能消费成功；
+// 错误计数不会被「读 → 比对 → 删」之间的窗口绕过，输错也不会提前把验证码删掉。
+var passwordResetConsumeScript = redis.NewScript(`
+local codeKey = KEYS[1]
+local attemptKey = KEYS[2]
+local recordKey = KEYS[3]
+local provided = ARGV[1]
+local maxAttempts = tonumber(ARGV[2])
+local ttlMs = tonumber(ARGV[3])
+
+local stored = redis.call('GET', codeKey)
+if not stored then
+  return {-1, ''}
+end
+if stored ~= provided then
+  local attempts = redis.call('INCR', attemptKey)
+  if attempts == 1 then
+    redis.call('PEXPIRE', attemptKey, ttlMs)
+  end
+  if maxAttempts > 0 and attempts >= maxAttempts then
+    redis.call('DEL', codeKey, recordKey, attemptKey)
+    return {-2, ''}
+  end
+  return {0, ''}
+end
+local rec = redis.call('GET', recordKey)
+redis.call('DEL', codeKey, recordKey, attemptKey)
+if not rec then
+  return {-1, ''}
+end
+return {1, rec}
+`)
+
 // ConsumePasswordResetCode 原子校验并一次性消费重置密码验证码。
-// 这里不用「读 → 比对 → 删除」的原因：GETDEL 是单条原子命令，并发请求里只有一个能取到验证码，
-// 另一个必然拿到空值，从根上消除重复使用的窗口；失败次数用 INCR 累计，达到上限立刻作废验证码。
-// 任何一个 Redis 写操作失败都会返回错误，绝不吞掉——「删不掉」必须让整个流程失败。
+// 校验、失败计数与删除都在同一段 Lua 里执行：并发请求只有一个能成功，
+// 同一账号连续错误达到 maxAttempts 次立即作废验证码并要求重新发起。
+// 任何 Redis 执行失败都会返回错误，绝不吞掉——「删不掉」必须让整个流程失败。
 func (s *StateStore) ConsumePasswordResetCode(ctx context.Context, email, code string, maxAttempts int) (*PasswordResetRecord, error) {
 	codeKey := s.key("pwd_reset", email, "code")
 	attemptKey := s.key("pwd_reset", email, "attempts")
 	recordKey := s.key("pwd_reset", email)
 	const attemptTTL = 10 * time.Minute
 
-	attempts, err := s.rdb.Incr(ctx, attemptKey).Result()
+	res, err := passwordResetConsumeScript.Run(ctx, s.rdb, []string{codeKey, attemptKey, recordKey},
+		code, maxAttempts, attemptTTL.Milliseconds()).Result()
 	if err != nil {
-		return nil, fmt.Errorf("统计验证码错误次数失败: %w", err)
+		return nil, fmt.Errorf("校验验证码失败: %w", err)
 	}
-	if attempts == 1 {
-		if err := s.rdb.PExpire(ctx, attemptKey, attemptTTL).Err(); err != nil {
-			return nil, fmt.Errorf("设置验证码计数有效期失败: %w", err)
-		}
+	fields, ok := res.([]interface{})
+	if !ok || len(fields) != 2 {
+		return nil, fmt.Errorf("校验验证码失败: 返回格式异常 %T", res)
 	}
-	if maxAttempts > 0 && attempts > int64(maxAttempts) {
-		if err := s.rdb.Del(ctx, codeKey, recordKey, attemptKey).Err(); err != nil {
-			return nil, fmt.Errorf("作废验证码失败: %w", err)
-		}
-		return nil, ErrPasswordResetTooManyAttempts
+	status, ok := fields[0].(int64)
+	if !ok {
+		return nil, fmt.Errorf("校验验证码失败: 状态码格式异常 %T", fields[0])
 	}
-
-	stored, err := s.rdb.GetDel(ctx, codeKey).Result()
-	if errors.Is(err, redis.Nil) {
-		// 验证码已被并发请求消费或已过期。
+	switch status {
+	case -1:
 		return nil, ErrStateNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("读取验证码失败: %w", err)
-	}
-	if stored != code {
-		if maxAttempts > 0 && attempts >= int64(maxAttempts) {
-			if err := s.rdb.Del(ctx, codeKey, recordKey, attemptKey).Err(); err != nil {
-				return nil, fmt.Errorf("作废验证码失败: %w", err)
-			}
-			return nil, ErrPasswordResetTooManyAttempts
-		}
+	case -2:
+		return nil, ErrPasswordResetTooManyAttempts
+	case 0:
 		return nil, ErrPasswordResetCodeMismatch
 	}
-
-	if err := s.rdb.Del(ctx, attemptKey).Err(); err != nil {
-		return nil, fmt.Errorf("清理验证码计数失败: %w", err)
-	}
-	val, err := s.rdb.Get(ctx, recordKey).Result()
-	if errors.Is(err, redis.Nil) {
-		return nil, ErrStateNotFound
-	}
-	if err != nil {
-		return nil, fmt.Errorf("读取验证码记录失败: %w", err)
+	raw, ok := fields[1].(string)
+	if !ok {
+		return nil, fmt.Errorf("校验验证码失败: 记录格式异常 %T", fields[1])
 	}
 	var rec PasswordResetRecord
-	if err := json.Unmarshal([]byte(val), &rec); err != nil {
+	if err := json.Unmarshal([]byte(raw), &rec); err != nil {
 		return nil, err
-	}
-	// 记录本身也立即删除：即使验证码键已被消费，也不能留下可复用的记录。
-	if err := s.rdb.Del(ctx, recordKey).Err(); err != nil {
-		return nil, fmt.Errorf("清理验证码记录失败: %w", err)
 	}
 	return &rec, nil
 }
