@@ -19,6 +19,11 @@ type OAuthPluginState struct {
 	CodeVerifier string `json:"code_verifier"`
 	RedirectTo   string `json:"redirect_to,omitempty"`
 	BindUserID   uint64 `json:"bind_user_id,omitempty"`
+	// 绑定流程的凭据快照：发起绑定时的会话标识、签发时刻与用户凭据有效起点。
+	// 回调阶段逐项复核，避免「先发起绑定、等受害者改密或会话被踢后再完成」的接管路径。
+	BindSessionID     string `json:"bind_session_id,omitempty"`
+	BindIssuedAtMs    int64  `json:"bind_issued_at_ms,omitempty"`
+	BindTokensValidAt int64  `json:"bind_tokens_valid_at,omitempty"`
 }
 
 type RefreshTokenRecord struct {
