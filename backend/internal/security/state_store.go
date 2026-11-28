@@ -19,6 +19,12 @@ type OAuthPluginState struct {
 	CodeVerifier string `json:"code_verifier"`
 	RedirectTo   string `json:"redirect_to,omitempty"`
 	BindUserID   uint64 `json:"bind_user_id,omitempty"`
+	// 以下字段只在外呼绑定流程中写入：发起绑定的会话标识（Access Token JTI）、
+	// 该会话的签发时刻、以及发起时用户「凭据有效起点」的快照。
+	// 回调阶段必须逐项复核，否则攻击者可以先发起绑定，等受害者改密踢人后再完成绑定。
+	BindSessionID     string `json:"bind_session_id,omitempty"`
+	BindIssuedAtMs    int64  `json:"bind_issued_at_ms,omitempty"`
+	BindTokensValidAt int64  `json:"bind_tokens_valid_at,omitempty"`
 }
 
 type RefreshTokenRecord struct {
@@ -252,38 +258,101 @@ func (s *StateStore) ConsumePasskeySession(ctx context.Context, sessionID string
 	return []byte(val), nil
 }
 
+// PasswordResetRecord 为一次性重置密码验证码记录；Email 为发码时的收件地址，
+// 确认阶段必须与账号当前邮箱比对，邮箱换绑后旧验证码随之作废。
 type PasswordResetRecord struct {
 	UserID uint64 `json:"user_id"`
 	Email  string `json:"email"`
 	Code   string `json:"code"`
 }
 
-// SavePasswordResetCode 保存 6 位一次性重置密码验证码。
-func (s *StateStore) SavePasswordResetCode(ctx context.Context, email string, rec PasswordResetRecord, ttl time.Duration) error {
-	b, err := json.Marshal(rec)
-	if err != nil {
-		return err
-	}
-	return s.rdb.Set(ctx, s.key("pwd_reset", email), string(b), ttl).Err()
-}
+var (
+	// ErrPasswordResetCodeMismatch 表示验证码不正确（本次校验已计入失败次数）。
+	ErrPasswordResetCodeMismatch = errors.New("验证码不正确")
+	// ErrPasswordResetTooManyAttempts 表示同一账号连续错误次数达到上限，验证码已被作废。
+	ErrPasswordResetTooManyAttempts = errors.New("验证码错误次数过多，验证码已失效，请重新获取")
+)
 
-// ConsumePasswordResetCode 校验并原子消费重置密码验证码。
-func (s *StateStore) ConsumePasswordResetCode(ctx context.Context, email, code string) (*PasswordResetRecord, error) {
-	k := s.key("pwd_reset", email)
-	val, err := s.rdb.Get(ctx, k).Result()
+// ConsumePasswordResetCode 原子校验并一次性消费重置密码验证码。
+// 这里不用「读 → 比对 → 删除」的原因：GETDEL 是单条原子命令，并发请求里只有一个能取到验证码，
+// 另一个必然拿到空值，从根上消除重复使用的窗口；失败次数用 INCR 累计，达到上限立刻作废验证码。
+// 任何一个 Redis 写操作失败都会返回错误，绝不吞掉——「删不掉」必须让整个流程失败。
+func (s *StateStore) ConsumePasswordResetCode(ctx context.Context, email, code string, maxAttempts int) (*PasswordResetRecord, error) {
+	codeKey := s.key("pwd_reset", email, "code")
+	attemptKey := s.key("pwd_reset", email, "attempts")
+	recordKey := s.key("pwd_reset", email)
+	const attemptTTL = 10 * time.Minute
+
+	attempts, err := s.rdb.Incr(ctx, attemptKey).Result()
+	if err != nil {
+		return nil, fmt.Errorf("统计验证码错误次数失败: %w", err)
+	}
+	if attempts == 1 {
+		if err := s.rdb.PExpire(ctx, attemptKey, attemptTTL).Err(); err != nil {
+			return nil, fmt.Errorf("设置验证码计数有效期失败: %w", err)
+		}
+	}
+	if maxAttempts > 0 && attempts > int64(maxAttempts) {
+		if err := s.rdb.Del(ctx, codeKey, recordKey, attemptKey).Err(); err != nil {
+			return nil, fmt.Errorf("作废验证码失败: %w", err)
+		}
+		return nil, ErrPasswordResetTooManyAttempts
+	}
+
+	stored, err := s.rdb.GetDel(ctx, codeKey).Result()
+	if errors.Is(err, redis.Nil) {
+		// 验证码已被并发请求消费或已过期。
+		return nil, ErrStateNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("读取验证码失败: %w", err)
+	}
+	if stored != code {
+		if maxAttempts > 0 && attempts >= int64(maxAttempts) {
+			if err := s.rdb.Del(ctx, codeKey, recordKey, attemptKey).Err(); err != nil {
+				return nil, fmt.Errorf("作废验证码失败: %w", err)
+			}
+			return nil, ErrPasswordResetTooManyAttempts
+		}
+		return nil, ErrPasswordResetCodeMismatch
+	}
+
+	if err := s.rdb.Del(ctx, attemptKey).Err(); err != nil {
+		return nil, fmt.Errorf("清理验证码计数失败: %w", err)
+	}
+	val, err := s.rdb.Get(ctx, recordKey).Result()
 	if errors.Is(err, redis.Nil) {
 		return nil, ErrStateNotFound
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("读取验证码记录失败: %w", err)
 	}
 	var rec PasswordResetRecord
 	if err := json.Unmarshal([]byte(val), &rec); err != nil {
 		return nil, err
 	}
-	if rec.Code != code {
-		return nil, errors.New("验证码不正确")
+	// 记录本身也立即删除：即使验证码键已被消费，也不能留下可复用的记录。
+	if err := s.rdb.Del(ctx, recordKey).Err(); err != nil {
+		return nil, fmt.Errorf("清理验证码记录失败: %w", err)
 	}
-	_ = s.rdb.Del(ctx, k).Err()
 	return &rec, nil
+}
+
+// SavePasswordResetCode 保存 6 位一次性重置密码验证码，同时重置该账号的失败计数。
+func (s *StateStore) SavePasswordResetCode(ctx context.Context, email string, rec PasswordResetRecord, ttl time.Duration) error {
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return err
+	}
+	if err := s.rdb.Set(ctx, s.key("pwd_reset", email), string(b), ttl).Err(); err != nil {
+		return err
+	}
+	if err := s.rdb.Set(ctx, s.key("pwd_reset", email, "code"), rec.Code, ttl).Err(); err != nil {
+		return err
+	}
+	// 新验证码重新计数：不清零会让正常用户的历史错误次数继续累计。
+	if err := s.rdb.Del(ctx, s.key("pwd_reset", email, "attempts")).Err(); err != nil {
+		return err
+	}
+	return nil
 }

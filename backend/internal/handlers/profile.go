@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -15,8 +16,10 @@ import (
 	"github.com/openrealm/openiam/internal/audit"
 	"github.com/openrealm/openiam/internal/mailer"
 	"github.com/openrealm/openiam/internal/models"
+	"github.com/openrealm/openiam/internal/oauthplugin"
 	"github.com/openrealm/openiam/internal/rbac"
 	"github.com/openrealm/openiam/internal/security"
+	"gorm.io/gorm"
 )
 
 type updateProfileReq struct {
@@ -154,7 +157,14 @@ func (h *AuthHandler) ListMyIdentities(c *gin.Context) {
 func (h *AuthHandler) StartBindIdentity(c *gin.Context) {
 	providerName := c.Param("provider")
 	redirectOverride := c.Query("redirect_uri")
-	authURL, state, err := h.pluginSvc.StartBind(c.Request.Context(), providerName, redirectOverride, CurrentUserID(c))
+	session := oauthplugin.BindSession{}
+	if claimsVal, ok := c.Get("claims"); ok {
+		if claims, ok2 := claimsVal.(*security.AccessClaims); ok2 && claims != nil {
+			session.SessionID = claims.ID
+			session.IssuedAtMs = claims.IssuedAtMs
+		}
+	}
+	authURL, state, err := h.pluginSvc.StartBind(c.Request.Context(), providerName, redirectOverride, CurrentUserID(c), session)
 	if err != nil {
 		Fail(c, http.StatusBadRequest, err.Error())
 		return
@@ -186,15 +196,21 @@ func (h *AuthHandler) UnbindIdentity(c *gin.Context) {
 		return
 	}
 
-	if user.PasswordHash == "" {
-		var otherCount int64
-		h.db.Model(&models.UserIdentity{}).Where("user_id = ? AND id <> ?", uid, id).Count(&otherCount)
-		var passkeyCount int64
-		h.db.Model(&models.UserPasskey{}).Where("user_id = ?", uid).Count(&passkeyCount)
-		if otherCount == 0 && passkeyCount == 0 {
-			Fail(c, http.StatusBadRequest, "请先设置登录密码或绑定通行密钥后再解绑最后一个第三方账号")
-			return
-		}
+	// 解绑后必须仍留有至少一种登录方式：密码 / 其余通行密钥 / 其余外部身份。
+	// 旧实现只在「没有密码」时才统计，且漏掉「没有密码但有通行密钥」以外的情况，
+	// 因此可以删到账号再也登不进来。
+	var otherIdentities, passkeys int64
+	if err := h.db.Model(&models.UserIdentity{}).Where("user_id = ? AND id <> ?", uid, id).Count(&otherIdentities).Error; err != nil {
+		Fail(c, http.StatusInternalServerError, "查询绑定账号失败")
+		return
+	}
+	if err := h.db.Model(&models.UserPasskey{}).Where("user_id = ?", uid).Count(&passkeys).Error; err != nil {
+		Fail(c, http.StatusInternalServerError, "查询通行密钥失败")
+		return
+	}
+	if remainingLoginMethods(user.PasswordHash != "", passkeys, otherIdentities) == 0 {
+		Fail(c, http.StatusBadRequest, "不能解绑最后一个登录方式，请先设置登录密码或绑定通行密钥")
+		return
 	}
 
 	if err := h.db.Delete(&identity).Error; err != nil {
@@ -276,6 +292,9 @@ type passwordResetConfirmBody struct {
 	NewPassword string `json:"new_password" binding:"required,min=8,maxbytes=72"`
 }
 
+// passwordResetMaxAttempts 为同一账号连续输错验证码的上限，达到即作废当前验证码。
+const passwordResetMaxAttempts = 5
+
 // ConfirmPasswordReset 校验 6 位邮箱验证码并重置密码，同时吊销所有旧会话。
 func (h *AuthHandler) ConfirmPasswordReset(c *gin.Context) {
 	var req passwordResetConfirmBody
@@ -283,9 +302,15 @@ func (h *AuthHandler) ConfirmPasswordReset(c *gin.Context) {
 		Fail(c, http.StatusBadRequest, "参数无效：请填写邮箱、6 位验证码及 8~72 位新密码")
 		return
 	}
+	ctx := c.Request.Context()
 	email := strings.ToLower(strings.TrimSpace(req.Email))
-	rec, err := h.stateStore.ConsumePasswordResetCode(c.Request.Context(), email, strings.TrimSpace(req.Code))
+	// 一次性原子消费：并发请求只有一个能拿到记录，连续错误 5 次验证码立即作废。
+	rec, err := h.stateStore.ConsumePasswordResetCode(ctx, email, strings.TrimSpace(req.Code), passwordResetMaxAttempts)
 	if err != nil {
+		if errors.Is(err, security.ErrPasswordResetTooManyAttempts) {
+			Fail(c, http.StatusTooManyRequests, "验证码错误次数过多，已失效，请重新获取")
+			return
+		}
 		Fail(c, http.StatusBadRequest, "验证码无效或已过期")
 		return
 	}
@@ -295,17 +320,43 @@ func (h *AuthHandler) ConfirmPasswordReset(c *gin.Context) {
 		Fail(c, http.StatusBadRequest, "账号不存在或已被禁用")
 		return
 	}
+	// 发码之后邮箱被换绑：旧验证码必须失效，否则原邮箱持有人仍能重置这个账号的密码。
+	if !strings.EqualFold(strings.TrimSpace(user.Email), strings.TrimSpace(rec.Email)) {
+		h.auditSvc.RecordFromContext(c, audit.Entry{
+			ActorID:       user.ID,
+			ActorUsername: user.Username,
+			DomainCode:    rbac.DefaultDomain,
+			Action:        "auth.password_reset.confirm",
+			ResourceType:  "user",
+			ResourceID:    fmt.Sprintf("%d", user.ID),
+			Status:        "failed",
+			ErrorMessage:  "reset code email no longer matches the account email",
+		})
+		Fail(c, http.StatusBadRequest, "验证码已失效，请使用当前绑定邮箱重新获取")
+		return
+	}
 
 	hash, err := security.HashPassword(req.NewPassword)
 	if err != nil {
 		Fail(c, http.StatusInternalServerError, "密码加密失败")
 		return
 	}
-	if err := h.db.Model(&user).Update("password_hash", hash).Error; err != nil {
+	// 先撤销旧会话：撤销失败就整体失败、密码保持不变（旧实现把这里的错误吞掉了）。
+	if err := h.stateStore.RevokeUserTokens(ctx, user.ID); err != nil {
+		Fail(c, http.StatusInternalServerError, "重置密码失败：撤销旧会话失败，请稍后重试")
+		return
+	}
+	// 口令哈希与凭据有效起点在同一个事务里落库，避免只改了一半。
+	if err := h.db.Transaction(func(tx *gorm.DB) error {
+		return tx.Model(&models.User{}).Where("id = ?", user.ID).Updates(map[string]interface{}{
+			"password_hash":        hash,
+			"must_change_password": false,
+			"tokens_valid_after":   time.Now().UnixMilli(),
+		}).Error
+	}); err != nil {
 		Fail(c, http.StatusInternalServerError, "更新密码失败")
 		return
 	}
-	_ = h.stateStore.RevokeUserTokens(c.Request.Context(), user.ID)
 
 	h.auditSvc.RecordFromContext(c, audit.Entry{
 		ActorID:       user.ID,

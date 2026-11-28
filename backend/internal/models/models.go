@@ -100,7 +100,10 @@ type User struct {
 	AvatarURL    string `gorm:"size:512;not null;default:''" json:"avatar_url"`
 	Status       string `gorm:"size:32;not null;default:'active'" json:"status"` // active | disabled
 	// MustChangePassword 表示账号处于强制改密状态：登录后只能修改密码或退出，不能访问任何业务接口。
-	MustChangePassword bool       `gorm:"not null;default:false" json:"must_change_password"`
+	MustChangePassword bool `gorm:"not null;default:false" json:"must_change_password"`
+	// TokensValidAfterMs 是该用户的「凭据有效起点」（Unix 毫秒）：改密、重置密码、踢下线时写入当前时刻，
+	// 签发时间早于或等于该时刻的刷新令牌一律作废。为 nil 表示从未发生过凭据变更。
+	TokensValidAfterMs *int64     `gorm:"column:tokens_valid_after" json:"tokens_valid_after_ms,omitempty"`
 	LastLoginAt        *time.Time `json:"last_login_at"`
 	LastLoginIP        string     `gorm:"size:64;not null;default:''" json:"last_login_ip"`
 	CreatedAt          time.Time  `json:"created_at"`
