@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/openrealm/openiam/internal/clientip"
 	"github.com/openrealm/openiam/internal/models"
 	"github.com/ulule/limiter/v3"
 	"gorm.io/gorm"
@@ -34,7 +35,10 @@ const (
 
 	KeyOAuthPluginCallbackBaseURL = "oauth_plugin.callback_base_url"
 
-	KeyServerCORSAllowOrigins = "server.cors_allow_origins"
+	KeyServerCORSAllowOrigins     = "server.cors_allow_origins"
+	KeyServerClientIPMethod       = "server.client_ip_method"
+	KeyServerClientIPCustomHeader = "server.client_ip_custom_header"
+	KeyServerTrustedProxies       = "server.trusted_proxies"
 
 	// 站点品牌与首页公告
 	KeySiteName                = "site.name"
@@ -102,7 +106,10 @@ type RuntimeSettings struct {
 
 	OAuthPluginCallbackBaseURL string
 
-	CORSAllowOrigins []string
+	CORSAllowOrigins     []string
+	ClientIPMethod       string
+	ClientIPCustomHeader string
+	TrustedProxies       []string
 
 	SiteName                string
 	SiteSubtitle            string
@@ -182,7 +189,7 @@ var defaultSpecs = []settingSpec{
 		DefaultVal:  "false",
 		ValueType:   "bool",
 		Label:       "允许身份源与插件访问内网地址",
-		Description: "默认关闭以防止 SSRF 攻击；仅在内网自建 IdP、Webhook 或私有 Cap 服务时开启。",
+		Description: "默认关闭以防止内网探测风险；仅在需要对接内网身份源、内网告警地址或私有验证服务时开启。",
 	},
 	{
 		Key:         KeyJWTIssuer,
@@ -288,6 +295,30 @@ var defaultSpecs = []settingSpec{
 		Label:       "允许跨域来源（CORS）",
 		Description: "允许访问平台接口的前端域名列表，多个地址以英文逗号分隔。",
 	},
+	{
+		Key:         KeyServerClientIPMethod,
+		Category:    "server",
+		DefaultVal:  clientip.MethodXForwardedFor,
+		ValueType:   "string",
+		Label:       "真实客户端 IP 获取方式",
+		Description: "选择系统识别登录、审计与限流来源 IP 的方式，可在下方实时核对每种方式的预览 IP。",
+	},
+	{
+		Key:         KeyServerClientIPCustomHeader,
+		Category:    "server",
+		DefaultVal:  "",
+		ValueType:   "string",
+		Label:       "自定义真实 IP 请求头名称",
+		Description: "当获取方式选择「自定义请求头」时读取该请求头（如 X-Forwarded-Client-IP 或 EO-Client-IP）。",
+	},
+	{
+		Key:         KeyServerTrustedProxies,
+		Category:    "server",
+		DefaultVal:  "127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
+		ValueType:   "string_list",
+		Label:       "可信反向代理网段（IP / CIDR）",
+		Description: "仅当 TCP 直连来源命中此处列出的代理 IP 或网段时，才采信反向代理或 CDN 透传的客户端 IP 请求头，防止伪造来源。",
+	},
 	// 站点品牌与公告
 	{
 		Key:         KeySiteName,
@@ -351,7 +382,7 @@ var defaultSpecs = []settingSpec{
 		DefaultVal:  "info",
 		ValueType:   "string",
 		Label:       "公告级别",
-		Description: "可选 info（通知）、success（成功）、warning（提醒）、error（重要告警）。",
+		Description: "控制公告横幅的视觉样式，可根据紧急程度选择普通通知、成功提示、维护警告或重要告警。",
 	},
 	{
 		Key:         KeySiteFooterText,
@@ -424,7 +455,7 @@ var defaultSpecs = []settingSpec{
 		DefaultVal:  "starttls",
 		ValueType:   "string",
 		Label:       "传输加密方式",
-		Description: "可选 starttls（推荐，端口 587）、tls（隐式 SSL/TLS，端口 465）或 none。",
+		Description: "选择与邮件服务器的加密连接方式，推荐使用 STARTTLS（587 端口）或隐式 SSL/TLS（465 端口）。",
 	},
 	{
 		Key:         KeyOTPCooldownSeconds,
@@ -504,7 +535,7 @@ var defaultSpecs = []settingSpec{
 		DefaultVal:  "challenge_mfa",
 		ValueType:   "string",
 		Label:       "高风险处置策略",
-		Description: "可选 challenge_mfa（强制二次验证）、notify（仅告警放行）或 block（直接阻断）。",
+		Description: "当登录风险分达到高风险阈值时自动执行的保护动作，推荐强制二次身份验证。",
 	},
 	{
 		Key:         KeyRiskBlockedIPs,
@@ -528,7 +559,7 @@ var defaultSpecs = []settingSpec{
 		DefaultVal:  "false",
 		ValueType:   "bool",
 		Label:       "登录启用人机验证",
-		Description: "开启后登录需先通过人机验证插槽中已启用的验证模块（如 Cap PoW）。",
+		Description: "开启后，用户登录账号前需先完成已启用的人机安全验证。",
 	},
 	{
 		Key:         KeyCaptchaProtectRegister,
@@ -631,6 +662,9 @@ func (s *Service) Reload() error {
 		OAuthServerRefreshTokenTTL:    time.Duration(parseInt(kv[KeyOAuthServerRefreshTokenTTLHours], 720)) * time.Hour,
 		OAuthPluginCallbackBaseURL:    fallbackStr(kv[KeyOAuthPluginCallbackBaseURL], "http://localhost:5173/oauth/callback"),
 		CORSAllowOrigins:              splitCSV(fallbackStr(kv[KeyServerCORSAllowOrigins], "http://localhost:5173,http://127.0.0.1:5173")),
+		ClientIPMethod:                clientip.NormalizeMethod(fallbackStr(kv[KeyServerClientIPMethod], clientip.MethodXForwardedFor)),
+		ClientIPCustomHeader:          strings.TrimSpace(kv[KeyServerClientIPCustomHeader]),
+		TrustedProxies:                splitCSV(fallbackStr(kv[KeyServerTrustedProxies], strings.Join(clientip.DefaultTrustedProxies, ","))),
 		SiteName:                      fallbackStr(kv[KeySiteName], "OpenIAM"),
 		SiteSubtitle:                  strings.TrimSpace(kv[KeySiteSubtitle]),
 		SiteLogoURL:                   fallbackStr(kv[KeySiteLogoURL], "/logo.png"),
@@ -788,6 +822,12 @@ func validateSettingValue(key, valueType, raw string) (string, error) {
 		if key == KeyServerCORSAllowOrigins {
 			for _, p := range parts {
 				if err := validateCORSOrigin(p); err != nil {
+					return "", err
+				}
+			}
+		} else if key == KeyServerTrustedProxies {
+			for _, p := range parts {
+				if err := clientip.ValidateTrustedProxyEntry(p); err != nil {
 					return "", err
 				}
 			}

@@ -215,7 +215,7 @@ export const UserPortalPage: React.FC = () => {
                 </Typography>
               </Stack>
               <Typography variant="body2" color="text.secondary" mb={2.5}>
-                创建并管理属于您自己的 OAuth2 / OIDC 应用，轮换应用密钥或生成一次性授权码供应用调试接入。
+                创建并管理属于您自己的 OAuth2 / OIDC 应用，轮换应用密钥或生成一次性授权码用于应用授权接入。
               </Typography>
               <Button variant="contained" size="small" endIcon={<ArrowIcon />} onClick={() => navigate('/oauth-apps')}>
                 管理我的应用

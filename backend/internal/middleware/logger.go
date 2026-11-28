@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/openrealm/openiam/internal/clientip"
 	"go.uber.org/zap"
 )
 
@@ -23,7 +24,7 @@ func ZapLogger(logger *zap.Logger) gin.HandlerFunc {
 				zap.String("method", c.Request.Method),
 				zap.String("path", path),
 				zap.Bool("has_query", query != ""),
-				zap.String("ip", c.ClientIP()),
+				zap.String("ip", clientip.FromGin(c)),
 				zap.Duration("latency", latency),
 			)
 		}

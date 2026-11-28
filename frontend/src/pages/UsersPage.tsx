@@ -360,7 +360,7 @@ export const UsersPage: React.FC = () => {
         <DialogTitle>重置密码 — {pwdUser?.username}</DialogTitle>
         <DialogContent>
           <TextField
-            label="新密码（至少 6 位）"
+            label="新密码（8 ~ 72 位）"
             type="password"
             size="small"
             fullWidth

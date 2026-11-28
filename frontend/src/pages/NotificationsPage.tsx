@@ -44,6 +44,19 @@ const CATEGORY_LABELS: Record<string, string> = {
   system_notice: '系统通知',
 };
 
+const DELIVERY_STATUS_LABELS: Record<string, { label: string; color: 'success' | 'error' | 'warning' | 'default' }> = {
+  sent: { label: '已发送', color: 'success' },
+  bounced: { label: '已退信', color: 'error' },
+  degraded: { label: '已降级发送', color: 'warning' },
+  failed: { label: '发送失败', color: 'error' },
+};
+
+const CHANNEL_LABELS: Record<string, string> = {
+  email: '邮件',
+  sms: '短信',
+  in_app: '站内信',
+};
+
 export const NotificationsPage: React.FC = () => {
   const { adminTier, refreshUnreadCount } = useAuth();
   const isPlatformAdmin = adminTier === 'platform_admin';
@@ -73,6 +86,10 @@ export const NotificationsPage: React.FC = () => {
     enabled: true,
   });
   const [previewResult, setPreviewResult] = useState<{ subject: string; body: string } | null>(null);
+
+  // 退信标记弹窗
+  const [bounceTarget, setBounceTarget] = useState<NotificationDelivery | null>(null);
+  const [bounceReason, setBounceReason] = useState('收件地址不存在或拒收');
 
   const loadInbox = useCallback(async () => {
     try {
@@ -187,11 +204,16 @@ export const NotificationsPage: React.FC = () => {
     setPreviewResult(res);
   };
 
-  const handleMarkBounced = async (row: NotificationDelivery) => {
-    const reason = window.prompt('请输入退信原因（如 550 User unknown）：', '收件地址不存在或拒收');
-    if (reason === null) return;
+  const handleOpenBounce = (row: NotificationDelivery) => {
+    setBounceTarget(row);
+    setBounceReason('收件地址不存在或拒收');
+  };
+
+  const handleConfirmBounced = async () => {
+    if (!bounceTarget || !bounceReason.trim()) return;
     try {
-      await api.notifications.markBounced(row.id, reason);
+      await api.notifications.markBounced(bounceTarget.id, bounceReason.trim());
+      setBounceTarget(null);
       setSuccess('已标记退信并触发管理员通知');
       await Promise.all([loadDeliveries(), loadInbox(), refreshUnreadCount()]);
     } catch (err) {
@@ -200,20 +222,25 @@ export const NotificationsPage: React.FC = () => {
   };
 
   const deliveryColumns: GridColDef<NotificationDelivery>[] = [
-    { field: 'channel', headerName: '通道', width: 90 },
+    {
+      field: 'channel',
+      headerName: '通道',
+      width: 90,
+      valueFormatter: (v) => CHANNEL_LABELS[v as string] || String(v || '-'),
+    },
     { field: 'template_code', headerName: '模板', width: 130 },
     { field: 'recipient', headerName: '接收方', width: 200 },
     {
       field: 'status',
       headerName: '状态',
-      width: 110,
+      width: 115,
       renderCell: (p) => {
         const val = p.value as string;
-        const color = val === 'sent' ? 'success' : val === 'bounced' ? 'error' : val === 'degraded' ? 'warning' : 'default';
-        return <Chip size="small" color={color} label={val} />;
+        const meta = DELIVERY_STATUS_LABELS[val] || { label: val, color: 'default' as const };
+        return <Chip size="small" color={meta.color} label={meta.label} />;
       },
     },
-    { field: 'provider_name', headerName: '驱动节点', width: 130 },
+    { field: 'provider_name', headerName: '发送通道', width: 130 },
     { field: 'cost_cents', headerName: '费用(分)', width: 90 },
     { field: 'bounce_reason', headerName: '错误/退信原因', flex: 1, minWidth: 180, valueGetter: (_, r) => r.bounce_reason || r.error_message || '-' },
     {
@@ -229,10 +256,21 @@ export const NotificationsPage: React.FC = () => {
       width: 70,
       getActions: (p) =>
         p.row.status !== 'bounced'
-          ? [<GridActionsCellItem key="bounce" icon={<BounceIcon color="warning" />} label="标记退信" onClick={() => handleMarkBounced(p.row)} />]
+          ? [<GridActionsCellItem key="bounce" icon={<BounceIcon color="warning" />} label="标记退信" onClick={() => handleOpenBounce(p.row)} />]
           : [],
     },
   ];
+
+  const pageTitle = isPlatformAdmin
+    ? '通知中心与模板管理'
+    : adminTier === 'domain_admin' || adminTier === 'auditor'
+      ? '消息通知中心'
+      : '消息中心';
+  const pageSubtitle = isPlatformAdmin
+    ? '管理全员系统公告、多通道消息模板及发送记录与退信处理'
+    : adminTier === 'domain_admin' || adminTier === 'auditor'
+      ? '查看账号安全提醒、系统公告与管理通知'
+      : '查看您的账号安全提醒、个人消息与平台公告';
 
   return (
     <Box>
@@ -240,10 +278,10 @@ export const NotificationsPage: React.FC = () => {
         <Box>
           <Stack direction="row" spacing={1} alignItems="center">
             <NotifIcon color="primary" />
-            <Typography variant="h5">通知中心与模板管理</Typography>
+            <Typography variant="h5">{pageTitle}</Typography>
           </Stack>
           <Typography variant="body2" color="text.secondary" mt={0.4}>
-            统一管理个人系统消息、平台系统公告与运维系统通知，支持多通道消息模板与退信追踪
+            {pageSubtitle}
           </Typography>
         </Box>
         {isPlatformAdmin && (
@@ -264,11 +302,13 @@ export const NotificationsPage: React.FC = () => {
       {success && <Alert severity="success" sx={{ mb: 2 }} onClose={() => setSuccess('')}>{success}</Alert>}
 
       <Card>
-        <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ px: 2, borderBottom: 1, borderColor: 'divider' }}>
-          <Tab value="inbox" label="站内消息与公告" />
-          {isPlatformAdmin && <Tab value="templates" label="消息模板管理" />}
-          {isPlatformAdmin && <Tab value="deliveries" label="发送记录与退信处理" />}
-        </Tabs>
+        {isPlatformAdmin && (
+          <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ px: 2, borderBottom: 1, borderColor: 'divider' }}>
+            <Tab value="inbox" label="站内消息与公告" />
+            <Tab value="templates" label="消息模板管理" />
+            <Tab value="deliveries" label="发送记录与退信处理" />
+          </Tabs>
+        )}
 
         <CardContent sx={{ p: { xs: 2, sm: 3 } }}>
           {tab === 'inbox' && (
@@ -340,7 +380,7 @@ export const NotificationsPage: React.FC = () => {
                         <Stack direction="row" spacing={1} alignItems="center">
                           <Typography variant="subtitle2" fontWeight={700}>{tpl.name}</Typography>
                           <Chip size="small" label={tpl.code} sx={{ fontFamily: 'monospace' }} />
-                          <Chip size="small" color="info" variant="outlined" label={tpl.channel} />
+                          <Chip size="small" color="info" variant="outlined" label={CHANNEL_LABELS[tpl.channel] || tpl.channel} />
                           <Chip size="small" color={tpl.enabled ? 'success' : 'default'} label={tpl.enabled ? '启用' : '停用'} />
                         </Stack>
                         <Typography variant="caption" color="text.secondary" display="block" mt={0.5}>
@@ -398,9 +438,9 @@ export const NotificationsPage: React.FC = () => {
             <FormControl size="small" fullWidth>
               <InputLabel>通道</InputLabel>
               <Select label="通道" value={tplForm.channel} onChange={(e) => setTplForm({ ...tplForm, channel: e.target.value })}>
-                <MenuItem value="email">邮件 (email)</MenuItem>
-                <MenuItem value="sms">短信 (sms)</MenuItem>
-                <MenuItem value="in_app">站内信 (in_app)</MenuItem>
+                <MenuItem value="email">邮件</MenuItem>
+                <MenuItem value="sms">短信</MenuItem>
+                <MenuItem value="in_app">站内信</MenuItem>
               </Select>
             </FormControl>
             <TextField label="主题 / 标题" size="small" fullWidth value={tplForm.subject} onChange={(e) => setTplForm({ ...tplForm, subject: e.target.value })} />
@@ -423,6 +463,33 @@ export const NotificationsPage: React.FC = () => {
           <Box sx={{ flex: 1 }} />
           <Button onClick={() => setTplOpen(false)}>取消</Button>
           <Button variant="contained" onClick={handleSaveTemplate}>保存模板</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* 标记退信弹窗 */}
+      <Dialog open={Boolean(bounceTarget)} onClose={() => setBounceTarget(null)} maxWidth="xs" fullWidth>
+        <DialogTitle>标记投递退信</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} mt={1}>
+            <Typography variant="body2" color="text.secondary">
+              接收方：{bounceTarget?.recipient}
+            </Typography>
+            <TextField
+              autoFocus
+              fullWidth
+              size="small"
+              label="退信原因"
+              placeholder="例如：550 收件地址不存在或拒收"
+              value={bounceReason}
+              onChange={(e) => setBounceReason(e.target.value)}
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => setBounceTarget(null)}>取消</Button>
+          <Button color="warning" variant="contained" onClick={handleConfirmBounced} disabled={!bounceReason.trim()}>
+            确认标记退信
+          </Button>
         </DialogActions>
       </Dialog>
     </Box>

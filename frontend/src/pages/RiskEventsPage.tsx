@@ -8,6 +8,19 @@ import { AnimatedRefreshIcon } from '../components/PageTransition';
 import { useAuth } from '../context/AuthContext';
 import { RiskEvent } from '../types/api';
 
+const RISK_LEVEL_LABELS: Record<string, { label: string; color: 'error' | 'warning' | 'success' }> = {
+  high: { label: '高风险', color: 'error' },
+  medium: { label: '中风险', color: 'warning' },
+  low: { label: '低风险', color: 'success' },
+};
+
+const ACTION_LABELS: Record<string, string> = {
+  allow: '正常放行',
+  notify: '风险提醒',
+  challenge_mfa: '二次身份验证',
+  block: '已拦截',
+};
+
 export const RiskEventsPage: React.FC = () => {
   const { currentDomain } = useAuth();
   const [rows, setRows] = useState<RiskEvent[]>([]);
@@ -36,10 +49,11 @@ export const RiskEventsPage: React.FC = () => {
     {
       field: 'risk_level',
       headerName: '风险等级',
-      width: 120,
+      width: 135,
       renderCell: (p) => {
         const lvl = p.value as string;
-        return <Chip size="small" color={lvl === 'high' ? 'error' : lvl === 'medium' ? 'warning' : 'success'} label={`${lvl.toUpperCase()} (${p.row.risk_score}分)`} />;
+        const meta = RISK_LEVEL_LABELS[lvl] || { label: lvl, color: 'success' as const };
+        return <Chip size="small" color={meta.color} label={`${meta.label} (${p.row.risk_score}分)`} />;
       },
     },
     { field: 'ip_address', headerName: '来源 IP', width: 140 },
@@ -51,7 +65,12 @@ export const RiskEventsPage: React.FC = () => {
       minWidth: 240,
       valueGetter: (_, r) => (r.reasons || []).join('；'),
     },
-    { field: 'action_taken', headerName: '处置策略', width: 130 },
+    {
+      field: 'action_taken',
+      headerName: '处置策略',
+      width: 135,
+      valueFormatter: (v) => ACTION_LABELS[v as string] || String(v || '-'),
+    },
     {
       field: 'created_at',
       headerName: '发生时间',

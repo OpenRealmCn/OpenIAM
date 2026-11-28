@@ -276,6 +276,8 @@ export const api = {
       http.put('/system/settings', { settings }).then((r) => r.data.data),
     testSMTP: (to: string) =>
       http.post('/system/settings/test-smtp', { to }).then((r) => r.data.data),
+    previewClientIP: (payload?: { custom_header?: string; trusted_proxies?: string }) =>
+      http.post('/system/settings/client-ip-preview', payload || {}).then((r) => r.data.data),
     otpStats: () => http.get('/system/otp/stats').then((r) => r.data.data),
   },
   captcha: {

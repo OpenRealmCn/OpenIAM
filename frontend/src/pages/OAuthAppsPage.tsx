@@ -241,8 +241,7 @@ export const OAuthAppsPage: React.FC = () => {
       <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} spacing={1.5} mb={2.5}>
         <Box>
           <Stack direction="row" spacing={1} alignItems="center">
-            <Typography variant="h5">应用管理</Typography>
-            {selfServiceMode && <Chip size="small" label="我的应用" color="primary" variant="outlined" />}
+            <Typography variant="h5">{selfServiceMode ? '我的应用' : '应用管理'}</Typography>
           </Stack>
           <Typography variant="body2" color="text.secondary">
             创建 OAuth 2.0 / OIDC 应用，并支持为用户生成一次性授权码（Code）

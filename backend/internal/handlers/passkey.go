@@ -16,6 +16,7 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
 	"github.com/openrealm/openiam/internal/audit"
+	"github.com/openrealm/openiam/internal/clientip"
 	"github.com/openrealm/openiam/internal/models"
 	"github.com/openrealm/openiam/internal/rbac"
 	"github.com/openrealm/openiam/internal/security"
@@ -438,7 +439,7 @@ func (h *PasskeyHandler) FinishPasskeyLogin(c *gin.Context) {
 	}
 	_ = h.db.Model(&matchedUser.user).Updates(map[string]interface{}{
 		"last_login_at": &now,
-		"last_login_ip": c.ClientIP(),
+		"last_login_ip": clientip.FromGin(c),
 	}).Error
 
 	accessToken, refreshToken, _, expiresIn, err := createSessionAndTokens(c, h.db, h.jwtMgr, h.stateStore, h.settingsSvc, matchedUser.user)

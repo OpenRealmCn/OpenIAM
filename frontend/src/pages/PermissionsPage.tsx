@@ -148,8 +148,8 @@ export const PermissionsPage: React.FC = () => {
   const permColumns: GridColDef<Permission>[] = [
     { field: 'code', headerName: '权限编码', width: 160 },
     { field: 'name', headerName: '权限名称', width: 150 },
-    { field: 'resource', headerName: '资源 (obj)', width: 130 },
-    { field: 'action', headerName: '动作 (act)', width: 95 },
+    { field: 'resource', headerName: '资源', width: 130 },
+    { field: 'action', headerName: '动作', width: 95 },
     {
       field: 'actions',
       type: 'actions',
@@ -163,10 +163,10 @@ export const PermissionsPage: React.FC = () => {
 
   const policyRows = policies.map((p, idx) => ({ id: `${p.role}-${p.domain}-${p.resource}-${p.action}-${idx}`, ...p }));
   const policyColumns: GridColDef<PolicyRule & { id: string }>[] = [
-    { field: 'role', headerName: '角色 (sub)', width: 135 },
-    { field: 'domain', headerName: '域 (dom)', width: 105 },
-    { field: 'resource', headerName: '资源 (obj)', width: 145 },
-    { field: 'action', headerName: '动作 (act)', width: 95 },
+    { field: 'role', headerName: '角色', width: 135 },
+    { field: 'domain', headerName: '业务域', width: 105 },
+    { field: 'resource', headerName: '资源', width: 145 },
+    { field: 'action', headerName: '动作', width: 95 },
     {
       field: 'actions',
       type: 'actions',

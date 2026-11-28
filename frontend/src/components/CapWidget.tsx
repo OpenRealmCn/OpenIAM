@@ -182,7 +182,7 @@ export const CapWidget: React.FC<CapWidgetProps> = ({ scene, onToken, resetSigna
               {status === 'error' && '验证失败，点击重试'}
             </Typography>
             <Typography variant="caption" color="text.secondary">
-              {cfg?.mode === 'remote' ? 'Cap 远端验证节点' : 'Cap 本地工作量证明'}
+              安全人机验证保护中
             </Typography>
           </Box>
         </Stack>

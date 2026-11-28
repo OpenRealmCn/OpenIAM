@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/openrealm/openiam/internal/audit"
+	"github.com/openrealm/openiam/internal/clientip"
 	"github.com/openrealm/openiam/internal/models"
 	"github.com/openrealm/openiam/internal/rbac"
 	"github.com/openrealm/openiam/internal/risk"
@@ -57,7 +58,7 @@ func createSessionAndTokens(
 	ua := truncateStr(c.GetHeader("User-Agent"), 512)
 	fp := headerFingerprint(c)
 	geo := headerGeo(c, settingsSvc)
-	ip := c.ClientIP()
+	ip := clientip.FromGin(c)
 
 	_ = db.Create(&models.UserSession{
 		SessionID:         sessionID,

@@ -347,3 +347,29 @@ export interface SimulationResult {
   matched_policies_before: PolicyRule[];
   matched_policies_after: PolicyRule[];
 }
+
+export interface ClientIPMethodPreview {
+  method: 'remote_addr' | 'x_forwarded_for' | 'x_real_ip' | 'cf_connecting_ip' | 'true_client_ip' | 'custom_header';
+  label: string;
+  description: string;
+  source: string;
+  raw_header: string;
+  resolved_ip: string;
+  is_public: boolean;
+  from_header: boolean;
+  status: 'matched' | 'direct' | 'fallback_no_header' | 'fallback_untrusted' | 'fallback_invalid' | 'not_configured';
+  note: string;
+  is_active: boolean;
+}
+
+export interface ClientIPPreviewResult {
+  active_method: string;
+  active_ip: string;
+  active_is_public: boolean;
+  remote_addr: string;
+  remote_is_public: boolean;
+  trusted_proxy_matched: boolean;
+  trusted_proxies: string[];
+  custom_header: string;
+  options: ClientIPMethodPreview[];
+}

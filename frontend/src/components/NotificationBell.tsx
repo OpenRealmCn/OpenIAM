@@ -162,7 +162,7 @@ export const NotificationBell: React.FC = () => {
               navigate('/notifications');
             }}
           >
-            打开通知管理中心
+            {isAdmin ? '进入通知中心' : '查看全部消息'}
           </Button>
         </Box>
       </Popover>

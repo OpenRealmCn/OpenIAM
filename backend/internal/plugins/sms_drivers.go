@@ -31,11 +31,11 @@ func (d *ConsoleSMSDriver) Metadata() DriverMetadata {
 	return DriverMetadata{
 		Slot:        SlotSMS,
 		Type:        d.Type(),
-		DisplayName: "内置控制台短信通道",
-		Description: "将短信验证码输出至服务端运行日志，适用于本地联调与离线演练环境。",
+		DisplayName: "服务端日志短信通道（调试用）",
+		Description: "仅将短信验证码写入服务端运行日志而不实际下发短信，适用于未接入短信网关时的内部测试或降级演练。",
 		Fields: []ConfigField{
 			{Key: "sign_name", Label: "短信签名", Type: "text", Default: "OpenIAM", Description: "日志中展示的短信签名标识。"},
-			{Key: "simulate_failure", Label: "模拟故障（触发降级演练）", Type: "bool", Default: "false", Description: "开启后发送将主动报错，用于测试短信降级至邮箱与告警逻辑。"},
+			{Key: "simulate_failure", Label: "模拟发送故障（用于验证通道降级）", Type: "bool", Default: "false", Description: "开启后发送将主动报错，用于测试短信降级至邮箱与告警逻辑。"},
 		},
 	}
 }

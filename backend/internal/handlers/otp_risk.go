@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/openrealm/openiam/internal/clientip"
 	"github.com/openrealm/openiam/internal/models"
 	"github.com/openrealm/openiam/internal/otp"
 	"github.com/openrealm/openiam/internal/rbac"
@@ -67,7 +68,7 @@ func (h *OTPHandler) Send(c *gin.Context) {
 		Channel:      req.Channel,
 		Target:       target,
 		User:         userPtr,
-		ClientIP:     c.ClientIP(),
+		ClientIP:     clientip.FromGin(c),
 		CaptchaToken: req.CaptchaToken,
 	})
 	if err != nil {

@@ -27,7 +27,7 @@ export const CapabilityGuard: React.FC<CapabilityGuardProps> = ({ cap, tiers, ch
           当前身份未开放此功能区域
         </Typography>
         <Alert severity="info" sx={{ textAlign: 'left', mb: 2.5 }}>
-          您当前处于「{adminTier === 'domain_admin' ? '域管理员围栏' : adminTier === 'auditor' ? '安全审计员只读围栏' : '普通用户工作台'}」，该页面仅对具备对应权限的管理级身份开放。
+          您当前身份为「{adminTier === 'domain_admin' ? '域管理员' : adminTier === 'auditor' ? '安全审计员' : '普通用户'}」，暂未获得该页面的访问权限。
         </Alert>
         <Button variant="contained" onClick={() => navigate('/')}>
           返回工作台首页

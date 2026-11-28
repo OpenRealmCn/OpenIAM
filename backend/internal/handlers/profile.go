@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/openrealm/openiam/internal/audit"
+	"github.com/openrealm/openiam/internal/clientip"
 	"github.com/openrealm/openiam/internal/mailer"
 	"github.com/openrealm/openiam/internal/models"
 	"github.com/openrealm/openiam/internal/rbac"
@@ -257,7 +258,7 @@ func (h *AuthHandler) RequestPasswordReset(mailSvc *mailer.Service) gin.HandlerF
 
 		email := strings.ToLower(strings.TrimSpace(req.Email))
 		// 按邮箱与来源 IP 限频（对存在与不存在的邮箱一视同仁），防止被用来轰炸邮箱或枚举账号
-		if rlErr := h.stateStore.CheckAndIncrOTPRate(c.Request.Context(), "pwd_reset:"+email, c.ClientIP(), 60, 5, 20); rlErr != nil {
+		if rlErr := h.stateStore.CheckAndIncrOTPRate(c.Request.Context(), "pwd_reset:"+email, clientip.FromGin(c), 60, 5, 20); rlErr != nil {
 			OK(c, gin.H{"sent": true, "message": "如果该邮箱已注册，我们已向其发送了重置密码验证码"})
 			return
 		}

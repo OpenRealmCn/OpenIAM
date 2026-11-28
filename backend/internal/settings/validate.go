@@ -6,6 +6,8 @@ import (
 	"net/mail"
 	"net/url"
 	"strings"
+
+	"github.com/openrealm/openiam/internal/clientip"
 )
 
 // intBounds 为各整数型设置项的合法取值范围 [min, max]，防止配置成极端值导致安全策略失效或资源耗尽。
@@ -53,8 +55,10 @@ var optionalEmptyKeys = map[string]bool{
 	KeySMTPUsername:            true,
 	KeySMTPPassword:            true,
 	KeySMTPFromName:            true,
-	KeySMTPFromEmail:           true,
-	KeyRiskBlockedIPs:          true,
+	KeySMTPFromEmail:              true,
+	KeyRiskBlockedIPs:             true,
+	KeyServerClientIPCustomHeader: true,
+	KeyServerTrustedProxies:       true,
 }
 
 // secretKeys 为敏感凭据字段，返回前端与写入审计日志时自动脱敏。
@@ -127,6 +131,12 @@ func validateEnumOrSpecialSetting(key, raw string) error {
 		default:
 			return fmt.Errorf("高风险处置策略必须为 challenge_mfa、notify 或 block")
 		}
+	case KeyServerClientIPMethod:
+		if !clientip.IsValidMethod(raw) {
+			return fmt.Errorf("不支持的客户端 IP 获取方式: %s", raw)
+		}
+	case KeyServerClientIPCustomHeader:
+		return clientip.ValidateCustomHeader(raw)
 	}
 	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 
 	"github.com/gin-gonic/gin"
+	"github.com/openrealm/openiam/internal/clientip"
 	"github.com/openrealm/openiam/internal/models"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
@@ -39,7 +40,7 @@ func NewService(db *gorm.DB, logger *zap.Logger) *Service {
 func (s *Service) RecordFromContext(c *gin.Context, entry Entry) {
 	if c != nil {
 		if entry.IPAddress == "" {
-			entry.IPAddress = c.ClientIP()
+			entry.IPAddress = clientip.FromGin(c)
 		}
 		if entry.UserAgent == "" {
 			entry.UserAgent = c.Request.UserAgent()

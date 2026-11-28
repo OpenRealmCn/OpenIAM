@@ -32,8 +32,8 @@ func (d *CapCaptchaDriver) Metadata() DriverMetadata {
 	return DriverMetadata{
 		Slot:        SlotCaptcha,
 		Type:        d.Type(),
-		DisplayName: "Cap 人机验证（trycap.dev）",
-		Description: "基于工作量证明（PoW）的轻量级无追踪人机验证，支持本地自运行模式与远端 Cap 服务模式。",
+		DisplayName: "Cap 人机验证",
+		Description: "基于轻量级计算挑战的无追踪人机验证，支持内置本地验证与对接独立 Cap 服务。",
 		Fields: []ConfigField{
 			{
 				Key:      "mode",
@@ -42,10 +42,10 @@ func (d *CapCaptchaDriver) Metadata() DriverMetadata {
 				Required: true,
 				Default:  "local",
 				Options: []ConfigFieldOption{
-					{Value: "local", Label: "本地自运行（无需外部服务）"},
-					{Value: "remote", Label: "远端 Cap 部署模式（siteverify）"},
+					{Value: "local", Label: "本地模式（内置校验，无需外部服务）"},
+					{Value: "remote", Label: "远端模式（对接独立部署的 Cap 服务）"},
 				},
-				Description: "本地模式由 OpenIAM 后端直接签发并验证 PoW 挑战；远端模式对接独立的 Cap 服务器。",
+				Description: "本地模式由平台内置签发并核销验证挑战；远端模式对接独立的 Cap 验证服务。",
 			},
 			{
 				Key:         "challenge_count",
@@ -102,7 +102,7 @@ func (d *CapCaptchaDriver) ValidateConfig(cfg models.JSONMap) error {
 		return fmt.Errorf("远端 Cap API 地址无效: %w", err)
 	}
 	if cfgStr(cfg, "remote_secret", "") == "" {
-		return errors.New("远端模式必须配置 remote_secret")
+		return errors.New("远端模式必须填写校验密钥")
 	}
 	return nil
 }

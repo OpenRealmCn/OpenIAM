@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
+  alpha,
   Box,
   Button,
   Card,
@@ -11,6 +12,7 @@ import {
   FormControl,
   FormControlLabel,
   MenuItem,
+  Radio,
   Select,
   Stack,
   Switch,
@@ -18,8 +20,10 @@ import {
   Tabs,
   TextField,
   Typography,
+  useTheme,
 } from '@mui/material';
 import {
+  Language as NetworkIcon,
   MarkEmailRead as MailTestIcon,
   Save as SaveIcon,
   Tune as TuneIcon,
@@ -28,20 +32,20 @@ import dayjs from 'dayjs';
 import { api } from '../api/client';
 import { AnimatedRefreshIcon } from '../components/PageTransition';
 import { useSite } from '../context/SiteContext';
-import { SystemSetting } from '../types/api';
+import { ClientIPMethodPreview, ClientIPPreviewResult, SystemSetting } from '../types/api';
 
 const categoryMeta: Record<string, { label: string; desc: string }> = {
   site: { label: '站点与公告', desc: '配置站点名称、全局图标、浏览器标签图标、页脚版权与全站首页公告' },
   smtp: { label: '邮件服务', desc: '配置 SMTP 发件服务器，用于发送测试邮件、邮箱验证码与找回密码' },
   otp: { label: '验证码与防刷', desc: '配置短信与邮件验证码的频控阈值、单条成本折算、日预算告警及异常降级策略' },
   risk: { label: '风险自适应认证', desc: '配置 IP 信誉、异地、设备变化等维度的风险阈值与处置动作' },
-  captcha: { label: '人机验证策略', desc: '配置登录、注册、发送验证码场景是否启用人机验证（在插件中心管理 Cap 模式）' },
+  captcha: { label: '人机验证策略', desc: '配置登录、注册、发送验证码场景是否启用人机验证（在插件中心配置验证服务）' },
   security: { label: '登录与安全', desc: '管理账号锁定阈值、锁定时长及用户公开注册开关' },
   jwt: { label: '令牌设置', desc: '配置访问令牌与刷新令牌的签发方及有效期' },
   ratelimit: { label: '请求限流', desc: '配置按来源 IP 的接口频率保护规则' },
   oauth_server: { label: 'OAuth / OIDC 服务', desc: '配置对外授权服务的标识、确认页与令牌有效期' },
   oauth_plugin: { label: '第三方登录回调', desc: '配置外部登录方式的默认回调地址前缀' },
-  server: { label: '跨域设置', desc: '配置允许访问平台接口的前端来源域名' },
+  server: { label: '网络与真实 IP', desc: '配置客户端真实 IP 获取方式、可信反向代理网段及跨域来源白名单' },
 };
 
 const categoryOrder = ['site', 'smtp', 'otp', 'risk', 'captcha', 'security', 'jwt', 'ratelimit', 'oauth_server', 'oauth_plugin', 'server'];
@@ -63,9 +67,30 @@ const SELECT_OPTIONS: Record<string, { value: string; label: string }[]> = {
     { value: 'notify', label: '仅写入风险日志并发送安全提醒' },
     { value: 'block', label: '直接阻断该次登录请求' },
   ],
+  'server.client_ip_method': [
+    { value: 'remote_addr', label: '直连来源 IP（TCP RemoteAddr）' },
+    { value: 'x_forwarded_for', label: '反向代理链（X-Forwarded-For，默认）' },
+    { value: 'x_real_ip', label: '单层反代头（X-Real-IP）' },
+    { value: 'cf_connecting_ip', label: 'Cloudflare CDN（CF-Connecting-IP）' },
+    { value: 'true_client_ip', label: '通用 CDN / WAF（True-Client-IP）' },
+    { value: 'custom_header', label: '自定义请求头（Custom Header）' },
+  ],
+};
+
+const IP_PREVIEW_STATUS_META: Record<
+  ClientIPMethodPreview['status'],
+  { label: string; color: 'success' | 'info' | 'warning' | 'error' | 'default' }
+> = {
+  matched: { label: '已命中请求头', color: 'success' },
+  direct: { label: '直连获取', color: 'info' },
+  fallback_no_header: { label: '未携带该请求头（已回退直连）', color: 'default' },
+  fallback_untrusted: { label: '直连来源不在可信代理中（已拒绝采信）', color: 'warning' },
+  fallback_invalid: { label: '请求头 IP 格式无效（已回退直连）', color: 'error' },
+  not_configured: { label: '请先填写自定义请求头名称', color: 'default' },
 };
 
 export const SystemSettingsPage: React.FC = () => {
+  const theme = useTheme();
   const { refreshSiteInfo } = useSite();
   const [items, setItems] = useState<SystemSetting[]>([]);
   const [draft, setDraft] = useState<Record<string, string>>({});
@@ -79,6 +104,31 @@ export const SystemSettingsPage: React.FC = () => {
   // SMTP 测试邮件状态
   const [testEmailTo, setTestEmailTo] = useState<string>('');
   const [sendingTest, setSendingTest] = useState<boolean>(false);
+
+  // 真实 IP 获取方式实时预览状态
+  const [ipPreview, setIpPreview] = useState<ClientIPPreviewResult | null>(null);
+  const [ipPreviewLoading, setIpPreviewLoading] = useState<boolean>(false);
+  const [ipPreviewError, setIpPreviewError] = useState<string>('');
+
+  const loadClientIPPreview = useCallback(
+    async (overrideDraft?: Record<string, string>) => {
+      setIpPreviewLoading(true);
+      setIpPreviewError('');
+      const src = overrideDraft || draft;
+      try {
+        const res = await api.system.previewClientIP({
+          custom_header: src['server.client_ip_custom_header'] ?? '',
+          trusted_proxies: src['server.trusted_proxies'] ?? '',
+        });
+        setIpPreview(res);
+      } catch (err) {
+        setIpPreviewError((err as Error).message);
+      } finally {
+        setIpPreviewLoading(false);
+      }
+    },
+    [draft],
+  );
 
   const loadSettings = async () => {
     setLoading(true);
@@ -101,6 +151,14 @@ export const SystemSettingsPage: React.FC = () => {
   useEffect(() => {
     loadSettings();
   }, []);
+
+  useEffect(() => {
+    if (activeTab === 'server' && !loading) {
+      void loadClientIPPreview();
+    }
+    // 仅在切换到网络与真实 IP 标签页或刚加载完成时自动拉取一次实时预览，避免编辑输入框时频繁请求
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, loading]);
 
   const categories = useMemo(() => {
     const present = new Set(items.map((i) => i.category));
@@ -153,6 +211,9 @@ export const SystemSettingsPage: React.FC = () => {
       }
       setDraft(nextDraft);
       await refreshSiteInfo();
+      if (activeTab === 'server') {
+        void loadClientIPPreview(nextDraft);
+      }
       setSuccess(`已保存 ${Object.keys(changed).length} 项系统设置并立即生效`);
     } catch (err) {
       setError((err as Error).message);
@@ -372,6 +433,186 @@ export const SystemSettingsPage: React.FC = () => {
                 );
               })}
             </Stack>
+
+            {/* 真实客户端 IP 获取方式选择与实时预览卡片 */}
+            {activeTab === 'server' && (
+              <Box
+                sx={{
+                  mt: 3.5,
+                  p: 2.5,
+                  borderRadius: 2,
+                  border: 1,
+                  borderColor: 'divider',
+                  bgcolor: 'background.default',
+                }}
+              >
+                <Stack
+                  direction={{ xs: 'column', sm: 'row' }}
+                  justifyContent="space-between"
+                  alignItems={{ sm: 'center' }}
+                  spacing={1.5}
+                  mb={2}
+                >
+                  <Box>
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <NetworkIcon color="primary" fontSize="small" />
+                      <Typography variant="subtitle2" fontWeight={700}>
+                        真实 IP 获取方式选择与实时预览
+                      </Typography>
+                    </Stack>
+                    <Typography variant="body2" color="text.secondary" mt={0.4}>
+                      以下是基于您当前浏览器发起的这次真实请求，各获取方式实时解析出的客户端 IP；请对照您的实际出口 IP 核对后再点击「保存更改」。
+                    </Typography>
+                  </Box>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<AnimatedRefreshIcon spinning={ipPreviewLoading} />}
+                    onClick={() => void loadClientIPPreview()}
+                    disabled={ipPreviewLoading}
+                    sx={{ flexShrink: 0 }}
+                  >
+                    {ipPreviewLoading ? '检测中...' : '重新检测预览'}
+                  </Button>
+                </Stack>
+
+                {ipPreviewError && (
+                  <Alert severity="error" sx={{ mb: 2 }} onClose={() => setIpPreviewError('')}>
+                    {ipPreviewError}
+                  </Alert>
+                )}
+
+                {ipPreview && (
+                  <>
+                    <Alert
+                      severity={ipPreview.active_is_public ? 'success' : 'info'}
+                      sx={{ mb: 2 }}
+                    >
+                      <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                        <Typography variant="body2">
+                          当前线上生效方式解析 IP：
+                          <Box component="span" sx={{ fontFamily: 'monospace', fontWeight: 700, mx: 0.5 }}>
+                            {ipPreview.active_ip || '未知'}
+                          </Box>
+                        </Typography>
+                        <Chip
+                          size="small"
+                          color={ipPreview.active_is_public ? 'success' : 'default'}
+                          label={ipPreview.active_is_public ? '公网 IP' : '内网 / 本地 IP'}
+                        />
+                        <Typography variant="caption" color="text.secondary">
+                          TCP 直连来源：{ipPreview.remote_addr || '未知'}（
+                          {ipPreview.trusted_proxy_matched ? '命中可信代理' : '未命中可信代理'}）
+                        </Typography>
+                      </Stack>
+                    </Alert>
+
+                    <Stack spacing={1.25}>
+                      {ipPreview.options.map((opt) => {
+                        const selectedMethod = draft['server.client_ip_method'] || ipPreview.active_method || 'x_forwarded_for';
+                        const isSelected = selectedMethod === opt.method;
+                        const statusMeta = IP_PREVIEW_STATUS_META[opt.status] || {
+                          label: opt.status,
+                          color: 'default' as const,
+                        };
+                        return (
+                          <Card
+                            key={opt.method}
+                            variant="outlined"
+                            onClick={() =>
+                              setDraft((prev) => ({
+                                ...prev,
+                                'server.client_ip_method': opt.method,
+                              }))
+                            }
+                            sx={{
+                              cursor: 'pointer',
+                              borderColor: isSelected ? 'primary.main' : 'divider',
+                              bgcolor: isSelected ? alpha(theme.palette.primary.main, 0.05) : 'background.paper',
+                              transition: 'border-color 0.15s ease, background-color 0.15s ease',
+                              '&:hover': {
+                                borderColor: isSelected ? 'primary.main' : alpha(theme.palette.primary.main, 0.45),
+                              },
+                            }}
+                          >
+                            <CardContent sx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
+                              <Stack
+                                direction={{ xs: 'column', md: 'row' }}
+                                justifyContent="space-between"
+                                alignItems={{ md: 'center' }}
+                                spacing={1.5}
+                              >
+                                <Stack direction="row" spacing={1} alignItems="flex-start" sx={{ flex: 1, minWidth: 0 }}>
+                                  <Radio
+                                    size="small"
+                                    checked={isSelected}
+                                    onChange={() =>
+                                      setDraft((prev) => ({
+                                        ...prev,
+                                        'server.client_ip_method': opt.method,
+                                      }))
+                                    }
+                                    sx={{ mt: -0.4 }}
+                                  />
+                                  <Box sx={{ minWidth: 0 }}>
+                                    <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
+                                      <Typography variant="subtitle2" fontWeight={700}>
+                                        {opt.label}
+                                      </Typography>
+                                      <Chip size="small" variant="outlined" label={`来源：${opt.source}`} />
+                                      {opt.is_active && <Chip size="small" color="primary" label="当前已保存生效" />}
+                                      {isSelected && !opt.is_active && (
+                                        <Chip size="small" color="warning" label="待保存选择" />
+                                      )}
+                                    </Stack>
+                                    <Typography variant="body2" color="text.secondary" mt={0.4}>
+                                      {opt.description}
+                                    </Typography>
+                                    <Typography variant="caption" color="text.secondary" display="block" mt={0.35}>
+                                      {opt.note}
+                                      {opt.raw_header && opt.method !== 'remote_addr'
+                                        ? `（原始请求头值：${opt.raw_header}）`
+                                        : ''}
+                                    </Typography>
+                                  </Box>
+                                </Stack>
+
+                                <Stack
+                                  direction="column"
+                                  alignItems={{ xs: 'flex-start', md: 'flex-end' }}
+                                  spacing={0.6}
+                                  sx={{ flexShrink: 0 }}
+                                >
+                                  <Stack direction="row" spacing={0.8} alignItems="center">
+                                    <Typography variant="caption" color="text.secondary">
+                                      预览 IP：
+                                    </Typography>
+                                    <Chip
+                                      size="small"
+                                      color={opt.is_public ? 'success' : 'default'}
+                                      variant={opt.from_header || opt.method === 'remote_addr' ? 'filled' : 'outlined'}
+                                      label={opt.resolved_ip || '无'}
+                                      sx={{ fontFamily: 'monospace', fontWeight: 700 }}
+                                    />
+                                    <Chip
+                                      size="small"
+                                      variant="outlined"
+                                      color={opt.is_public ? 'success' : 'default'}
+                                      label={opt.is_public ? '公网' : '内网/本地'}
+                                    />
+                                  </Stack>
+                                  <Chip size="small" color={statusMeta.color} variant="outlined" label={statusMeta.label} />
+                                </Stack>
+                              </Stack>
+                            </CardContent>
+                          </Card>
+                        );
+                      })}
+                    </Stack>
+                  </>
+                )}
+              </Box>
+            )}
 
             {/* SMTP 连通性测试面板 */}
             {activeTab === 'smtp' && (

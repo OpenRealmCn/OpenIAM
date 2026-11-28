@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/openrealm/openiam/internal/clientip"
 	"github.com/openrealm/openiam/internal/jit"
 	"github.com/openrealm/openiam/internal/models"
 	"github.com/openrealm/openiam/internal/notify"
@@ -373,4 +376,76 @@ func TestPermissionSimulatorJITNotificationsAndAdminTiers(t *testing.T) {
 	tplW := doJSON(t, env.engine, http.MethodGet, "/api/v1/notifications/templates", nil, adminToken)
 	require.Equal(t, http.StatusOK, tplW.Code)
 	assert.Contains(t, tplW.Body.String(), "otp_verify")
+}
+
+func TestClientIPSettingsPreviewAndHotReload(t *testing.T) {
+	defer clientip.SetPolicy(clientip.MethodXForwardedFor, "", clientip.DefaultTrustedProxies)
+	env := setupTestEnv(t, "")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
+
+	// 注册普通用户并验证禁止访问真实 IP 预览接口
+	doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "ipuser",
+		"email":    "ipuser@openrealm.local",
+		"password": "IpUser@12345",
+	}, "")
+	userToken, _ := loginAs(t, env.engine, "ipuser", "IpUser@12345")
+
+	denyW := doJSON(t, env.engine, http.MethodPost, "/api/v1/system/settings/client-ip-preview", map[string]string{}, userToken)
+	assert.Equal(t, http.StatusForbidden, denyW.Code)
+
+	// 超管携带可信代理头预览全部 6 种方式
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/system/settings/client-ip-preview", strings.NewReader(`{"custom_header":"EO-Client-IP"}`))
+	req.RemoteAddr = "127.0.0.1:45678"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req.Header.Set("X-Forwarded-For", "198.51.100.10")
+	req.Header.Set("X-Real-IP", "203.0.113.11")
+	req.Header.Set("CF-Connecting-IP", "203.0.113.55")
+	req.Header.Set("EO-Client-IP", "114.114.114.114")
+
+	w := httptest.NewRecorder()
+	env.engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var previewResp struct {
+		Data clientip.PreviewResult `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &previewResp))
+	assert.True(t, previewResp.Data.TrustedProxyMatched)
+	assert.Equal(t, "198.51.100.10", previewResp.Data.ActiveIP)
+	assert.Len(t, previewResp.Data.Options, 6)
+
+	byMethod := map[string]clientip.MethodPreview{}
+	for _, opt := range previewResp.Data.Options {
+		byMethod[opt.Method] = opt
+	}
+	assert.Equal(t, "127.0.0.1", byMethod[clientip.MethodRemoteAddr].ResolvedIP)
+	assert.Equal(t, "203.0.113.55", byMethod[clientip.MethodCFConnectingIP].ResolvedIP)
+	assert.Equal(t, "114.114.114.114", byMethod[clientip.MethodCustomHeader].ResolvedIP)
+	assert.True(t, byMethod[clientip.MethodCustomHeader].IsPublic)
+
+	// 热更新为 CF-Connecting-IP，并检查生效状态立即切换
+	updW := doJSON(t, env.engine, http.MethodPut, "/api/v1/system/settings", map[string]any{
+		"settings": map[string]string{
+			"server.client_ip_method": "cf_connecting_ip",
+		},
+	}, adminToken)
+	require.Equal(t, http.StatusOK, updW.Code, updW.Body.String())
+
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/system/settings/client-ip-preview", strings.NewReader(`{}`))
+	req2.RemoteAddr = "127.0.0.1:45679"
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Authorization", "Bearer "+adminToken)
+	req2.Header.Set("CF-Connecting-IP", "203.0.113.55")
+	w2 := httptest.NewRecorder()
+	env.engine.ServeHTTP(w2, req2)
+	require.Equal(t, http.StatusOK, w2.Code)
+
+	var previewResp2 struct {
+		Data clientip.PreviewResult `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w2.Body.Bytes(), &previewResp2))
+	assert.Equal(t, "cf_connecting_ip", previewResp2.Data.ActiveMethod)
+	assert.Equal(t, "203.0.113.55", previewResp2.Data.ActiveIP)
 }

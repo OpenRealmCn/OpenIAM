@@ -67,14 +67,20 @@ export const DomainsPage: React.FC = () => {
 
   const columns: GridColDef<Domain>[] = [
     { field: 'id', headerName: 'ID', width: 70 },
-    { field: 'code', headerName: '域标识 (Domain Code)', width: 190 },
+    { field: 'code', headerName: '域标识', width: 190 },
     { field: 'name', headerName: '域名称', width: 200 },
     { field: 'description', headerName: '描述', flex: 1, minWidth: 220 },
     {
       field: 'status',
       headerName: '状态',
       width: 110,
-      renderCell: (p) => <Chip size="small" color={p.value === 'active' ? 'success' : 'default'} label={p.value} />,
+      renderCell: (p) => (
+        <Chip
+          size="small"
+          color={p.value === 'active' ? 'success' : 'default'}
+          label={p.value === 'active' ? '正常' : '已停用'}
+        />
+      ),
     },
     {
       field: 'created_at',
@@ -126,7 +132,7 @@ export const DomainsPage: React.FC = () => {
       </Box>
 
       <Dialog open={open} onClose={() => setOpen(false)} maxWidth="xs" fullWidth>
-        <DialogTitle>新建 OpenRealm 域</DialogTitle>
+        <DialogTitle>新建业务域</DialogTitle>
         <DialogContent>
           <Stack spacing={2} mt={1}>
             <TextField

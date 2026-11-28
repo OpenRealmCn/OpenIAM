@@ -34,10 +34,16 @@ import { AnimatedRefreshIcon } from '../components/PageTransition';
 import { PluginDriverMeta, PluginInstance } from '../types/api';
 
 const SLOT_LABELS: Record<string, string> = {
-  captcha: '人机验证（Cap）',
+  captcha: '人机验证',
   sms: '短信通道',
   notification: '通知扩展',
   risk: '风控扩展',
+};
+
+const HEALTH_LABELS: Record<string, { label: string; color: 'success' | 'error' | 'default' }> = {
+  healthy: { label: '正常', color: 'success' },
+  unhealthy: { label: '异常', color: 'error' },
+  unknown: { label: '未检测', color: 'default' },
 };
 
 export const PluginsPage: React.FC = () => {
@@ -160,7 +166,8 @@ export const PluginsPage: React.FC = () => {
     setSuccess('');
     try {
       const res = await api.plugins.test(inst.id);
-      setSuccess(`插件「${inst.display_name}」连通性检查通过（${res.status}）`);
+      const statusText = HEALTH_LABELS[res.status]?.label || res.status;
+      setSuccess(`插件「${inst.display_name}」连通性检查通过（状态：${statusText}）`);
       await loadData();
     } catch (err) {
       setError((err as Error).message);
@@ -176,7 +183,7 @@ export const PluginsPage: React.FC = () => {
             <Typography variant="h5">统一插件中心</Typography>
           </Stack>
           <Typography variant="body2" color="text.secondary" mt={0.4}>
-            管理人机验证（trycap.dev 本地与远端模式）、短信网关、通知告警扩展与风控插件插槽
+            管理人机验证、短信网关、告警通知与风控扩展插件
           </Typography>
         </Box>
         <Stack direction="row" spacing={1.5}>
@@ -192,7 +199,7 @@ export const PluginsPage: React.FC = () => {
           </Button>
           {slotDrivers.length > 0 && (
             <Button variant="contained" startIcon={<AddIcon />} onClick={openCreate}>
-              新增插件实例
+              新增插件
             </Button>
           )}
         </Stack>
@@ -211,12 +218,12 @@ export const PluginsPage: React.FC = () => {
         <CardContent sx={{ p: { xs: 2, sm: 3 } }}>
           {slot === 'captcha' && (
             <Alert severity="info" sx={{ mb: 2.5 }}>
-              Cap（trycap.dev）人机验证支持<strong>本地自运行（Local PoW）</strong>与<strong>远端部署（Remote siteverify）</strong>两种模式；启用后请在「系统设置 → 人机验证策略」中选择要保护的场景（登录/注册/发送验证码）。
+              Cap 人机验证支持<strong>本地模式（内置计算校验，无需外部服务）</strong>与<strong>远端模式（对接独立部署的 Cap 验证服务）</strong>；启用后请在「系统设置 → 人机验证策略」中选择需要保护的业务场景。
             </Alert>
           )}
 
           {slotInstances.length === 0 ? (
-            <Alert severity="info">当前插槽下暂无已配置的插件实例，点击右上角「新增插件实例」即可接入。</Alert>
+            <Alert severity="info">当前分类下暂无已配置的插件，点击右上角「新增插件」即可接入。</Alert>
           ) : (
             <Stack spacing={2}>
               {slotInstances.map((inst) => (
@@ -227,19 +234,18 @@ export const PluginsPage: React.FC = () => {
                         <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
                           <Typography variant="subtitle1" fontWeight={700}>{inst.display_name}</Typography>
                           <Chip size="small" label={inst.name} sx={{ fontFamily: 'monospace' }} />
-                          <Chip size="small" variant="outlined" label={inst.plugin_type} />
                           {inst.slot === 'captcha' && Boolean(inst.config?.mode) && (
                             <Chip
                               size="small"
                               color="primary"
                               variant="outlined"
-                              label={inst.config.mode === 'remote' ? '远端部署模式' : '本地自运行模式'}
+                              label={inst.config.mode === 'remote' ? '远端服务模式' : '本地内置模式'}
                             />
                           )}
                           <Chip
                             size="small"
-                            color={inst.health_status === 'healthy' ? 'success' : inst.health_status === 'unhealthy' ? 'error' : 'default'}
-                            label={`健康状态：${inst.health_status}`}
+                            color={(HEALTH_LABELS[inst.health_status] || HEALTH_LABELS.unknown).color}
+                            label={`健康状态：${(HEALTH_LABELS[inst.health_status] || HEALTH_LABELS.unknown).label}`}
                           />
                         </Stack>
                         <Typography variant="caption" color="text.secondary" display="block" mt={0.5}>
@@ -297,7 +303,7 @@ export const PluginsPage: React.FC = () => {
                     ))}
                   </Select>
                 </FormControl>
-                <TextField label="唯一标识名（英文短横线）" size="small" fullWidth value={name} onChange={(e) => setName(e.target.value)} placeholder="如 cap-prod" />
+                <TextField label="插件标识（仅限英文、数字与短横线）" size="small" fullWidth value={name} onChange={(e) => setName(e.target.value)} placeholder="如 cap-prod" />
               </>
             )}
 

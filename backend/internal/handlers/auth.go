@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/openrealm/openiam/internal/audit"
+	"github.com/openrealm/openiam/internal/clientip"
 	"github.com/openrealm/openiam/internal/models"
 	"github.com/openrealm/openiam/internal/notify"
 	"github.com/openrealm/openiam/internal/oauthplugin"
@@ -153,7 +154,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	if !security.VerifyPassword(user.PasswordHash, req.Password) {
 		count, locked, _ := h.stateStore.RecordLoginFailure(ctx, user.Username, snap.MaxLoginFailures, time.Duration(snap.LockoutMinutes)*time.Minute)
-		_, _ = h.stateStore.RecordIPFailure(ctx, c.ClientIP(), time.Hour)
+		_, _ = h.stateStore.RecordIPFailure(ctx, clientip.FromGin(c), time.Hour)
 		h.auditSvc.RecordFromContext(c, audit.Entry{
 			ActorID:       user.ID,
 			ActorUsername: user.Username,
@@ -178,7 +179,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	now := time.Now()
 	_ = h.db.Model(&user).Updates(map[string]interface{}{
 		"last_login_at": &now,
-		"last_login_ip": c.ClientIP(),
+		"last_login_ip": clientip.FromGin(c),
 	}).Error
 
 	// 强制改密状态：只签发短期受限令牌，不下发 Refresh Token；
@@ -218,7 +219,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		riskEval = h.riskEngine.EvaluateLogin(
 			ctx,
 			user,
-			c.ClientIP(),
+			clientip.FromGin(c),
 			truncateStr(c.GetHeader("User-Agent"), 512),
 			headerFingerprint(c),
 			headerGeo(c, h.settingsSvc),
@@ -434,7 +435,7 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 		_ = h.db.Model(&models.UserSession{}).Where("session_id = ?", rec.SessionID).Updates(map[string]interface{}{
 			"refresh_token_hash": hashRefreshToken(newRefresh),
 			"last_active_at":     now,
-			"ip_address":         c.ClientIP(),
+			"ip_address":         clientip.FromGin(c),
 		}).Error
 	}
 
@@ -665,7 +666,7 @@ func (h *AuthHandler) OAuthCallback(c *gin.Context) {
 		req.Code,
 		req.State,
 		req.RedirectURI,
-		c.ClientIP(),
+		clientip.FromGin(c),
 		c.Request.UserAgent(),
 	)
 	if err != nil {
@@ -725,7 +726,7 @@ func (h *AuthHandler) SendMFACode(c *gin.Context) {
 		Scene:    "mfa",
 		Channel:  req.Channel,
 		User:     &user,
-		ClientIP: c.ClientIP(),
+		ClientIP: clientip.FromGin(c),
 	})
 	if err != nil {
 		Fail(c, http.StatusBadRequest, err.Error())
@@ -892,7 +893,7 @@ func (h *AuthHandler) OTPLogin(c *gin.Context) {
 	now := time.Now()
 	_ = h.db.Model(&user).Updates(map[string]interface{}{
 		"last_login_at": &now,
-		"last_login_ip": c.ClientIP(),
+		"last_login_ip": clientip.FromGin(c),
 	}).Error
 
 	accessToken, refreshToken, _, expiresIn, err := createSessionAndTokens(c, h.db, h.jwtMgr, h.stateStore, h.settingsSvc, user)

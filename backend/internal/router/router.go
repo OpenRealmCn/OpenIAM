@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/openrealm/openiam/internal/audit"
+	"github.com/openrealm/openiam/internal/clientip"
 	"github.com/openrealm/openiam/internal/config"
 	"github.com/openrealm/openiam/internal/handlers"
 	"github.com/openrealm/openiam/internal/jit"
@@ -78,6 +79,11 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 		deps.OAuthSrv.ApplySettings(s)
 		oauthplugin.SetAllowPrivateUpstream(s.AllowPrivateUpstream)
 		plugins.SetAllowPrivateUpstream(s.AllowPrivateUpstream)
+		trusted := s.TrustedProxies
+		if len(trusted) == 0 && deps.Config != nil {
+			trusted = deps.Config.Server.TrustedProxies
+		}
+		clientip.SetPolicy(s.ClientIPMethod, s.ClientIPCustomHeader, trusted)
 		if err := generalLimiter.Update(s.RateLimitEnabled, s.RateLimitGeneralRate); err != nil && deps.Logger != nil {
 			deps.Logger.Warn("failed to update general rate limiter", zap.Error(err))
 		}
@@ -261,6 +267,7 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 			// 读取接口走 Casbin 的 settings:read，同样被 rbac 的平台级闸门限制为仅超管生效。
 			protected.PUT("/system/settings", middleware.RequireSuperAdmin(deps.Enforcer), settingsH.Update)
 			protected.POST("/system/settings/test-smtp", middleware.RequireSuperAdmin(deps.Enforcer), settingsH.TestSMTP)
+			protected.POST("/system/settings/client-ip-preview", middleware.RequireSuperAdmin(deps.Enforcer), settingsH.PreviewClientIP)
 
 			// 域管理（domains 是平台级资源，rbac 闸门保证非超管即使被授予 domains:* 也不生效）
 			protected.GET("/domains", domainH.List)

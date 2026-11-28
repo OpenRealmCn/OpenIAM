@@ -74,7 +74,7 @@ interface NavItem {
   tiers?: AdminTier[];
 }
 
-const allSections: { title: string; items: NavItem[] }[] = [
+const allSections: { title: string; userTitle?: string; items: NavItem[] }[] = [
   {
     title: '工作台',
     items: [
@@ -128,6 +128,7 @@ const allSections: { title: string; items: NavItem[] }[] = [
   },
   {
     title: '应用与身份连接',
+    userTitle: '我的应用',
     items: [
       {
         label: '应用管理',
@@ -149,10 +150,24 @@ const allSections: { title: string; items: NavItem[] }[] = [
   },
   {
     title: '安全与运维中心',
+    userTitle: '消息与个人中心',
     items: [
       { label: '风险自适应认证', path: '/risk-events', keywords: 'risk adaptive 风险 登录 异常', icon: <RiskIcon fontSize="small" />, cap: 'risk:read' },
       { label: '审计日志', path: '/audit-logs', keywords: 'audit logs 登录记录 变更记录', icon: <AuditIcon fontSize="small" />, cap: 'audit_logs:read' },
-      { label: '通知与模板', path: '/notifications', keywords: 'notifications templates 通知 公告 模板 退信', icon: <NotificationsIcon fontSize="small" /> },
+      {
+        label: '通知与模板',
+        path: '/notifications',
+        keywords: 'notifications templates 通知 公告 模板 退信',
+        icon: <NotificationsIcon fontSize="small" />,
+        tiers: ['platform_admin'],
+      },
+      {
+        label: '消息中心',
+        path: '/notifications',
+        keywords: 'notifications 消息 通知 公告',
+        icon: <NotificationsIcon fontSize="small" />,
+        tiers: ['domain_admin', 'auditor', 'user'],
+      },
       { label: '系统设置', path: '/system-settings', keywords: 'settings config smtp site otp risk captcha 设置', icon: <SettingsIcon fontSize="small" />, tiers: ['platform_admin'] },
       { label: '版本信息', path: '/system-version', keywords: 'version migration 数据库 版本', icon: <VersionIcon fontSize="small" />, cap: 'system:read' },
       { label: '个人中心', path: '/profile', keywords: 'profile passkey totp 密码 通行密钥 会话 绑定', icon: <ProfileIcon fontSize="small" /> },
@@ -163,7 +178,7 @@ const allSections: { title: string; items: NavItem[] }[] = [
 const TIER_META: Record<AdminTier, { label: string; color: 'secondary' | 'primary' | 'info' | 'default' }> = {
   platform_admin: { label: '平台超管控制台', color: 'secondary' },
   domain_admin: { label: '域管理员控制台', color: 'primary' },
-  auditor: { label: '审计只读控制台', color: 'info' },
+  auditor: { label: '安全审计控制台', color: 'info' },
   user: { label: '用户工作台', color: 'default' },
 };
 
@@ -188,7 +203,7 @@ export const AppLayout: React.FC = () => {
   const navSections = useMemo(() => {
     return allSections
       .map((sec) => ({
-        ...sec,
+        title: adminTier === 'user' && sec.userTitle ? sec.userTitle : sec.title,
         items: sec.items.filter((item) => {
           if (item.tiers && !item.tiers.includes(adminTier)) return false;
           if (item.cap && !hasCap(item.cap)) return false;
@@ -352,7 +367,7 @@ export const AppLayout: React.FC = () => {
             <Stack direction="row" spacing={0.75} alignItems="center" sx={{ minWidth: 0 }}>
               <Box sx={{ width: 7, height: 7, borderRadius: '50%', bgcolor: 'success.main', flexShrink: 0 }} />
               <Typography variant="caption" color="text.secondary" noWrap>
-                {adminTier === 'domain_admin' ? '域围栏 · ' : '域 · '}
+                当前域 ·{' '}
                 <Box component="span" sx={{ color: 'text.primary', fontWeight: 600 }}>
                   {currentDomain}
                 </Box>

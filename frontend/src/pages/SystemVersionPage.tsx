@@ -25,7 +25,7 @@ export const SystemVersionPage: React.FC = () => {
     { field: 'app_version', headerName: '程序版本', width: 120 },
     {
       field: 'schema_version',
-      headerName: 'Schema 版本',
+      headerName: '数据结构版本',
       width: 130,
       valueFormatter: (v) => `v${v}`,
     },
@@ -34,7 +34,13 @@ export const SystemVersionPage: React.FC = () => {
       field: 'status',
       headerName: '状态',
       width: 110,
-      renderCell: (p) => <Chip size="small" color={p.value === 'success' ? 'success' : 'warning'} label={p.value} />,
+      renderCell: (p) => (
+        <Chip
+          size="small"
+          color={p.value === 'success' ? 'success' : 'warning'}
+          label={p.value === 'success' ? '成功' : '异常'}
+        />
+      ),
     },
     { field: 'details', headerName: '详情', flex: 1, minWidth: 220 },
     {
@@ -110,7 +116,7 @@ export const SystemVersionPage: React.FC = () => {
                     color={status.up_to_date ? 'success' : 'warning'}
                     label={status.up_to_date ? '版本匹配' : '存在差异'}
                   />
-                  {status.dirty && <Chip size="small" color="error" label="Dirty" />}
+                  {status.dirty && <Chip size="small" color="error" label="迁移异常" />}
                 </Stack>
               </CardContent>
             </Card>

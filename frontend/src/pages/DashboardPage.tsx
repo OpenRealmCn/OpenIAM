@@ -118,7 +118,7 @@ export const DashboardPage: React.FC = () => {
             icon={<VersionIcon />}
             color={dashboard.version.up_to_date ? 'success' : 'warning'}
             variant="outlined"
-            label={`v${dashboard.version.app_version} · DB v${dashboard.version.current_schema_version}`}
+            label={`v${dashboard.version.app_version} · 数据版本 v${dashboard.version.current_schema_version}`}
           />
         )}
       </Stack>
@@ -230,7 +230,7 @@ export const DashboardPage: React.FC = () => {
                 variant="outlined"
                 sx={{ mt: 2, borderRadius: 2.5 }}
               >
-                {dashboard?.version?.message || '正在检查数据库 Schema 版本...'}
+                {dashboard?.version?.message || '正在检查系统版本状态...'}
               </Alert>
             </CardContent>
           </Card>

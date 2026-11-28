@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/openrealm/openiam/internal/clientip"
 	"github.com/redis/go-redis/v9"
 	"github.com/ulule/limiter/v3"
 	mgin "github.com/ulule/limiter/v3/drivers/middleware/gin"
@@ -51,7 +52,7 @@ func NewIPRateLimiter(rdb *redis.Client, rateStr, keyPrefix string) (gin.Handler
 			c.Next()
 		}),
 		mgin.WithKeyGetter(func(c *gin.Context) string {
-			return c.ClientIP()
+			return clientip.FromGin(c)
 		}),
 	)
 

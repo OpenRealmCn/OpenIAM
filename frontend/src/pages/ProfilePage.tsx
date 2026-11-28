@@ -64,6 +64,19 @@ const TAB_KEYS = ['basic', 'security', 'sessions', 'oauth', 'risk'] as const;
 type TabKey = (typeof TAB_KEYS)[number];
 const ALLOWED_AVATAR_EXT_RE = /\.(png|ico|jpg)$/i;
 
+const RISK_LEVEL_META: Record<string, { label: string; color: 'error' | 'warning' | 'default' }> = {
+  high: { label: '高风险', color: 'error' },
+  medium: { label: '中风险', color: 'warning' },
+  low: { label: '低风险', color: 'default' },
+};
+
+const RISK_ACTION_LABELS: Record<string, string> = {
+  allow: '正常放行',
+  notify: '风险提醒',
+  challenge_mfa: '二次身份验证',
+  block: '已拦截',
+};
+
 function validateAvatarInput(raw: string, isAdmin: boolean): string {
   const val = raw.trim();
   if (!val) return '';
@@ -138,6 +151,8 @@ export const ProfilePage: React.FC = () => {
   const [unbindDialogOpen, setUnbindDialogOpen] = useState(false);
   const [unbindPassword, setUnbindPassword] = useState('');
   const [unbindCode, setUnbindCode] = useState('');
+  const [regenDialogOpen, setRegenDialogOpen] = useState(false);
+  const [regenCode, setRegenCode] = useState('');
 
   // 会话与设备
   const [sessions, setSessions] = useState<UserSession[]>([]);
@@ -326,13 +341,20 @@ export const ProfilePage: React.FC = () => {
     }
   };
 
-  const handleRegenerateRecovery = async () => {
-    const code = window.prompt('请输入验证器当前的 6 位动态码以重新生成备用恢复码：');
+  const handleRegenerateRecovery = () => {
+    setRegenCode('');
+    setRegenDialogOpen(true);
+  };
+
+  const handleConfirmRegenerateRecovery = async () => {
+    const code = regenCode.trim();
     if (!code) return;
     setError('');
     try {
-      const res = await api.auth.totpRegenerateCodes(code.trim());
+      const res = await api.auth.totpRegenerateCodes(code);
       setRecoveryCodes(res.recovery_codes || []);
+      setRegenDialogOpen(false);
+      setRegenCode('');
       await loadTOTP();
       setSuccess('已重新生成 10 组备用恢复码（旧恢复码已全部作废）');
     } catch (err) {
@@ -344,7 +366,7 @@ export const ProfilePage: React.FC = () => {
     setError('');
     setSuccess('');
     if (!isWebAuthnSupported()) {
-      setError('当前浏览器不支持通行密钥，请使用现代浏览器或在 HTTPS / localhost 环境下访问');
+      setError('当前浏览器不支持通行密钥，请使用支持通行密钥的现代浏览器并在 HTTPS 安全连接下访问');
       return;
     }
     setRegisteringPasskey(true);
@@ -467,7 +489,7 @@ export const ProfilePage: React.FC = () => {
                   {user?.display_name || user?.username}
                 </Typography>
                 <Chip size="small" color={isAdmin ? 'primary' : 'default'} label={tierLabel} />
-                {totpStatus.enabled && <Chip size="small" color="success" label="TOTP 已开启" />}
+                {totpStatus.enabled && <Chip size="small" color="success" label="已开启两步验证" />}
               </Stack>
               <Typography variant="body2" color="text.secondary" mt={0.3}>
                 @{user?.username} · {user?.email}
@@ -830,11 +852,15 @@ export const ProfilePage: React.FC = () => {
                       <CardContent sx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
                         <Stack direction="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" gap={1}>
                           <Stack direction="row" spacing={1} alignItems="center">
-                            <Chip size="small" color={ev.risk_level === 'high' ? 'error' : 'warning'} label={`${ev.risk_level.toUpperCase()} · ${ev.risk_score} 分`} />
+                            <Chip
+                              size="small"
+                              color={(RISK_LEVEL_META[ev.risk_level] || { color: 'warning' as const }).color}
+                              label={`${(RISK_LEVEL_META[ev.risk_level] || { label: ev.risk_level }).label} · ${ev.risk_score} 分`}
+                            />
                             <Typography variant="body2" fontWeight={600}>{ev.location}（{ev.ip_address}）</Typography>
                           </Stack>
                           <Typography variant="caption" color="text.secondary">
-                            {dayjs(ev.created_at).format('YYYY-MM-DD HH:mm:ss')} · 处置：{ev.action_taken}
+                            {dayjs(ev.created_at).format('YYYY-MM-DD HH:mm:ss')} · 处置：{RISK_ACTION_LABELS[ev.action_taken] || ev.action_taken}
                           </Typography>
                         </Stack>
                         <Typography variant="caption" color="text.secondary" display="block" mt={0.5}>
@@ -891,6 +917,32 @@ export const ProfilePage: React.FC = () => {
         <DialogActions sx={{ px: 3, pb: 2 }}>
           <Button onClick={() => setUnbindDialogOpen(false)}>取消</Button>
           <Button color="error" variant="contained" onClick={handleUnbindTOTP}>确认解绑</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* 重新生成备用恢复码弹窗 */}
+      <Dialog open={regenDialogOpen} onClose={() => setRegenDialogOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>重新生成备用恢复码</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} mt={1}>
+            <Typography variant="body2" color="text.secondary">
+              请输入验证器 App 当前显示的 6 位动态验证码，确认后旧恢复码将全部失效。
+            </Typography>
+            <TextField
+              autoFocus
+              fullWidth
+              size="small"
+              label="6 位动态验证码"
+              value={regenCode}
+              onChange={(e) => setRegenCode(e.target.value)}
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => setRegenDialogOpen(false)}>取消</Button>
+          <Button variant="contained" onClick={handleConfirmRegenerateRecovery} disabled={!regenCode.trim()}>
+            确认生成
+          </Button>
         </DialogActions>
       </Dialog>
 

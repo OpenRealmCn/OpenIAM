@@ -22,6 +22,26 @@ import dayjs, { Dayjs } from 'dayjs';
 import { api } from '../api/client';
 import { AuditLog } from '../types/api';
 
+const STATUS_LABELS: Record<string, { label: string; color: 'success' | 'error' }> = {
+  success: { label: '成功', color: 'success' },
+  failed: { label: '失败', color: 'error' },
+};
+
+const RESOURCE_TYPE_LABELS: Record<string, string> = {
+  role: '角色',
+  role_policy: '角色权限',
+  user_role: '用户角色',
+  permission: '权限项',
+  casbin_policy: '访问策略',
+  user: '用户与认证',
+  oauth_client: 'OAuth 应用',
+  oauth_provider: '第三方登录',
+  system_setting: '系统设置',
+  temp_role_grant: '临时权限',
+  plugin: '插件配置',
+  domain: '业务域',
+};
+
 export const AuditLogsPage: React.FC = () => {
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [total, setTotal] = useState(0);
@@ -85,16 +105,22 @@ export const AuditLogsPage: React.FC = () => {
         />
       ),
     },
-    { field: 'resource_type', headerName: '资源类型', width: 120 },
+    {
+      field: 'resource_type',
+      headerName: '资源类型',
+      width: 120,
+      valueFormatter: (v) => RESOURCE_TYPE_LABELS[v as string] || String(v || '-'),
+    },
     { field: 'resource_id', headerName: '资源标识', width: 160 },
     { field: 'ip_address', headerName: '来源 IP', width: 130 },
     {
       field: 'status',
       headerName: '状态',
       width: 90,
-      renderCell: (p) => (
-        <Chip size="small" color={p.value === 'success' ? 'success' : 'error'} label={p.value} />
-      ),
+      renderCell: (p) => {
+        const meta = STATUS_LABELS[p.value as string] || { label: String(p.value || '-'), color: 'error' as const };
+        return <Chip size="small" color={meta.color} label={meta.label} />;
+      },
     },
     {
       field: 'actions',
@@ -133,7 +159,7 @@ export const AuditLogsPage: React.FC = () => {
           />
           <TextField
             size="small"
-            label="动作 (如 rbac. / auth.)"
+            label="事件动作关键词"
             value={action}
             onChange={(e) => setAction(e.target.value)}
             sx={{ width: 180 }}
@@ -142,22 +168,24 @@ export const AuditLogsPage: React.FC = () => {
             <InputLabel>资源类型</InputLabel>
             <Select value={resourceType} label="资源类型" onChange={(e) => setResourceType(e.target.value)}>
               <MenuItem value="">全部</MenuItem>
-              <MenuItem value="role">role (角色)</MenuItem>
-              <MenuItem value="role_policy">role_policy (角色权限)</MenuItem>
-              <MenuItem value="user_role">user_role (用户角色)</MenuItem>
-              <MenuItem value="permission">permission (权限点)</MenuItem>
-              <MenuItem value="casbin_policy">casbin_policy (策略)</MenuItem>
-              <MenuItem value="user">user (用户/认证)</MenuItem>
-              <MenuItem value="oauth_client">oauth_client (OAuth 应用)</MenuItem>
-              <MenuItem value="oauth_provider">oauth_provider (联合登录)</MenuItem>
+              <MenuItem value="role">角色</MenuItem>
+              <MenuItem value="role_policy">角色权限</MenuItem>
+              <MenuItem value="user_role">用户角色</MenuItem>
+              <MenuItem value="permission">权限项</MenuItem>
+              <MenuItem value="casbin_policy">访问策略</MenuItem>
+              <MenuItem value="user">用户与认证</MenuItem>
+              <MenuItem value="oauth_client">OAuth 应用</MenuItem>
+              <MenuItem value="oauth_provider">第三方登录</MenuItem>
+              <MenuItem value="system_setting">系统设置</MenuItem>
+              <MenuItem value="temp_role_grant">临时权限</MenuItem>
             </Select>
           </FormControl>
           <FormControl size="small" sx={{ width: 110 }}>
             <InputLabel>状态</InputLabel>
             <Select value={status} label="状态" onChange={(e) => setStatus(e.target.value)}>
               <MenuItem value="">全部</MenuItem>
-              <MenuItem value="success">success</MenuItem>
-              <MenuItem value="failed">failed</MenuItem>
+              <MenuItem value="success">成功</MenuItem>
+              <MenuItem value="failed">失败</MenuItem>
             </Select>
           </FormControl>
           <DateTimePicker
@@ -203,7 +231,7 @@ export const AuditLogsPage: React.FC = () => {
               审计事件快照 #{detailLog?.id}
             </Typography>
             <Typography variant="body2" color="text.secondary" mb={2}>
-              {detailLog?.action} · {detailLog?.actor_username || 'system'} @ {detailLog?.ip_address}
+              {detailLog?.action} · {detailLog?.actor_username || '系统自动'} @ {detailLog?.ip_address}
             </Typography>
             {detailLog?.error_message && (
               <Alert severity="error" sx={{ mb: 2 }}>
@@ -212,7 +240,7 @@ export const AuditLogsPage: React.FC = () => {
             )}
 
             <Typography variant="subtitle2" fontWeight={700} mt={2} mb={0.5}>
-              变更前状态 (Before State)
+              变更前数据
             </Typography>
             <Box
               component="pre"
@@ -224,11 +252,11 @@ export const AuditLogsPage: React.FC = () => {
                 overflowX: 'auto',
               }}
             >
-              {detailLog?.before_state ? JSON.stringify(detailLog.before_state, null, 2) : '无 (新增或无前置状态)'}
+              {detailLog?.before_state ? JSON.stringify(detailLog.before_state, null, 2) : '无（新增或无前置状态）'}
             </Box>
 
             <Typography variant="subtitle2" fontWeight={700} mt={2.5} mb={0.5}>
-              变更后状态 (After State)
+              变更后数据
             </Typography>
             <Box
               component="pre"
@@ -240,7 +268,7 @@ export const AuditLogsPage: React.FC = () => {
                 overflowX: 'auto',
               }}
             >
-              {detailLog?.after_state ? JSON.stringify(detailLog.after_state, null, 2) : '无 (删除或无后置状态)'}
+              {detailLog?.after_state ? JSON.stringify(detailLog.after_state, null, 2) : '无（删除或无后置状态）'}
             </Box>
           </Box>
         </Drawer>
