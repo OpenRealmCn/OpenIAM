@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"net/mail"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -9,22 +10,24 @@ import (
 	"github.com/openrealm/openiam/internal/models"
 	"github.com/openrealm/openiam/internal/otp"
 	"github.com/openrealm/openiam/internal/rbac"
+	"github.com/openrealm/openiam/internal/settings"
 	"gorm.io/gorm"
 )
 
 type OTPHandler struct {
-	db     *gorm.DB
-	otpSvc *otp.Service
+	db          *gorm.DB
+	otpSvc      *otp.Service
+	settingsSvc *settings.Service
 }
 
-func NewOTPHandler(db *gorm.DB, otpSvc *otp.Service) *OTPHandler {
-	return &OTPHandler{db: db, otpSvc: otpSvc}
+func NewOTPHandler(db *gorm.DB, otpSvc *otp.Service, settingsSvc *settings.Service) *OTPHandler {
+	return &OTPHandler{db: db, otpSvc: otpSvc, settingsSvc: settingsSvc}
 }
 
 type sendOTPReq struct {
-	Scene        string `json:"scene"`                      // login | verify | mfa
+	Scene        string `json:"scene"`                      // login | register
 	Channel      string `json:"channel" binding:"required"` // sms | email
-	Target       string `json:"target"`                     // 登录时可为空或传手机号/邮箱
+	Target       string `json:"target"`                     // 手机号或邮箱
 	CaptchaToken string `json:"captcha_token"`
 }
 
@@ -38,34 +41,79 @@ func (h *OTPHandler) Send(c *gin.Context) {
 	if scene == "" {
 		scene = "login"
 	}
-	// 公开接口仅允许登录场景；二步验证验证码必须走携带 mfa_token 的 /auth/mfa/send-code
-	if scene != "login" {
+	// 公开接口仅允许登录与注册场景；二步验证验证码必须走携带 mfa_token 的 /auth/mfa/send-code
+	if scene != "login" && scene != "register" {
 		Fail(c, http.StatusBadRequest, "不支持的验证码场景")
+		return
+	}
+	channel := strings.ToLower(strings.TrimSpace(req.Channel))
+	if channel != "email" && channel != "sms" {
+		Fail(c, http.StatusBadRequest, "不支持的验证码通道")
 		return
 	}
 	target := strings.TrimSpace(req.Target)
 
 	var userPtr *models.User
-	if target != "" {
-		var u models.User
-		if err := h.db.Where("(email = ? OR phone = ?) AND status = ?", target, target, "active").First(&u).Error; err == nil {
-			userPtr = &u
+	if scene == "register" {
+		if h.settingsSvc == nil {
+			Fail(c, http.StatusInternalServerError, "系统设置服务未初始化")
+			return
 		}
-	}
-	if scene == "login" && userPtr == nil {
-		// 登录场景按接收地址必须匹配活跃账号，但不直接暴露账号是否存在细节
+		snap := h.settingsSvc.Snapshot()
+		if !snap.AllowPublicRegister {
+			Fail(c, http.StatusForbidden, "系统管理员已关闭自助注册功能")
+			return
+		}
+		verifyMode := snap.RegisterVerifyMode
+		channelAllowed := (channel == "email" && (verifyMode == "email" || verifyMode == "either" || verifyMode == "both")) ||
+			(channel == "sms" && (verifyMode == "sms" || verifyMode == "either" || verifyMode == "both"))
+		if !channelAllowed {
+			Fail(c, http.StatusBadRequest, "当前系统未启用该注册验证码通道")
+			return
+		}
+		if channel == "email" {
+			target = strings.ToLower(target)
+			if addr, err := mail.ParseAddress(target); err != nil || !strings.EqualFold(addr.Address, target) {
+				Fail(c, http.StatusBadRequest, "请输入有效的邮箱地址")
+				return
+			}
+			var dup int64
+			h.db.Model(&models.User{}).Where("email <> '' AND LOWER(email) = ?", target).Count(&dup)
+			if dup > 0 {
+				Fail(c, http.StatusConflict, "该邮箱已被注册")
+				return
+			}
+		} else {
+			if !phonePattern.MatchString(target) {
+				Fail(c, http.StatusBadRequest, "请输入有效的手机号")
+				return
+			}
+			var dup int64
+			h.db.Model(&models.User{}).Where("phone <> '' AND phone = ?", target).Count(&dup)
+			if dup > 0 {
+				Fail(c, http.StatusConflict, "该手机号已被注册")
+				return
+			}
+		}
+	} else {
 		if target == "" {
 			Fail(c, http.StatusBadRequest, "请输入手机号或邮箱")
 			return
 		}
-		// 账号不存在时不真正发送，返回与成功一致的响应：避免被滥用为任意地址的验证码发送器，并防止账号枚举
-		OK(c, gin.H{"sent": true, "channel": req.Channel, "degraded": false, "message": "验证码已发送，请注意查收", "ttl_minutes": 10})
-		return
+		var u models.User
+		if err := h.db.Where("((email <> '' AND LOWER(email) = ?) OR (phone <> '' AND phone = ?)) AND status = ?", strings.ToLower(target), target, "active").First(&u).Error; err == nil {
+			userPtr = &u
+		}
+		if userPtr == nil {
+			// 账号不存在时不真正发送，返回与成功一致的响应：避免被滥用为任意地址的验证码发送器，并防止账号枚举
+			OK(c, gin.H{"sent": true, "channel": channel, "degraded": false, "message": "验证码已发送，请注意查收", "ttl_minutes": 10})
+			return
+		}
 	}
 
 	res, err := h.otpSvc.SendCode(c.Request.Context(), otp.SendRequest{
 		Scene:        scene,
-		Channel:      req.Channel,
+		Channel:      channel,
 		Target:       target,
 		User:         userPtr,
 		ClientIP:     clientip.FromGin(c),

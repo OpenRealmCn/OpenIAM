@@ -3,6 +3,8 @@ package handlers
 import (
 	"fmt"
 	"net/http"
+	"net/mail"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -39,7 +41,7 @@ func (h *UserHandler) List(c *gin.Context) {
 	q := h.db.Model(&models.User{})
 	if keyword != "" {
 		like := "%" + keyword + "%"
-		q = q.Where("username LIKE ? OR email LIKE ? OR display_name LIKE ?", like, like, like)
+		q = q.Where("username LIKE ? OR email LIKE ? OR phone LIKE ? OR display_name LIKE ?", like, like, like, like)
 	}
 	if status != "" {
 		q = q.Where("status = ?", status)
@@ -82,12 +84,37 @@ func (h *UserHandler) Get(c *gin.Context) {
 
 type createUserReq struct {
 	Username    string   `json:"username" binding:"required,min=3,max=64,excludes=@"`
-	Email       string   `json:"email" binding:"required,email"`
+	Email       string   `json:"email"`
+	Phone       string   `json:"phone"`
 	DisplayName string   `json:"display_name"`
 	Password    string   `json:"password" binding:"required,min=8,maxbytes=72"`
 	Status      string   `json:"status"`
 	DomainCode  string   `json:"domain_code"`
 	RoleCodes   []string `json:"role_codes"`
+}
+
+func validateAdminAvatarInput(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if len(raw) > 512 {
+		return "头像地址长度不能超过 512 个字符"
+	}
+	if strings.HasPrefix(raw, "/") {
+		if strings.HasPrefix(raw, "//") {
+			return "头像站内路径格式无效"
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme != "" || u.Host != "" || strings.Contains(u.Path, "..") {
+			return "头像站内路径格式无效"
+		}
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "头像地址必须是有效的 http(s) 图片链接或站内路径"
+	}
+	return ""
 }
 
 func (h *UserHandler) Create(c *gin.Context) {
@@ -118,11 +145,40 @@ func (h *UserHandler) Create(c *gin.Context) {
 		return
 	}
 
-	var dup int64
-	h.db.Model(&models.User{}).Where("username = ? OR email = ?", req.Username, req.Email).Count(&dup)
-	if dup > 0 {
-		Fail(c, http.StatusConflict, "用户名或邮箱已存在")
+	username := strings.TrimSpace(req.Username)
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	phone := strings.TrimSpace(req.Phone)
+
+	if email != "" {
+		if addr, err := mail.ParseAddress(email); err != nil || !strings.EqualFold(addr.Address, email) {
+			Fail(c, http.StatusBadRequest, "邮箱格式无效")
+			return
+		}
+	}
+	if phone != "" && !phonePattern.MatchString(phone) {
+		Fail(c, http.StatusBadRequest, "手机号格式无效，需为 6~20 位数字（可带国际区号前缀 +）")
 		return
+	}
+
+	var dup int64
+	h.db.Model(&models.User{}).Where("username = ?", username).Count(&dup)
+	if dup > 0 {
+		Fail(c, http.StatusConflict, "用户名已存在")
+		return
+	}
+	if email != "" {
+		h.db.Model(&models.User{}).Where("email <> '' AND LOWER(email) = ?", email).Count(&dup)
+		if dup > 0 {
+			Fail(c, http.StatusConflict, "邮箱已存在")
+			return
+		}
+	}
+	if phone != "" {
+		h.db.Model(&models.User{}).Where("phone <> '' AND phone = ?", phone).Count(&dup)
+		if dup > 0 {
+			Fail(c, http.StatusConflict, "手机号已存在")
+			return
+		}
 	}
 
 	hash, err := security.HashPassword(req.Password)
@@ -136,12 +192,13 @@ func (h *UserHandler) Create(c *gin.Context) {
 	}
 	displayName := strings.TrimSpace(req.DisplayName)
 	if displayName == "" {
-		displayName = req.Username
+		displayName = username
 	}
 
 	user := models.User{
-		Username:     strings.TrimSpace(req.Username),
-		Email:        strings.TrimSpace(req.Email),
+		Username:     username,
+		Email:        email,
+		Phone:        phone,
 		DisplayName:  displayName,
 		PasswordHash: hash,
 		Status:       status,
@@ -176,10 +233,11 @@ func (h *UserHandler) Create(c *gin.Context) {
 }
 
 type updateUserReq struct {
-	Email       string `json:"email"`
-	DisplayName string `json:"display_name"`
-	AvatarURL   string `json:"avatar_url"`
-	Status      string `json:"status"`
+	Email       *string `json:"email"`
+	Phone       *string `json:"phone"`
+	DisplayName *string `json:"display_name"`
+	AvatarURL   *string `json:"avatar_url"`
+	Status      *string `json:"status"`
 }
 
 func (h *UserHandler) Update(c *gin.Context) {
@@ -217,27 +275,64 @@ func (h *UserHandler) Update(c *gin.Context) {
 		return
 	}
 
-	if req.Email != "" {
-		user.Email = strings.TrimSpace(req.Email)
-	}
-	if req.DisplayName != "" {
-		user.DisplayName = strings.TrimSpace(req.DisplayName)
-	}
-	if req.AvatarURL != "" {
-		user.AvatarURL = strings.TrimSpace(req.AvatarURL)
-	}
-	if req.Status != "" {
-		if req.Status != "active" && req.Status != "disabled" {
-			Fail(c, http.StatusBadRequest, "无效的用户状态")
-			return
-		}
-		// 保护管理路径：不允许把平台上最后一个可用超管停用（包括操作者本人）。
-		if req.Status != "active" && user.Status == "active" && isSuperAdmin(h.enforcer, id) {
-			if h.guardLastSuperAdmin(c, id, "不能停用最后一个可用的超级管理员") {
+	if req.Email != nil {
+		email := strings.ToLower(strings.TrimSpace(*req.Email))
+		if email != "" {
+			if addr, mErr := mail.ParseAddress(email); mErr != nil || !strings.EqualFold(addr.Address, email) {
+				Fail(c, http.StatusBadRequest, "邮箱格式无效")
+				return
+			}
+			var dup int64
+			h.db.Model(&models.User{}).Where("id <> ? AND email <> '' AND LOWER(email) = ?", id, email).Count(&dup)
+			if dup > 0 {
+				Fail(c, http.StatusConflict, "该邮箱已被其他用户绑定")
 				return
 			}
 		}
-		user.Status = req.Status
+		user.Email = email
+	}
+	if req.Phone != nil {
+		phone := strings.TrimSpace(*req.Phone)
+		if phone != "" {
+			if !phonePattern.MatchString(phone) {
+				Fail(c, http.StatusBadRequest, "手机号格式无效，需为 6~20 位数字（可带国际区号前缀 +）")
+				return
+			}
+			var dup int64
+			h.db.Model(&models.User{}).Where("id <> ? AND phone <> '' AND phone = ?", id, phone).Count(&dup)
+			if dup > 0 {
+				Fail(c, http.StatusConflict, "该手机号已被其他用户绑定")
+				return
+			}
+		}
+		user.Phone = phone
+	}
+	if req.DisplayName != nil {
+		user.DisplayName = strings.TrimSpace(*req.DisplayName)
+	}
+	if req.AvatarURL != nil {
+		avatar := strings.TrimSpace(*req.AvatarURL)
+		if msg := validateAdminAvatarInput(avatar); msg != "" {
+			Fail(c, http.StatusBadRequest, msg)
+			return
+		}
+		user.AvatarURL = avatar
+	}
+	if req.Status != nil {
+		st := strings.TrimSpace(*req.Status)
+		if st != "" {
+			if st != "active" && st != "disabled" {
+				Fail(c, http.StatusBadRequest, "无效的用户状态")
+				return
+			}
+			// 保护管理路径：不允许把平台上最后一个可用超管停用（包括操作者本人）。
+			if st != "active" && user.Status == "active" && isSuperAdmin(h.enforcer, id) {
+				if h.guardLastSuperAdmin(c, id, "不能停用最后一个可用的超级管理员") {
+					return
+				}
+			}
+			user.Status = st
+		}
 	}
 
 	if err := h.db.Save(&user).Error; err != nil {

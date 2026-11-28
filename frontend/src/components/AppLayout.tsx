@@ -38,7 +38,6 @@ import {
   Gavel as PolicyIcon,
   History as AuditIcon,
   Home as PortalIcon,
-  Hub as ProviderIcon,
   Logout as LogoutIcon,
   ManageAccounts as ProfileIcon,
   Menu as MenuIcon,
@@ -144,8 +143,7 @@ const allSections: { title: string; userTitle?: string; items: NavItem[] }[] = [
         icon: <AppsIcon fontSize="small" />,
         tiers: ['user'],
       },
-      { label: '第三方登录', path: '/identity-providers', keywords: 'idp sso github google feishu 联合登录', icon: <ProviderIcon fontSize="small" />, tiers: ['platform_admin'] },
-      { label: '插件中心', path: '/plugins', keywords: 'plugins cap captcha sms 插件 人机验证 短信', icon: <PluginsIcon fontSize="small" />, tiers: ['platform_admin'] },
+      { label: '插件中心', path: '/plugins', keywords: 'plugins oauth idp sso github google feishu cap captcha sms 第三方登录 插件 人机验证 短信', icon: <PluginsIcon fontSize="small" />, tiers: ['platform_admin'] },
     ],
   },
   {

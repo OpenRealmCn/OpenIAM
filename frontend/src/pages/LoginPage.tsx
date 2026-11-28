@@ -62,8 +62,14 @@ export const LoginPage: React.FC = () => {
   const [tab, setTab] = useState<'login' | 'otp' | 'register'>('login');
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
+  const [emailCode, setEmailCode] = useState('');
+  const [smsCode, setSmsCode] = useState('');
+  const [regEmailCooldown, setRegEmailCooldown] = useState(0);
+  const [regSmsCooldown, setRegSmsCooldown] = useState(0);
+  const [regSendingChannel, setRegSendingChannel] = useState<'email' | 'sms' | null>(null);
   const [captchaToken, setCaptchaToken] = useState('');
   const [captchaReset, setCaptchaReset] = useState(0);
 
@@ -132,6 +138,42 @@ export const LoginPage: React.FC = () => {
     return () => clearTimeout(t);
   }, [mfaSendCooldown]);
 
+  useEffect(() => {
+    if (regEmailCooldown <= 0) return;
+    const t = setTimeout(() => setRegEmailCooldown((c) => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [regEmailCooldown]);
+
+  useEffect(() => {
+    if (regSmsCooldown <= 0) return;
+    const t = setTimeout(() => setRegSmsCooldown((c) => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [regSmsCooldown]);
+
+  const registerVerifyMode = siteInfo.register_verify_mode || 'none';
+  const showRegisterEmail =
+    (siteInfo.register_email_mode || 'required') !== 'disabled' ||
+    registerVerifyMode === 'email' ||
+    registerVerifyMode === 'both' ||
+    registerVerifyMode === 'either';
+  const requireRegisterEmail =
+    siteInfo.register_email_mode === 'required' ||
+    registerVerifyMode === 'email' ||
+    registerVerifyMode === 'both';
+  const showRegisterPhone =
+    (siteInfo.register_phone_mode || 'disabled') !== 'disabled' ||
+    registerVerifyMode === 'sms' ||
+    registerVerifyMode === 'both' ||
+    registerVerifyMode === 'either';
+  const requireRegisterPhone =
+    siteInfo.register_phone_mode === 'required' ||
+    registerVerifyMode === 'sms' ||
+    registerVerifyMode === 'both';
+  const needEmailVerify =
+    registerVerifyMode === 'email' || registerVerifyMode === 'both' || registerVerifyMode === 'either';
+  const needSmsVerify =
+    registerVerifyMode === 'sms' || registerVerifyMode === 'both' || registerVerifyMode === 'either';
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -154,12 +196,17 @@ export const LoginPage: React.FC = () => {
       } else {
         await api.auth.register({
           username,
-          email,
+          email: showRegisterEmail ? email.trim() : undefined,
+          phone: showRegisterPhone ? phone.trim() : undefined,
           password,
           display_name: displayName,
+          email_code: needEmailVerify ? emailCode.trim() : undefined,
+          sms_code: needSmsVerify ? smsCode.trim() : undefined,
           captcha_token: captchaToken,
         });
         setSuccessMsg('注册成功，请使用账号密码登录');
+        setEmailCode('');
+        setSmsCode('');
         setTab('login');
         setCaptchaReset((n) => n + 1);
       }
@@ -168,6 +215,37 @@ export const LoginPage: React.FC = () => {
       setCaptchaReset((n) => n + 1);
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleSendRegisterOTP = async (channel: 'email' | 'sms') => {
+    setError('');
+    setSuccessMsg('');
+    const target = (channel === 'email' ? email : phone).trim();
+    if (!target) {
+      setError(channel === 'email' ? '请先输入注册邮箱' : '请先输入注册手机号');
+      return;
+    }
+    setRegSendingChannel(channel);
+    try {
+      const res = await api.auth.sendOTP({
+        scene: 'register',
+        channel,
+        target,
+        captcha_token: captchaToken,
+      });
+      setSuccessMsg(res?.message || '注册验证码已发送，请注意查收');
+      if (channel === 'email') {
+        setRegEmailCooldown(60);
+      } else {
+        setRegSmsCooldown(60);
+      }
+      setCaptchaReset((n) => n + 1);
+    } catch (err) {
+      setError((err as Error).message);
+      setCaptchaReset((n) => n + 1);
+    } finally {
+      setRegSendingChannel(null);
     }
   };
 
@@ -647,15 +725,85 @@ export const LoginPage: React.FC = () => {
                               sx={{ overflow: 'hidden' }}
                             >
                               <Stack spacing={2} sx={{ pt: 0.5 }}>
-                                <TextField
-                                  label="邮箱"
-                                  type="email"
-                                  value={email}
-                                  onChange={(e) => setEmail(e.target.value)}
-                                  required
-                                  fullWidth
-                                  size="small"
-                                />
+                                {registerVerifyMode === 'either' && (
+                                  <Alert severity="info" sx={{ py: 0.3 }}>
+                                    请至少填写邮箱或手机号并完成对应验证码校验
+                                  </Alert>
+                                )}
+                                {showRegisterEmail && (
+                                  <>
+                                    <TextField
+                                      label={requireRegisterEmail ? '邮箱' : '邮箱（选填）'}
+                                      type="email"
+                                      value={email}
+                                      onChange={(e) => setEmail(e.target.value)}
+                                      required={requireRegisterEmail}
+                                      fullWidth
+                                      size="small"
+                                    />
+                                    {needEmailVerify && (
+                                      <Stack direction="row" spacing={1}>
+                                        <TextField
+                                          label="6 位邮箱验证码"
+                                          value={emailCode}
+                                          onChange={(e) => setEmailCode(e.target.value)}
+                                          required={registerVerifyMode === 'email' || registerVerifyMode === 'both'}
+                                          fullWidth
+                                          size="small"
+                                        />
+                                        <Button
+                                          variant="outlined"
+                                          onClick={() => handleSendRegisterOTP('email')}
+                                          disabled={regSendingChannel === 'email' || regEmailCooldown > 0}
+                                          sx={{ whiteSpace: 'nowrap', minWidth: 112 }}
+                                        >
+                                          {regEmailCooldown > 0
+                                            ? `${regEmailCooldown}s`
+                                            : regSendingChannel === 'email'
+                                              ? '发送中'
+                                              : '获取验证码'}
+                                        </Button>
+                                      </Stack>
+                                    )}
+                                  </>
+                                )}
+                                {showRegisterPhone && (
+                                  <>
+                                    <TextField
+                                      label={requireRegisterPhone ? '手机号' : '手机号（选填）'}
+                                      value={phone}
+                                      placeholder="如 +8613800138000 或 13800138000"
+                                      onChange={(e) => setPhone(e.target.value)}
+                                      required={requireRegisterPhone}
+                                      fullWidth
+                                      size="small"
+                                    />
+                                    {needSmsVerify && (
+                                      <Stack direction="row" spacing={1}>
+                                        <TextField
+                                          label="6 位短信验证码"
+                                          value={smsCode}
+                                          onChange={(e) => setSmsCode(e.target.value)}
+                                          required={registerVerifyMode === 'sms' || registerVerifyMode === 'both'}
+                                          fullWidth
+                                          size="small"
+                                        />
+                                        <Button
+                                          variant="outlined"
+                                          onClick={() => handleSendRegisterOTP('sms')}
+                                          disabled={regSendingChannel === 'sms' || regSmsCooldown > 0}
+                                          sx={{ whiteSpace: 'nowrap', minWidth: 112 }}
+                                        >
+                                          {regSmsCooldown > 0
+                                            ? `${regSmsCooldown}s`
+                                            : regSendingChannel === 'sms'
+                                              ? '发送中'
+                                              : '获取验证码'}
+                                        </Button>
+                                      </Stack>
+                                    )}
+                                  </>
+                                )}
                                 <TextField
                                   label="显示名称"
                                   value={displayName}

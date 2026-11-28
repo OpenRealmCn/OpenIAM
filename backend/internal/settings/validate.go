@@ -137,6 +137,20 @@ func validateEnumOrSpecialSetting(key, raw string) error {
 		}
 	case KeyServerClientIPCustomHeader:
 		return clientip.ValidateCustomHeader(raw)
+	case KeySecurityRegisterEmailMode, KeySecurityRegisterPhoneMode:
+		switch raw {
+		case "disabled", "optional", "required":
+			return nil
+		default:
+			return fmt.Errorf("设置项 %s 必须为 disabled、optional 或 required", key)
+		}
+	case KeySecurityRegisterVerifyMode:
+		switch raw {
+		case "none", "email", "sms", "either", "both":
+			return nil
+		default:
+			return fmt.Errorf("注册验证码校验方式必须为 none、email、sms、either 或 both")
+		}
 	}
 	return nil
 }

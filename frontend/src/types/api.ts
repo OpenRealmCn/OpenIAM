@@ -170,6 +170,9 @@ export interface SiteInfo {
   announcement_type: 'info' | 'success' | 'warning' | 'error';
   footer_text: string;
   allow_public_register: boolean;
+  register_email_mode: 'disabled' | 'optional' | 'required';
+  register_phone_mode: 'disabled' | 'optional' | 'required';
+  register_verify_mode: 'none' | 'email' | 'sms' | 'either' | 'both';
   smtp_enabled: boolean;
 }
 

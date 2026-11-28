@@ -144,7 +144,7 @@ func (h *OAuthClientHandler) Create(c *gin.Context) {
 
 type updateOAuthClientReq struct {
 	Name           string   `json:"name"`
-	Description    string   `json:"description"`
+	Description    *string  `json:"description"`
 	RedirectURIs   []string `json:"redirect_uris"`
 	GrantTypes     []string `json:"grant_types"`
 	Scopes         []string `json:"scopes"`
@@ -174,11 +174,11 @@ func (h *OAuthClientHandler) Update(c *gin.Context) {
 		Fail(c, http.StatusBadRequest, "参数错误")
 		return
 	}
-	if req.Name != "" {
+	if strings.TrimSpace(req.Name) != "" {
 		client.Name = strings.TrimSpace(req.Name)
 	}
-	if req.Description != "" {
-		client.Description = strings.TrimSpace(req.Description)
+	if req.Description != nil {
+		client.Description = strings.TrimSpace(*req.Description)
 	}
 	if c.GetBool("self_service") {
 		if msg := validateSelfServiceClient(req.GrantTypes, req.Scopes, req.RedirectURIs); msg != "" {
@@ -187,7 +187,17 @@ func (h *OAuthClientHandler) Update(c *gin.Context) {
 		}
 	}
 	if len(req.RedirectURIs) > 0 {
-		client.RedirectURIs = models.StringSlice(req.RedirectURIs)
+		trimmed := make([]string, 0, len(req.RedirectURIs))
+		for _, u := range req.RedirectURIs {
+			if s := strings.TrimSpace(u); s != "" {
+				trimmed = append(trimmed, s)
+			}
+		}
+		if len(trimmed) == 0 {
+			Fail(c, http.StatusBadRequest, "请至少保留一个有效的回调地址")
+			return
+		}
+		client.RedirectURIs = models.StringSlice(trimmed)
 	}
 	if len(req.GrantTypes) > 0 {
 		client.GrantTypes = models.StringSlice(req.GrantTypes)
@@ -198,11 +208,28 @@ func (h *OAuthClientHandler) Update(c *gin.Context) {
 	if req.RequirePKCE != nil {
 		client.RequirePKCE = *req.RequirePKCE
 	}
+	plainSecret := ""
 	if req.IsConfidential != nil {
 		client.IsConfidential = *req.IsConfidential
+		if !before.IsConfidential && client.IsConfidential && client.ClientSecretHash == "" {
+			plainSecret = generateClientCredential("oiam_sec_", 24)
+			hash, hashErr := security.HashPassword(plainSecret)
+			if hashErr != nil {
+				Fail(c, http.StatusInternalServerError, "生成应用密钥失败")
+				return
+			}
+			client.ClientSecretHash = hash
+		} else if before.IsConfidential && !client.IsConfidential {
+			client.ClientSecretHash = ""
+		}
 	}
-	if req.Status != "" {
-		client.Status = req.Status
+	if req.Status != "" && !c.GetBool("self_service") {
+		st := strings.TrimSpace(req.Status)
+		if st != "active" && st != "disabled" {
+			Fail(c, http.StatusBadRequest, "无效的应用状态")
+			return
+		}
+		client.Status = st
 	}
 
 	if err := h.db.Save(&client).Error; err != nil {
@@ -219,7 +246,13 @@ func (h *OAuthClientHandler) Update(c *gin.Context) {
 		After:        client,
 		Status:       "success",
 	})
-	OK(c, client)
+	OK(c, struct {
+		models.OAuthClient
+		ClientSecret string `json:"client_secret,omitempty"`
+	}{
+		OAuthClient:  client,
+		ClientSecret: plainSecret,
+	})
 }
 
 func (h *OAuthClientHandler) RotateSecret(c *gin.Context) {

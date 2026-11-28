@@ -99,8 +99,16 @@ export const api = {
   auth: {
     login: (username: string, password: string, captcha_token?: string) =>
       http.post('/auth/login', { username, password, captcha_token }).then((r) => r.data.data),
-    register: (payload: { username: string; email: string; password: string; display_name?: string; captcha_token?: string }) =>
-      http.post('/auth/register', payload).then((r) => r.data.data),
+    register: (payload: {
+      username: string;
+      email?: string;
+      phone?: string;
+      password: string;
+      display_name?: string;
+      email_code?: string;
+      sms_code?: string;
+      captcha_token?: string;
+    }) => http.post('/auth/register', payload).then((r) => r.data.data),
     logout: () =>
       http.post('/auth/logout', {}).then((r) => r.data.data),
     me: () => http.get('/auth/me').then((r) => r.data.data),
@@ -164,14 +172,15 @@ export const api = {
       http.get('/users', { params }).then((r) => r.data.data),
     create: (data: {
       username: string;
-      email: string;
+      email?: string;
+      phone?: string;
       display_name?: string;
       password: string;
       status?: string;
       domain_code?: string;
       role_codes?: string[];
     }) => http.post('/users', data).then((r) => r.data.data),
-    update: (id: number, data: { email?: string; display_name?: string; status?: string }) =>
+    update: (id: number, data: { email?: string; phone?: string; display_name?: string; avatar_url?: string; status?: string }) =>
       http.put(`/users/${id}`, data).then((r) => r.data.data),
     delete: (id: number) => http.delete(`/users/${id}`).then((r) => r.data.data),
     resetPassword: (id: number, new_password: string) =>
@@ -240,6 +249,8 @@ export const api = {
       require_pkce: boolean;
       is_confidential: boolean;
     }) => http.post('/my/oauth-clients', data).then((r) => r.data.data),
+    update: (id: number, data: Record<string, unknown>) =>
+      http.put(`/my/oauth-clients/${id}`, data).then((r) => r.data.data),
     rotateSecret: (id: number) =>
       http.post(`/my/oauth-clients/${id}/rotate-secret`).then((r) => r.data.data),
     delete: (id: number) => http.delete(`/my/oauth-clients/${id}`).then((r) => r.data.data),

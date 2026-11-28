@@ -39,6 +39,9 @@ func (h *SettingsHandler) PublicSiteInfo(c *gin.Context) {
 		"announcement_type":     snap.SiteAnnouncementType,
 		"footer_text":           snap.SiteFooterText,
 		"allow_public_register": snap.AllowPublicRegister,
+		"register_email_mode":   snap.RegisterEmailMode,
+		"register_phone_mode":   snap.RegisterPhoneMode,
+		"register_verify_mode":  snap.RegisterVerifyMode,
 		"smtp_enabled":          snap.SMTPEnabled,
 	})
 }

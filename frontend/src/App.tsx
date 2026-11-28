@@ -23,7 +23,6 @@ import { DomainsPage } from './pages/DomainsPage';
 import { RolesPage } from './pages/RolesPage';
 import { PermissionsPage } from './pages/PermissionsPage';
 import { OAuthAppsPage } from './pages/OAuthAppsPage';
-import { IdentityProvidersPage } from './pages/IdentityProvidersPage';
 import { AuditLogsPage } from './pages/AuditLogsPage';
 import { SystemSettingsPage } from './pages/SystemSettingsPage';
 import { SystemVersionPage } from './pages/SystemVersionPage';
@@ -165,11 +164,7 @@ export const App: React.FC = () => {
                   />
                   <Route
                     path="identity-providers"
-                    element={
-                      <CapabilityGuard tiers={['platform_admin']}>
-                        <IdentityProvidersPage />
-                      </CapabilityGuard>
-                    }
+                    element={<Navigate to="/plugins?slot=oauth" replace />}
                   />
                   <Route
                     path="plugins"

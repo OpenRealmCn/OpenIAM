@@ -75,6 +75,23 @@ const SELECT_OPTIONS: Record<string, { value: string; label: string }[]> = {
     { value: 'true_client_ip', label: '通用 CDN / WAF（True-Client-IP）' },
     { value: 'custom_header', label: '自定义请求头（Custom Header）' },
   ],
+  'security.register_email_mode': [
+    { value: 'disabled', label: '关闭（注册时不收集邮箱）' },
+    { value: 'optional', label: '选填（允许不填邮箱）' },
+    { value: 'required', label: '必填（默认，必须提供邮箱）' },
+  ],
+  'security.register_phone_mode': [
+    { value: 'disabled', label: '关闭（注册时不收集手机号）' },
+    { value: 'optional', label: '选填（允许填写手机号）' },
+    { value: 'required', label: '必填（必须提供手机号）' },
+  ],
+  'security.register_verify_mode': [
+    { value: 'none', label: '无需验证码（直接注册）' },
+    { value: 'email', label: '需验证邮箱验证码' },
+    { value: 'sms', label: '需验证手机短信验证码' },
+    { value: 'either', label: '邮箱或短信验证码二选一' },
+    { value: 'both', label: '邮箱与短信验证码均需验证' },
+  ],
 };
 
 const IP_PREVIEW_STATUS_META: Record<

@@ -158,7 +158,7 @@ func Setup(deps Dependencies) (*gin.Engine, error) {
 	settingsH := handlers.NewSettingsHandler(deps.SettingsSvc, deps.Enforcer, mailSvc, deps.AuditSvc)
 	passkeyH := handlers.NewPasskeyHandler(deps.DB, deps.JWTManager, deps.StateStore, deps.Enforcer, deps.AuditSvc, deps.SettingsSvc)
 	totpH := handlers.NewTOTPHandler(deps.DB, deps.SettingsSvc, deps.AuditSvc)
-	otpH := handlers.NewOTPHandler(deps.DB, otpSvc)
+	otpH := handlers.NewOTPHandler(deps.DB, otpSvc, deps.SettingsSvc)
 	riskH := handlers.NewRiskHandler(deps.DB, deps.Enforcer)
 	sessionH := handlers.NewSessionHandler(deps.DB, deps.StateStore, deps.Enforcer, deps.AuditSvc, deps.SettingsSvc)
 	notifyH := handlers.NewNotificationHandler(deps.DB, notifySvc, deps.Enforcer, deps.AuditSvc)

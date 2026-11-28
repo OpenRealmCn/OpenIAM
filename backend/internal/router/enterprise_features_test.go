@@ -449,3 +449,189 @@ func TestClientIPSettingsPreviewAndHotReload(t *testing.T) {
 	assert.Equal(t, "cf_connecting_ip", previewResp2.Data.ActiveMethod)
 	assert.Equal(t, "203.0.113.55", previewResp2.Data.ActiveIP)
 }
+
+func TestOAuthPKCEFalseUserEditAndRegisterOTPSettings(t *testing.T) {
+	env := setupTestEnv(t, "")
+	adminToken, _ := loginAs(t, env.engine, "admin", testSeedAdminPassword)
+
+	// 1. 管理员关闭 RequirePKCE 与 IsConfidential 创建应用，应真实落库为 false 且 /oauth2/authorize 不强制 code_challenge
+	createW := doJSON(t, env.engine, http.MethodPost, "/api/v1/oauth-clients", map[string]any{
+		"name":            "NoPKCEApp",
+		"domain_code":     rbac.DefaultDomain,
+		"redirect_uris":   []string{"https://app.example.com/cb"},
+		"scopes":          []string{"openid", "profile", "email"},
+		"require_pkce":    false,
+		"is_confidential": false,
+	}, adminToken)
+	require.Equal(t, http.StatusCreated, createW.Code, createW.Body.String())
+	var createResp struct {
+		Data struct {
+			Client       models.OAuthClient `json:"client"`
+			ClientSecret string             `json:"client_secret"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(createW.Body.Bytes(), &createResp))
+	assert.False(t, createResp.Data.Client.RequirePKCE, "require_pkce=false must be persisted")
+	assert.False(t, createResp.Data.Client.IsConfidential)
+	assert.Empty(t, createResp.Data.ClientSecret)
+
+	reqAuth := httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/oauth2/authorize?response_type=code&client_id=%s&redirect_uri=https://app.example.com/cb&scope=openid&state=s1",
+			createResp.Data.Client.ClientID),
+		nil)
+	reqAuth.Header.Set("Accept", "application/json")
+	wAuth := httptest.NewRecorder()
+	env.engine.ServeHTTP(wAuth, reqAuth)
+	require.Equal(t, http.StatusOK, wAuth.Code, wAuth.Body.String())
+
+	// 管理员编辑应用切换 require_pkce=true，并在编辑为机密客户端时生成 secret
+	updAppW := doJSON(t, env.engine, http.MethodPut, fmt.Sprintf("/api/v1/oauth-clients/%d", createResp.Data.Client.ID), map[string]any{
+		"name":            "NoPKCEApp-Edited",
+		"description":     "updated",
+		"redirect_uris":   []string{"https://app.example.com/cb2"},
+		"require_pkce":    true,
+		"is_confidential": true,
+		"status":          "active",
+	}, adminToken)
+	require.Equal(t, http.StatusOK, updAppW.Code, updAppW.Body.String())
+	var updAppResp struct {
+		Data struct {
+			models.OAuthClient
+			ClientSecret string `json:"client_secret"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(updAppW.Body.Bytes(), &updAppResp))
+	assert.Equal(t, "NoPKCEApp-Edited", updAppResp.Data.Name)
+	assert.True(t, updAppResp.Data.RequirePKCE)
+	assert.True(t, updAppResp.Data.IsConfidential)
+	assert.NotEmpty(t, updAppResp.Data.ClientSecret)
+
+	// 2. 普通用户创建与编辑自有应用（关闭 PKCE）
+	doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "appowner",
+		"email":    "appowner@openrealm.local",
+		"password": "AppOwner@1234",
+	}, "")
+	ownerToken, _ := loginAs(t, env.engine, "appowner", "AppOwner@1234")
+
+	myCreateW := doJSON(t, env.engine, http.MethodPost, "/api/v1/my/oauth-clients", map[string]any{
+		"name":            "MyOwnApp",
+		"domain_code":     rbac.DefaultDomain,
+		"redirect_uris":   []string{"https://my.example.com/cb"},
+		"grant_types":     []string{"authorization_code", "refresh_token"},
+		"scopes":          []string{"openid", "profile"},
+		"require_pkce":    false,
+		"is_confidential": true,
+	}, ownerToken)
+	require.Equal(t, http.StatusCreated, myCreateW.Code, myCreateW.Body.String())
+	var myCreateResp struct {
+		Data struct {
+			Client models.OAuthClient `json:"client"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(myCreateW.Body.Bytes(), &myCreateResp))
+	assert.False(t, myCreateResp.Data.Client.RequirePKCE)
+
+	myUpdW := doJSON(t, env.engine, http.MethodPut, fmt.Sprintf("/api/v1/my/oauth-clients/%d", myCreateResp.Data.Client.ID), map[string]any{
+		"name":          "MyOwnAppV2",
+		"redirect_uris": []string{"https://my.example.com/cb2"},
+		"grant_types":   []string{"authorization_code", "refresh_token"},
+		"scopes":        []string{"openid", "email"},
+		"require_pkce":  true,
+	}, ownerToken)
+	require.Equal(t, http.StatusOK, myUpdW.Code, myUpdW.Body.String())
+	assert.Contains(t, myUpdW.Body.String(), `"name":"MyOwnAppV2"`)
+	assert.Contains(t, myUpdW.Body.String(), `"require_pkce":true`)
+
+	// 3. 管理员编辑用户资料（邮箱/手机号/显示名/头像/状态）并校重
+	var owner models.User
+	require.NoError(t, env.db.Where("username = ?", "appowner").First(&owner).Error)
+	editUserW := doJSON(t, env.engine, http.MethodPut, fmt.Sprintf("/api/v1/users/%d", owner.ID), map[string]any{
+		"display_name": "应用创建者",
+		"email":        "appowner_new@openrealm.local",
+		"phone":        "+8613800138999",
+		"avatar_url":   "/logo.png",
+		"status":       "active",
+	}, adminToken)
+	require.Equal(t, http.StatusOK, editUserW.Code, editUserW.Body.String())
+	assert.Contains(t, editUserW.Body.String(), `"phone":"+8613800138999"`)
+	assert.Contains(t, editUserW.Body.String(), `"email":"appowner_new@openrealm.local"`)
+
+	// 4. 后台关闭注册邮箱、开启手机号选填：连续注册 2 个无邮箱账号不应触发邮箱唯一约束冲突
+	setNoEmailW := doJSON(t, env.engine, http.MethodPut, "/api/v1/system/settings", map[string]any{
+		"settings": map[string]string{
+			"security.register_email_mode":  "disabled",
+			"security.register_phone_mode":  "optional",
+			"security.register_verify_mode": "none",
+		},
+	}, adminToken)
+	require.Equal(t, http.StatusOK, setNoEmailW.Code, setNoEmailW.Body.String())
+
+	r1 := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "noemail1",
+		"phone":    "+8613800008001",
+		"password": "NoEmail@1234",
+	}, "")
+	require.Equal(t, http.StatusCreated, r1.Code, r1.Body.String())
+
+	r2 := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "noemail2",
+		"password": "NoEmail@1234",
+	}, "")
+	require.Equal(t, http.StatusCreated, r2.Code, r2.Body.String())
+
+	// 5. 启用内置短信插件并开启注册短信验证码校验：不带验证码被拒；发送注册 OTP 后携带正确验证码注册成功
+	var smsInst models.PluginInstance
+	require.NoError(t, env.db.Where("name = ?", "console-sms-default").First(&smsInst).Error)
+	enSMS := doJSON(t, env.engine, http.MethodPut, fmt.Sprintf("/api/v1/plugins/%d", smsInst.ID), map[string]any{
+		"enabled": true,
+	}, adminToken)
+	require.Equal(t, http.StatusOK, enSMS.Code)
+
+	setSMSRegW := doJSON(t, env.engine, http.MethodPut, "/api/v1/system/settings", map[string]any{
+		"settings": map[string]string{
+			"security.register_email_mode":  "disabled",
+			"security.register_phone_mode":  "required",
+			"security.register_verify_mode": "sms",
+		},
+	}, adminToken)
+	require.Equal(t, http.StatusOK, setSMSRegW.Code, setSMSRegW.Body.String())
+
+	failReg := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "smsreguser",
+		"phone":    "+8613800991122",
+		"password": "SmsReg@1234",
+	}, "")
+	assert.Equal(t, http.StatusBadRequest, failReg.Code)
+
+	sendW := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/otp/send", map[string]string{
+		"scene":   "register",
+		"channel": "sms",
+		"target":  "+8613800991122",
+	}, "")
+	require.Equal(t, http.StatusOK, sendW.Code, sendW.Body.String())
+
+	// 从 miniredis 中读取保存的注册验证码
+	var otpCode string
+	for _, k := range env.mr.Keys() {
+		if strings.Contains(k, "register:+8613800991122") {
+			raw, gErr := env.mr.Get(k)
+			require.NoError(t, gErr)
+			var rec struct {
+				Code string `json:"code"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(raw), &rec))
+			otpCode = rec.Code
+			break
+		}
+	}
+	require.NotEmpty(t, otpCode, "expected register SMS OTP in Redis")
+
+	okReg := doJSON(t, env.engine, http.MethodPost, "/api/v1/auth/register", map[string]string{
+		"username": "smsreguser",
+		"phone":    "+8613800991122",
+		"password": "SmsReg@1234",
+		"sms_code": otpCode,
+	}, "")
+	require.Equal(t, http.StatusCreated, okReg.Code, okReg.Body.String())
+}

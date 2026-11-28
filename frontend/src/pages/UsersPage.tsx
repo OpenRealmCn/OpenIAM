@@ -18,7 +18,7 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
-import { Add as AddIcon, Key as KeyIcon, Security as RoleIcon } from '@mui/icons-material';
+import { Add as AddIcon, Edit as EditIcon, Key as KeyIcon, Security as RoleIcon } from '@mui/icons-material';
 import { DataGrid, GridActionsCellItem, GridColDef, GridToolbar } from '@mui/x-data-grid';
 import dayjs from 'dayjs';
 import { api } from '../api/client';
@@ -35,7 +35,11 @@ export const UsersPage: React.FC = () => {
 
   // 新建用户弹窗
   const [createOpen, setCreateOpen] = useState(false);
-  const [form, setForm] = useState({ username: '', email: '', display_name: '', password: '', role_code: 'viewer' });
+  const [form, setForm] = useState({ username: '', email: '', phone: '', display_name: '', password: '', role_code: 'viewer' });
+
+  // 编辑用户弹窗
+  const [editUser, setEditUser] = useState<User | null>(null);
+  const [editForm, setEditForm] = useState({ display_name: '', email: '', phone: '', avatar_url: '', status: 'active' });
 
   // 分配角色弹窗
   const [roleDialogUser, setRoleDialogUser] = useState<User | null>(null);
@@ -103,18 +107,47 @@ export const UsersPage: React.FC = () => {
     }
   };
 
+  const openEditUserDialog = (u: User) => {
+    setEditUser(u);
+    setEditForm({
+      display_name: u.display_name || '',
+      email: u.email || '',
+      phone: u.phone || '',
+      avatar_url: u.avatar_url || '',
+      status: u.status || 'active',
+    });
+  };
+
+  const handleSaveEditUser = async () => {
+    if (!editUser) return;
+    try {
+      await api.users.update(editUser.id, {
+        display_name: editForm.display_name.trim(),
+        email: editForm.email.trim(),
+        phone: editForm.phone.trim(),
+        avatar_url: editForm.avatar_url.trim(),
+        status: editForm.status,
+      });
+      setEditUser(null);
+      await loadUsers();
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
   const handleCreateUser = async () => {
     try {
       await api.users.create({
         username: form.username,
-        email: form.email,
+        email: form.email.trim(),
+        phone: form.phone.trim(),
         display_name: form.display_name,
         password: form.password,
         domain_code: currentDomain,
         role_codes: form.role_code ? [form.role_code] : [],
       });
       setCreateOpen(false);
-      setForm({ username: '', email: '', display_name: '', password: '', role_code: 'viewer' });
+      setForm({ username: '', email: '', phone: '', display_name: '', password: '', role_code: 'viewer' });
       await loadUsers();
     } catch (err) {
       setError((err as Error).message);
@@ -146,7 +179,8 @@ export const UsersPage: React.FC = () => {
     { field: 'id', headerName: 'ID', width: 70 },
     { field: 'username', headerName: '用户名', width: 140 },
     { field: 'display_name', headerName: '显示名称', width: 140 },
-    { field: 'email', headerName: '邮箱', width: 210 },
+    { field: 'email', headerName: '邮箱', width: 200, valueFormatter: (v) => (v ? String(v) : '-') },
+    { field: 'phone', headerName: '手机号', width: 140, valueFormatter: (v) => (v ? String(v) : '-') },
     {
       field: 'roles',
       headerName: '域角色授权',
@@ -187,8 +221,15 @@ export const UsersPage: React.FC = () => {
       field: 'actions',
       type: 'actions',
       headerName: '操作',
-      width: 150,
+      width: 175,
       getActions: (params) => [
+        <GridActionsCellItem
+          key="edit"
+          icon={<EditIcon />}
+          label="编辑用户"
+          onClick={() => openEditUserDialog(params.row)}
+          showInMenu={false}
+        />,
         <GridActionsCellItem
           key="roles"
           icon={<RoleIcon />}
@@ -267,12 +308,18 @@ export const UsersPage: React.FC = () => {
               onChange={(e) => setForm({ ...form, username: e.target.value })}
             />
             <TextField
-              label="邮箱"
+              label="邮箱（选填）"
               size="small"
               type="email"
-              required
               value={form.email}
               onChange={(e) => setForm({ ...form, email: e.target.value })}
+            />
+            <TextField
+              label="手机号（选填）"
+              size="small"
+              value={form.phone}
+              placeholder="例如：+8613800138000"
+              onChange={(e) => setForm({ ...form, phone: e.target.value })}
             />
             <TextField
               label="显示名称"
@@ -300,6 +347,59 @@ export const UsersPage: React.FC = () => {
           <Button onClick={() => setCreateOpen(false)}>取消</Button>
           <Button variant="contained" onClick={handleCreateUser}>
             创建
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* 编辑用户弹窗 */}
+      <Dialog open={Boolean(editUser)} onClose={() => setEditUser(null)} maxWidth="xs" fullWidth>
+        <DialogTitle>编辑用户 — {editUser?.username}</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} mt={1}>
+            <TextField label="用户名" size="small" value={editUser?.username || ''} disabled />
+            <TextField
+              label="显示名称"
+              size="small"
+              value={editForm.display_name}
+              onChange={(e) => setEditForm({ ...editForm, display_name: e.target.value })}
+            />
+            <TextField
+              label="邮箱"
+              type="email"
+              size="small"
+              value={editForm.email}
+              onChange={(e) => setEditForm({ ...editForm, email: e.target.value })}
+            />
+            <TextField
+              label="手机号"
+              size="small"
+              placeholder="例如：+8613800138000"
+              value={editForm.phone}
+              onChange={(e) => setEditForm({ ...editForm, phone: e.target.value })}
+            />
+            <TextField
+              label="头像地址"
+              size="small"
+              value={editForm.avatar_url}
+              onChange={(e) => setEditForm({ ...editForm, avatar_url: e.target.value })}
+            />
+            <FormControl size="small" fullWidth>
+              <InputLabel>账号状态</InputLabel>
+              <Select
+                label="账号状态"
+                value={editForm.status}
+                onChange={(e) => setEditForm({ ...editForm, status: e.target.value })}
+              >
+                <MenuItem value="active">正常</MenuItem>
+                <MenuItem value="disabled">已禁用</MenuItem>
+              </Select>
+            </FormControl>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditUser(null)}>取消</Button>
+          <Button variant="contained" onClick={handleSaveEditUser}>
+            保存
           </Button>
         </DialogActions>
       </Dialog>

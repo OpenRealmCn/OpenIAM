@@ -13,6 +13,9 @@ const DEFAULT_SITE_INFO: SiteInfo = {
   announcement_type: 'info',
   footer_text: '© OpenRealm · OpenIAM',
   allow_public_register: true,
+  register_email_mode: 'required',
+  register_phone_mode: 'disabled',
+  register_verify_mode: 'none',
   smtp_enabled: false,
 };
 

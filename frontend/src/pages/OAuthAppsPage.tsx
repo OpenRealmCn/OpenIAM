@@ -11,8 +11,12 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  FormControl,
   FormControlLabel,
   IconButton,
+  InputLabel,
+  MenuItem,
+  Select,
   Stack,
   TextField,
   Tooltip,
@@ -22,6 +26,7 @@ import {
   Add as AddIcon,
   ContentCopy as CopyIcon,
   Delete as DeleteIcon,
+  Edit as EditIcon,
   Key as CodeIcon,
   Refresh as RotateIcon,
 } from '@mui/icons-material';
@@ -39,7 +44,8 @@ export const OAuthAppsPage: React.FC = () => {
   const [refreshCount, setRefreshCount] = useState(0);
   const [error, setError] = useState('');
 
-  const [createOpen, setCreateOpen] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editingClient, setEditingClient] = useState<OAuthClient | null>(null);
   const [form, setForm] = useState({
     name: '',
     description: '',
@@ -47,6 +53,7 @@ export const OAuthAppsPage: React.FC = () => {
     scopes_text: 'openid profile email',
     require_pkce: true,
     is_confidential: true,
+    status: 'active',
   });
 
   const [secretModal, setSecretModal] = useState<{ client_id: string; client_secret: string } | null>(null);
@@ -87,37 +94,86 @@ export const OAuthAppsPage: React.FC = () => {
     loadClients();
   };
 
-  const handleCreate = async () => {
+  const openCreateDialog = () => {
+    setEditingClient(null);
+    setForm({
+      name: '',
+      description: '',
+      redirect_uris_text: '',
+      scopes_text: 'openid profile email',
+      require_pkce: true,
+      is_confidential: true,
+      status: 'active',
+    });
+    setDialogOpen(true);
+  };
+
+  const openEditDialog = (row: OAuthClient) => {
+    setEditingClient(row);
+    setForm({
+      name: row.name || '',
+      description: row.description || '',
+      redirect_uris_text: (row.redirect_uris || []).join('\n'),
+      scopes_text: (row.scopes || ['openid', 'profile', 'email']).join(' '),
+      require_pkce: Boolean(row.require_pkce),
+      is_confidential: Boolean(row.is_confidential),
+      status: row.status || 'active',
+    });
+    setDialogOpen(true);
+  };
+
+  const handleSaveApp = async () => {
     try {
       const redirect_uris = form.redirect_uris_text
         .split('\n')
         .map((s) => s.trim())
         .filter(Boolean);
       const scopes = form.scopes_text.split(/\s+/).filter(Boolean);
-      const payload = {
-        name: form.name,
-        description: form.description,
-        domain_code: currentDomain,
-        redirect_uris,
-        grant_types: ['authorization_code', 'refresh_token', 'client_credentials'],
-        scopes,
-        require_pkce: form.require_pkce,
-        is_confidential: form.is_confidential,
-      };
-      const res = selfServiceMode
-        ? await api.myOAuthClients.create(payload)
-        : await api.oauthClients.create(payload);
-      setCreateOpen(false);
-      setForm({
-        name: '',
-        description: '',
-        redirect_uris_text: '',
-        scopes_text: 'openid profile email',
-        require_pkce: true,
-        is_confidential: true,
-      });
-      if (res.client_secret) {
-        setSecretModal({ client_id: res.client.client_id, client_secret: res.client_secret });
+
+      if (editingClient) {
+        const grantTypes =
+          editingClient.grant_types && editingClient.grant_types.length > 0
+            ? editingClient.grant_types
+            : ['authorization_code', 'refresh_token'];
+        const updatePayload: Record<string, unknown> = {
+          name: form.name.trim(),
+          description: form.description.trim(),
+          redirect_uris,
+          grant_types: grantTypes,
+          scopes,
+          require_pkce: form.require_pkce,
+          is_confidential: form.is_confidential,
+        };
+        if (!selfServiceMode) {
+          updatePayload.status = form.status;
+        }
+        const res = selfServiceMode
+          ? await api.myOAuthClients.update(editingClient.id, updatePayload)
+          : await api.oauthClients.update(editingClient.id, updatePayload);
+        setDialogOpen(false);
+        if (res?.client_secret) {
+          setSecretModal({ client_id: res.client_id, client_secret: res.client_secret });
+        }
+      } else {
+        const payload = {
+          name: form.name.trim(),
+          description: form.description.trim(),
+          domain_code: currentDomain,
+          redirect_uris,
+          grant_types: selfServiceMode
+            ? ['authorization_code', 'refresh_token']
+            : ['authorization_code', 'refresh_token', 'client_credentials'],
+          scopes,
+          require_pkce: form.require_pkce,
+          is_confidential: form.is_confidential,
+        };
+        const res = selfServiceMode
+          ? await api.myOAuthClients.create(payload)
+          : await api.oauthClients.create(payload);
+        setDialogOpen(false);
+        if (res.client_secret) {
+          setSecretModal({ client_id: res.client.client_id, client_secret: res.client_secret });
+        }
       }
       await loadClients();
     } catch (err) {
@@ -193,15 +249,35 @@ export const OAuthAppsPage: React.FC = () => {
     {
       field: 'require_pkce',
       headerName: 'PKCE',
-      width: 80,
+      width: 85,
       renderCell: (p) => <Chip size="small" label={p.value ? '强制' : '可选'} color={p.value ? 'primary' : 'default'} />,
+    },
+    {
+      field: 'is_confidential',
+      headerName: '客户端类型',
+      width: 100,
+      renderCell: (p) => <Chip size="small" variant="outlined" label={p.value ? '机密' : '公开'} />,
+    },
+    {
+      field: 'status',
+      headerName: '状态',
+      width: 90,
+      renderCell: (p) => (
+        <Chip size="small" color={p.value === 'active' ? 'success' : 'default'} label={p.value === 'active' ? '正常' : '已停用'} />
+      ),
     },
     {
       field: 'actions',
       type: 'actions',
       headerName: '操作',
-      width: 140,
+      width: 170,
       getActions: (p) => [
+        <GridActionsCellItem
+          key="edit"
+          icon={<EditIcon />}
+          label="编辑应用"
+          onClick={() => openEditDialog(p.row)}
+        />,
         <GridActionsCellItem
           key="code"
           icon={<CodeIcon />}
@@ -255,7 +331,7 @@ export const OAuthAppsPage: React.FC = () => {
           >
             刷新
           </Button>
-          <Button variant="contained" startIcon={<AddIcon />} onClick={() => setCreateOpen(true)}>
+          <Button variant="contained" startIcon={<AddIcon />} onClick={openCreateDialog}>
             创建应用
           </Button>
         </Stack>
@@ -293,9 +369,11 @@ export const OAuthAppsPage: React.FC = () => {
         />
       </Box>
 
-      {/* 创建应用弹窗 */}
-      <Dialog open={createOpen} onClose={() => setCreateOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>创建 OAuth 2.0 应用 ({currentDomain})</DialogTitle>
+      {/* 创建 / 编辑应用弹窗 */}
+      <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>
+          {editingClient ? `编辑 OAuth 应用 — ${editingClient.name}` : `创建 OAuth 2.0 应用 (${currentDomain})`}
+        </DialogTitle>
         <DialogContent>
           <Stack spacing={2} mt={1}>
             <TextField
@@ -327,6 +405,19 @@ export const OAuthAppsPage: React.FC = () => {
               value={form.scopes_text}
               onChange={(e) => setForm({ ...form, scopes_text: e.target.value })}
             />
+            {editingClient && !selfServiceMode && (
+              <FormControl size="small" fullWidth>
+                <InputLabel>应用状态</InputLabel>
+                <Select
+                  label="应用状态"
+                  value={form.status}
+                  onChange={(e) => setForm({ ...form, status: e.target.value })}
+                >
+                  <MenuItem value="active">正常</MenuItem>
+                  <MenuItem value="disabled">已停用</MenuItem>
+                </Select>
+              </FormControl>
+            )}
             <Stack direction="row" spacing={2}>
               <FormControlLabel
                 control={
@@ -344,15 +435,15 @@ export const OAuthAppsPage: React.FC = () => {
                     onChange={(e) => setForm({ ...form, is_confidential: e.target.checked })}
                   />
                 }
-                label="机密客户端 (生成 Secret)"
+                label="机密客户端 (使用 Secret)"
               />
             </Stack>
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setCreateOpen(false)}>取消</Button>
-          <Button variant="contained" onClick={handleCreate}>
-            创建应用
+          <Button onClick={() => setDialogOpen(false)}>取消</Button>
+          <Button variant="contained" onClick={handleSaveApp}>
+            {editingClient ? '保存修改' : '创建应用'}
           </Button>
         </DialogActions>
       </Dialog>

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -112,7 +113,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	snap := h.settingsSvc.Snapshot()
 
 	var user models.User
-	if err := h.db.Where("username = ? OR email = ?", username, username).First(&user).Error; err != nil {
+	if err := h.db.Where("username = ? OR (email <> '' AND LOWER(email) = ?)", username, strings.ToLower(username)).First(&user).Error; err != nil {
 		_, locked, _ := h.stateStore.RecordLoginFailure(ctx, username, snap.MaxLoginFailures, time.Duration(snap.LockoutMinutes)*time.Minute)
 		msg := "用户名或密码错误"
 		if locked {
@@ -304,14 +305,18 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 type registerReq struct {
 	Username     string `json:"username" binding:"required,min=3,max=64,excludes=@"`
-	Email        string `json:"email" binding:"required,email"`
+	Email        string `json:"email"`
+	Phone        string `json:"phone"`
 	Password     string `json:"password" binding:"required,min=8,maxbytes=72"`
 	DisplayName  string `json:"display_name"`
+	EmailCode    string `json:"email_code"`
+	SMSCode      string `json:"sms_code"`
 	CaptchaToken string `json:"captcha_token"`
 }
 
 func (h *AuthHandler) Register(c *gin.Context) {
-	if !h.settingsSvc.Snapshot().AllowPublicRegister {
+	snap := h.settingsSvc.Snapshot()
+	if !snap.AllowPublicRegister {
 		Fail(c, http.StatusForbidden, "系统管理员已关闭自助注册功能")
 		return
 	}
@@ -327,11 +332,134 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		}
 	}
 
-	var count int64
-	h.db.Model(&models.User{}).Where("username = ? OR email = ?", req.Username, req.Email).Count(&count)
-	if count > 0 {
-		Fail(c, http.StatusConflict, "用户名或邮箱已被占用")
+	verifyMode := snap.RegisterVerifyMode
+	if verifyMode == "" {
+		verifyMode = "none"
+	}
+	emailRequired := snap.RegisterEmailMode == "required" || verifyMode == "email" || verifyMode == "both"
+	phoneRequired := snap.RegisterPhoneMode == "required" || verifyMode == "sms" || verifyMode == "both"
+	emailEnabled := snap.RegisterEmailMode != "disabled" || verifyMode == "email" || verifyMode == "both" || verifyMode == "either"
+	phoneEnabled := snap.RegisterPhoneMode != "disabled" || verifyMode == "sms" || verifyMode == "both" || verifyMode == "either"
+
+	username := strings.TrimSpace(req.Username)
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	phone := strings.TrimSpace(req.Phone)
+
+	if !emailEnabled {
+		email = ""
+	} else {
+		if emailRequired && email == "" {
+			Fail(c, http.StatusBadRequest, "请填写邮箱地址")
+			return
+		}
+		if email != "" {
+			if addr, err := mail.ParseAddress(email); err != nil || !strings.EqualFold(addr.Address, email) {
+				Fail(c, http.StatusBadRequest, "邮箱格式无效")
+				return
+			}
+		}
+	}
+
+	if !phoneEnabled {
+		phone = ""
+	} else {
+		if phoneRequired && phone == "" {
+			Fail(c, http.StatusBadRequest, "请填写手机号")
+			return
+		}
+		if phone != "" && !phonePattern.MatchString(phone) {
+			Fail(c, http.StatusBadRequest, "手机号格式无效，需为 6~20 位数字（可带国际区号前缀 +）")
+			return
+		}
+	}
+
+	if verifyMode == "either" && email == "" && phone == "" {
+		Fail(c, http.StatusBadRequest, "请至少填写邮箱或手机号完成验证码校验")
 		return
+	}
+
+	var count int64
+	h.db.Model(&models.User{}).Where("username = ?", username).Count(&count)
+	if count > 0 {
+		Fail(c, http.StatusConflict, "用户名已被占用")
+		return
+	}
+	if email != "" {
+		h.db.Model(&models.User{}).Where("email <> '' AND LOWER(email) = ?", email).Count(&count)
+		if count > 0 {
+			Fail(c, http.StatusConflict, "邮箱已被占用")
+			return
+		}
+	}
+	if phone != "" {
+		h.db.Model(&models.User{}).Where("phone <> '' AND phone = ?", phone).Count(&count)
+		if count > 0 {
+			Fail(c, http.StatusConflict, "手机号已被占用")
+			return
+		}
+	}
+
+	if verifyMode != "none" {
+		if h.otpSvc == nil {
+			Fail(c, http.StatusServiceUnavailable, "验证码服务未初始化")
+			return
+		}
+		ctx := c.Request.Context()
+		switch verifyMode {
+		case "email":
+			if strings.TrimSpace(req.EmailCode) == "" {
+				Fail(c, http.StatusBadRequest, "请填写邮箱验证码")
+				return
+			}
+			if _, vErr := h.otpSvc.VerifyCode(ctx, "register", email, req.EmailCode); vErr != nil {
+				Fail(c, http.StatusBadRequest, "邮箱验证码无效或已过期: "+vErr.Error())
+				return
+			}
+		case "sms":
+			if strings.TrimSpace(req.SMSCode) == "" {
+				Fail(c, http.StatusBadRequest, "请填写手机短信验证码")
+				return
+			}
+			if _, vErr := h.otpSvc.VerifyCode(ctx, "register", phone, req.SMSCode); vErr != nil {
+				Fail(c, http.StatusBadRequest, "短信验证码无效或已过期: "+vErr.Error())
+				return
+			}
+		case "both":
+			if strings.TrimSpace(req.EmailCode) == "" || strings.TrimSpace(req.SMSCode) == "" {
+				Fail(c, http.StatusBadRequest, "请同时填写邮箱验证码和短信验证码")
+				return
+			}
+			if _, vErr := h.otpSvc.VerifyCode(ctx, "register", email, req.EmailCode); vErr != nil {
+				Fail(c, http.StatusBadRequest, "邮箱验证码无效或已过期: "+vErr.Error())
+				return
+			}
+			if _, vErr := h.otpSvc.VerifyCode(ctx, "register", phone, req.SMSCode); vErr != nil {
+				Fail(c, http.StatusBadRequest, "短信验证码无效或已过期: "+vErr.Error())
+				return
+			}
+		case "either":
+			verified := false
+			if email != "" && strings.TrimSpace(req.EmailCode) != "" {
+				if _, vErr := h.otpSvc.VerifyCode(ctx, "register", email, req.EmailCode); vErr == nil {
+					verified = true
+				} else {
+					Fail(c, http.StatusBadRequest, "邮箱验证码无效或已过期: "+vErr.Error())
+					return
+				}
+			}
+			if !verified && phone != "" && strings.TrimSpace(req.SMSCode) != "" {
+				if _, vErr := h.otpSvc.VerifyCode(ctx, "register", phone, req.SMSCode); vErr == nil {
+					verified = true
+				} else {
+					Fail(c, http.StatusBadRequest, "短信验证码无效或已过期: "+vErr.Error())
+					return
+				}
+			}
+			if !verified {
+				Fail(c, http.StatusBadRequest, "请完成邮箱或手机短信验证码校验")
+				return
+			}
+		}
 	}
 
 	hash, err := security.HashPassword(req.Password)
@@ -342,11 +470,12 @@ func (h *AuthHandler) Register(c *gin.Context) {
 
 	displayName := strings.TrimSpace(req.DisplayName)
 	if displayName == "" {
-		displayName = req.Username
+		displayName = username
 	}
 	user := models.User{
-		Username:     strings.TrimSpace(req.Username),
-		Email:        strings.TrimSpace(req.Email),
+		Username:     username,
+		Email:        email,
+		Phone:        phone,
 		DisplayName:  displayName,
 		PasswordHash: hash,
 		Status:       "active",
@@ -878,7 +1007,7 @@ func (h *AuthHandler) OTPLogin(c *gin.Context) {
 	if rec.UserID > 0 {
 		err = h.db.First(&user, rec.UserID).Error
 	} else {
-		err = h.db.Where("email = ? OR phone = ?", target, target).First(&user).Error
+		err = h.db.Where("(email <> '' AND LOWER(email) = ?) OR (phone <> '' AND phone = ?)", strings.ToLower(target), target).First(&user).Error
 	}
 	if err != nil || user.Status != "active" {
 		Fail(c, http.StatusUnauthorized, "该邮箱或手机号尚未绑定有效账号")

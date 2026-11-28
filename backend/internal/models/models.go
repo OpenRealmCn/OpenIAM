@@ -94,8 +94,8 @@ func (Domain) TableName() string { return "domains" }
 type User struct {
 	ID           uint64 `gorm:"primaryKey" json:"id"`
 	Username     string `gorm:"size:64;uniqueIndex;not null" json:"username"`
-	Email        string `gorm:"size:128;uniqueIndex;not null" json:"email"`
-	Phone        string `gorm:"size:32;not null;default:''" json:"phone"`
+	Email        string `gorm:"size:128;index;not null;default:''" json:"email"`
+	Phone        string `gorm:"size:32;index;not null;default:''" json:"phone"`
 	DisplayName  string `gorm:"size:128;not null;default:''" json:"display_name"`
 	PasswordHash string `gorm:"size:255;not null;default:''" json:"-"`
 	AvatarURL    string `gorm:"size:512;not null;default:''" json:"avatar_url"`
@@ -150,8 +150,8 @@ type OAuthClient struct {
 	RedirectURIs     StringSlice `gorm:"type:json;not null" json:"redirect_uris"`
 	GrantTypes       StringSlice `gorm:"type:json;not null" json:"grant_types"`
 	Scopes           StringSlice `gorm:"type:json;not null" json:"scopes"`
-	RequirePKCE      bool        `gorm:"not null;default:true" json:"require_pkce"`
-	IsConfidential   bool        `gorm:"not null;default:true" json:"is_confidential"`
+	RequirePKCE      bool        `gorm:"not null" json:"require_pkce"`
+	IsConfidential   bool        `gorm:"not null" json:"is_confidential"`
 	Status           string      `gorm:"size:32;not null;default:'active'" json:"status"`
 	CreatedBy        uint64      `gorm:"not null;default:0" json:"created_by"`
 	CreatedAt        time.Time   `json:"created_at"`
@@ -170,7 +170,7 @@ type OAuthProvider struct {
 	ClientSecret string    `gorm:"size:512;not null;default:''" json:"-"`
 	Scopes       string    `gorm:"size:512;not null;default:''" json:"scopes"`
 	ExtraConfig  JSONMap   `gorm:"type:json" json:"extra_config"`
-	AutoRegister bool      `gorm:"not null;default:true" json:"auto_register"`
+	AutoRegister bool      `gorm:"not null" json:"auto_register"`
 	Enabled      bool      `gorm:"not null;default:false" json:"enabled"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`

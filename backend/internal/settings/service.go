@@ -17,6 +17,9 @@ const (
 	KeySecurityMaxLoginFailures     = "security.max_login_failures"
 	KeySecurityLockoutMinutes       = "security.lockout_minutes"
 	KeySecurityAllowPublicRegister  = "security.allow_public_register"
+	KeySecurityRegisterEmailMode    = "security.register_email_mode"
+	KeySecurityRegisterPhoneMode    = "security.register_phone_mode"
+	KeySecurityRegisterVerifyMode   = "security.register_verify_mode"
 	KeySecurityAllowPrivateUpstream = "security.allow_private_upstream"
 
 	KeyJWTIssuer               = "jwt.issuer"
@@ -88,6 +91,9 @@ type RuntimeSettings struct {
 	MaxLoginFailures     int
 	LockoutMinutes       int
 	AllowPublicRegister  bool
+	RegisterEmailMode    string
+	RegisterPhoneMode    string
+	RegisterVerifyMode   string
 	AllowPrivateUpstream bool
 
 	JWTIssuer     string
@@ -182,6 +188,30 @@ var defaultSpecs = []settingSpec{
 		ValueType:   "bool",
 		Label:       "开放用户自主注册",
 		Description: "关闭后仅允许管理员在控制台创建账号。",
+	},
+	{
+		Key:         KeySecurityRegisterEmailMode,
+		Category:    "security",
+		DefaultVal:  "required",
+		ValueType:   "string",
+		Label:       "注册邮箱收集方式",
+		Description: "控制自助注册页是否收集邮箱地址（关闭 / 选填 / 必填）；开启邮箱验证码校验时需保证用户填写邮箱。",
+	},
+	{
+		Key:         KeySecurityRegisterPhoneMode,
+		Category:    "security",
+		DefaultVal:  "disabled",
+		ValueType:   "string",
+		Label:       "注册手机号收集方式",
+		Description: "控制自助注册页是否收集手机号（关闭 / 选填 / 必填）；开启短信验证码校验时需保证用户填写手机号。",
+	},
+	{
+		Key:         KeySecurityRegisterVerifyMode,
+		Category:    "security",
+		DefaultVal:  "none",
+		ValueType:   "string",
+		Label:       "注册验证码校验方式",
+		Description: "设置在自助注册时是否必须通过邮箱或手机短信验证码校验（无需验证码 / 邮箱验证码 / 短信验证码 / 二选一 / 两者均需）。",
 	},
 	{
 		Key:         KeySecurityAllowPrivateUpstream,
@@ -648,6 +678,9 @@ func (s *Service) Reload() error {
 		MaxLoginFailures:              parseInt(kv[KeySecurityMaxLoginFailures], 5),
 		LockoutMinutes:                parseInt(kv[KeySecurityLockoutMinutes], 15),
 		AllowPublicRegister:           parseBool(kv[KeySecurityAllowPublicRegister], true),
+		RegisterEmailMode:             fallbackStr(kv[KeySecurityRegisterEmailMode], "required"),
+		RegisterPhoneMode:             fallbackStr(kv[KeySecurityRegisterPhoneMode], "disabled"),
+		RegisterVerifyMode:            fallbackStr(kv[KeySecurityRegisterVerifyMode], "none"),
 		AllowPrivateUpstream:          parseBool(kv[KeySecurityAllowPrivateUpstream], false),
 		JWTIssuer:                     fallbackStr(kv[KeyJWTIssuer], "http://localhost:5173"),
 		JWTAccessTTL:                  time.Duration(parseInt(kv[KeyJWTAccessTokenTTLMin], 30)) * time.Minute,
