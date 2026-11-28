@@ -786,8 +786,21 @@ func (h *AuthHandler) VerifyMFA(c *gin.Context) {
 			Fail(c, http.StatusBadRequest, "未启用 TOTP 验证器")
 			return
 		}
-		if !totp.VerifyCode(row.Secret, code, time.Now()) {
+		step, stepOK := totp.VerifyCodeStep(row.Secret, code, time.Now())
+		if !stepOK {
 			h.mfaFailed(c, req.MFAToken, user.ID, "验证器动态码不正确")
+			return
+		}
+		// 同一时间步的动态码只能用一次：把水位原子前移，重放同一串码时 0 行受影响直接拒绝。
+		res := h.db.Model(&models.UserTOTP{}).
+			Where("user_id = ? AND last_used_step < ?", row.UserID, step).
+			Update("last_used_step", step)
+		if res.Error != nil {
+			Fail(c, http.StatusInternalServerError, "二步验证状态异常，请稍后再试")
+			return
+		}
+		if res.RowsAffected == 0 {
+			h.mfaFailed(c, req.MFAToken, user.ID, "该动态码已被使用，请等待下一个口令")
 			return
 		}
 	case "recovery_code":

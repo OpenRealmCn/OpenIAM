@@ -273,8 +273,10 @@ type UserTOTP struct {
 	Enabled           bool       `gorm:"not null;default:false" json:"enabled"`
 	VerifiedAt        *time.Time `json:"verified_at"`
 	RecoveryCodesJSON string     `gorm:"type:text;not null" json:"-"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
+	// LastUsedStep 记录已经用掉的最大 TOTP 时间步，用于拒绝同一串动态码的重放。
+	LastUsedStep int64      `gorm:"not null;default:0" json:"-"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 func (UserTOTP) TableName() string { return "user_totp" }
